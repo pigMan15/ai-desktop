@@ -1,0 +1,15 @@
+id: generic-demo
+name: Generic Demo
+version: "1"
+nodes:
+  - id: build
+    name: Build
+    kind: agent
+    gates: [tests]
+edges: []
+roles: []
+gates:
+  - id: tests
+    name: Tests
+policies: {}
+metadata: {}

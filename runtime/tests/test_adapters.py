@@ -4,8 +4,10 @@ import pytest
 import yaml
 
 from workflow_platform.adapters.base import DetectionResult
+from workflow_platform.adapters.generic_yaml import GenericYamlAdapter
 from workflow_platform.adapters.harness import HarnessAdapter
-from workflow_platform.adapters.registry import AdapterRegistry
+from workflow_platform.adapters.markdown_checklist import MarkdownChecklistAdapter
+from workflow_platform.adapters.registry import AdapterRegistry, default_registry
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -143,3 +145,26 @@ def test_harness_import_rejects_non_mapping_metadata(fixture_name: str) -> None:
     assert "metadata" in message
     assert "mapping" in message
     assert str(workflow_path) in message
+
+
+def test_markdown_checklist_adapter_imports_checked_tasks_as_workflow() -> None:
+    workflow = MarkdownChecklistAdapter().import_workflow(
+        FIXTURES / "markdown_checklist_project"
+    )
+    assert workflow.sourceAdapter == "markdown-checklist"
+    assert [node.id for node in workflow.nodes] == ["step-1", "step-2"]
+    assert workflow.edges[0].from_ == "step-1"
+    assert workflow.edges[0].to == "step-2"
+
+
+def test_generic_yaml_adapter_imports_canonical_schema() -> None:
+    workflow = GenericYamlAdapter().import_workflow(FIXTURES / "generic_yaml_project")
+    assert workflow.sourceAdapter == "generic-yaml"
+    assert workflow.nodes[0].kind == "agent"
+    assert workflow.gates[0].id == "tests"
+
+
+def test_registry_includes_three_p1_adapters() -> None:
+    registry = default_registry()
+    results = registry.detect(FIXTURES / "markdown_checklist_project")
+    assert results[0].adapter_id == "markdown-checklist"
