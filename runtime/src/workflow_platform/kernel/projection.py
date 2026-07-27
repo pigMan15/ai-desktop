@@ -1,0 +1,183 @@
+from collections.abc import Iterable
+
+from workflow_platform.models import (
+    AllowedAction,
+    BlockingReason,
+    NodeState,
+    RunEvent,
+    RunProjection,
+    WorkflowDefinition,
+)
+
+
+ACTIVE_NODE_STATES = {
+    "READY",
+    "RUNNING",
+    "AWAITING_ARTIFACT",
+    "AWAITING_APPROVAL",
+    "AWAITING_GATE",
+    "BLOCKED",
+}
+
+
+def rebuild_projection(
+    run_id: str,
+    workflow: WorkflowDefinition,
+    events: Iterable[RunEvent],
+) -> RunProjection:
+    ordered_events = list(events)
+    node_states: dict[str, NodeState] = {node.id: "PENDING" for node in workflow.nodes}
+    if workflow.nodes:
+        node_states[workflow.nodes[0].id] = "READY"
+
+    status = "CREATED"
+    updated_at = ordered_events[-1].createdAt if ordered_events else ""
+
+    for run_event in ordered_events:
+        if run_event.runId != run_id:
+            continue
+
+        if run_event.type == "NODE_STARTED" and run_event.nodeId:
+            node_states[run_event.nodeId] = "RUNNING"
+            status = "IN_PROGRESS"
+        elif run_event.type == "ARTIFACT_SUBMITTED" and run_event.nodeId:
+            node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+            status = "REVIEWING"
+        elif run_event.type in {"HUMAN_APPROVED", "GATE_PASSED"} and run_event.nodeId:
+            node_states[run_event.nodeId] = "PASSED"
+            next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
+            if next_node_id is None:
+                status = "DONE"
+            else:
+                node_states[next_node_id] = "READY"
+                status = "IN_PROGRESS"
+        elif run_event.type in {"HUMAN_REJECTED", "GATE_FAILED"} and run_event.nodeId:
+            node_states[run_event.nodeId] = "BLOCKED"
+            status = "BLOCKED"
+        elif run_event.type == "GATE_STARTED" and run_event.nodeId:
+            node_states[run_event.nodeId] = "AWAITING_GATE"
+            status = "REVIEWING"
+        elif run_event.type == "RUN_BLOCKED":
+            status = "BLOCKED"
+        elif run_event.type == "RUN_COMPLETED":
+            status = "DONE"
+
+    if status == "DONE":
+        current_node_ids: list[str] = []
+    else:
+        current_node_ids = [
+            node.id for node in workflow.nodes if node_states[node.id] in ACTIVE_NODE_STATES
+        ]
+
+    allowed_actions = _allowed_actions(node_states, current_node_ids)
+    blocking_reasons = _blocking_reasons(node_states, current_node_ids)
+
+    return RunProjection(
+        runId=run_id,
+        status=status,
+        currentNodeIds=current_node_ids,
+        nodeStates=node_states,
+        allowedActions=allowed_actions,
+        blockingReasons=blocking_reasons,
+        revision=str(len(ordered_events)),
+        updatedAt=updated_at,
+    )
+
+
+def _first_outgoing_target(workflow: WorkflowDefinition, node_id: str) -> str | None:
+    for edge in workflow.edges:
+        if edge.from_ == node_id:
+            return edge.to
+    return None
+
+
+def _allowed_actions(
+    node_states: dict[str, NodeState],
+    current_node_ids: list[str],
+) -> list[AllowedAction]:
+    actions: list[AllowedAction] = []
+    for node_id in current_node_ids:
+        state = node_states[node_id]
+        if state == "READY":
+            actions.append(
+                AllowedAction(
+                    id=f"start:{node_id}",
+                    label="Start node",
+                    eventType="NODE_STARTED",
+                    nodeId=node_id,
+                    risk="low",
+                )
+            )
+        elif state == "AWAITING_APPROVAL":
+            actions.extend(
+                [
+                    AllowedAction(
+                        id=f"approve:{node_id}",
+                        label="Approve",
+                        eventType="HUMAN_APPROVED",
+                        nodeId=node_id,
+                        risk="high",
+                    ),
+                    AllowedAction(
+                        id=f"reject:{node_id}",
+                        label="Reject",
+                        eventType="HUMAN_REJECTED",
+                        nodeId=node_id,
+                        risk="high",
+                    ),
+                ]
+            )
+        elif state == "AWAITING_GATE":
+            actions.extend(
+                [
+                    AllowedAction(
+                        id=f"gate-pass:{node_id}",
+                        label="Pass gate",
+                        eventType="GATE_PASSED",
+                        nodeId=node_id,
+                        risk="medium",
+                    ),
+                    AllowedAction(
+                        id=f"gate-fail:{node_id}",
+                        label="Fail gate",
+                        eventType="GATE_FAILED",
+                        nodeId=node_id,
+                        risk="medium",
+                    ),
+                ]
+            )
+    return actions
+
+
+def _blocking_reasons(
+    node_states: dict[str, NodeState],
+    current_node_ids: list[str],
+) -> list[BlockingReason]:
+    reasons: list[BlockingReason] = []
+    for node_id in current_node_ids:
+        state = node_states[node_id]
+        if state == "AWAITING_APPROVAL":
+            reasons.append(
+                BlockingReason(
+                    code="WAITING_FOR_HUMAN",
+                    message="Approval is required",
+                    nodeId=node_id,
+                )
+            )
+        elif state == "AWAITING_GATE":
+            reasons.append(
+                BlockingReason(
+                    code="WAITING_FOR_GATE",
+                    message="Gate verification is required",
+                    nodeId=node_id,
+                )
+            )
+        elif state == "BLOCKED":
+            reasons.append(
+                BlockingReason(
+                    code="NODE_BLOCKED",
+                    message="Node is blocked",
+                    nodeId=node_id,
+                )
+            )
+    return reasons
