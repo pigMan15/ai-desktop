@@ -125,3 +125,20 @@ def test_harness_import_wraps_validation_error_with_context() -> None:
     message = str(exc_info.value)
     assert "Harness workflow 导入失败" in message
     assert str(workflow_path) in message
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["metadata_null_harness_project", "metadata_list_harness_project"],
+)
+def test_harness_import_rejects_non_mapping_metadata(fixture_name: str) -> None:
+    project_path = FIXTURES / fixture_name
+    workflow_path = project_path / ".harness" / "workflow.yaml"
+
+    with pytest.raises(ValueError) as exc_info:
+        HarnessAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "metadata" in message
+    assert "mapping" in message
+    assert str(workflow_path) in message

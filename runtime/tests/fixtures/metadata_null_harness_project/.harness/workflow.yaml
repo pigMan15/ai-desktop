@@ -1,0 +1,9 @@
+id: metadata-null-workflow
+name: Metadata Null Workflow
+version: "1.0"
+nodes: []
+edges: []
+roles: []
+gates: []
+policies: {}
+metadata: null

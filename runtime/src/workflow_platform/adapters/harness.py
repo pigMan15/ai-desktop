@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +55,17 @@ class HarnessAdapter:
                 f"Harness workflow \u9876\u5c42\u5fc5\u987b\u662f mapping: {workflow_path}"
             )
 
+        metadata = raw_workflow.get("metadata", {})
+        if "metadata" in raw_workflow and not isinstance(metadata, Mapping):
+            raise ValueError(
+                f"Harness workflow metadata \u5fc5\u987b\u662f mapping: {workflow_path}"
+            )
+
         workflow_data: dict[str, Any] = {
             **raw_workflow,
             "sourceAdapter": self.id,
             "metadata": {
-                **raw_workflow.get("metadata", {}),
+                **metadata,
                 "sourcePath": workflow_path.as_posix(),
             },
         }
