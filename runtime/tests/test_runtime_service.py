@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from workflow_platform.models import Actor
+from workflow_platform.models import Actor, RunProjection
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
 from workflow_platform.runtime_service import WorkflowRuntimeService
@@ -29,6 +29,38 @@ def trusted_human() -> Actor:
 
 def trusted_verifier() -> Actor:
     return Actor(id="verifier-1", type="verifier", source="runtime", trusted=True)
+
+
+def create_submitted_run(
+    tmp_path: Path,
+) -> tuple[WorkflowRuntimeService, RunProjection, RunProjection]:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path)
+    artifact_path = project_path / "plan.md"
+    artifact_path.write_text("璁″垝鍐呭", encoding="utf-8")
+
+    project = service.import_project(project_path, now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="娌荤悊璐熷悜璺緞", now=NOW)
+    started = service.transition_run(
+        run.runId,
+        "NODE_STARTED",
+        node_id="plan",
+        actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+        expected_revision=run.revision,
+        now=NOW,
+    )
+    submitted = service.submit_artifact(
+        run.runId,
+        node_id="plan",
+        artifact_path=artifact_path,
+        artifact_type="plan",
+        actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+        expected_revision=started.revision,
+        now=NOW,
+    )
+    return service, run, submitted
 
 
 def test_runtime_service_imports_project_and_advances_run_through_persistence(tmp_path) -> None:
@@ -58,20 +90,23 @@ def test_runtime_service_imports_project_and_advances_run_through_persistence(tm
         expected_revision=started.revision,
         now=NOW,
     )
-    approved = service.transition_run(
+    approved = service.decide_approval(
         run.runId,
-        "HUMAN_APPROVED",
         node_id="plan",
+        decision="approved",
         actor=trusted_human().model_dump(),
+        comment=None,
         expected_revision=submitted.revision,
         now=NOW,
     )
-    advanced = service.transition_run(
+    advanced = service.submit_gate_result(
         run.runId,
-        "GATE_PASSED",
         node_id="plan",
+        gate_id="plan-ready",
+        status="passed",
+        evidence=["artifact:plan"],
+        waiver_reason=None,
         actor=trusted_verifier().model_dump(),
-        payload={"evidence": ["artifact:plan"], "gateId": "plan-ready"},
         expected_revision=approved.revision,
         now=NOW,
     )
@@ -156,6 +191,123 @@ def test_runtime_service_persists_artifact_approval_and_gate_records(tmp_path) -
     assert approvals[0]["comment"] == "同意进入 gate"
     assert gates[0]["status"] == "passed"
     assert gates[0]["evidence"] == ["artifact:plan"]
+
+
+def test_runtime_service_rejects_generic_human_approval_without_writing_record(tmp_path) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+
+    with pytest.raises(ValueError, match="MISSING_APPROVAL"):
+        service.transition_run(
+            run.runId,
+            "HUMAN_APPROVED",
+            node_id="plan",
+            actor=trusted_human().model_dump(),
+            expected_revision=submitted.revision,
+            now=NOW,
+        )
+
+    assert service.list_approvals(run.runId) == []
+
+
+def test_runtime_service_rejects_generic_gate_pass_without_writing_record(tmp_path) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment=None,
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    with pytest.raises(ValueError, match="MISSING_GATE_RESULT"):
+        service.transition_run(
+            run.runId,
+            "GATE_PASSED",
+            node_id="plan",
+            actor=trusted_verifier().model_dump(),
+            payload={"evidence": ["artifact:plan"], "gateId": "plan-ready"},
+            expected_revision=approval.revision,
+            now=NOW,
+        )
+
+    assert service.list_gate_results(run.runId) == []
+
+
+def test_runtime_service_rejects_gate_waiver_reason_for_passed_status_without_writing_record(
+    tmp_path,
+) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment=None,
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    with pytest.raises(ValueError, match="gate waiver"):
+        service.submit_gate_result(
+            run.runId,
+            node_id="plan",
+            gate_id="plan-ready",
+            status="passed",
+            evidence=[],
+            waiver_reason="temporary",
+            actor=trusted_verifier().model_dump(),
+            expected_revision=approval.revision,
+            now=NOW,
+        )
+
+    assert service.list_gate_results(run.runId) == []
+
+
+def test_runtime_service_rejects_deferred_approval_without_writing_record(tmp_path) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+
+    with pytest.raises(ValueError, match="deferred approvals"):
+        service.decide_approval(
+            run.runId,
+            node_id="plan",
+            decision="deferred",
+            actor=trusted_human().model_dump(),
+            comment=None,
+            expected_revision=submitted.revision,
+            now=NOW,
+        )
+
+    assert service.list_approvals(run.runId) == []
+
+
+def test_runtime_service_rejects_waived_gate_without_writing_record(tmp_path) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment=None,
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    with pytest.raises(ValueError, match="gate waiver"):
+        service.submit_gate_result(
+            run.runId,
+            node_id="plan",
+            gate_id="plan-ready",
+            status="waived",
+            evidence=[],
+            waiver_reason=None,
+            actor=trusted_verifier().model_dump(),
+            expected_revision=approval.revision,
+            now=NOW,
+        )
+
+    assert service.list_gate_results(run.runId) == []
 
 
 def test_runtime_service_rejects_stale_revision_without_writing_event(tmp_path) -> None:

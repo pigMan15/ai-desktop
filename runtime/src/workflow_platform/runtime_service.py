@@ -2,6 +2,7 @@ import hashlib
 import sqlite3
 from pathlib import Path
 from threading import RLock
+from typing import Any, Callable
 from uuid import uuid5, NAMESPACE_URL
 
 from workflow_platform.adapters.harness import HarnessAdapter
@@ -219,7 +220,7 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
     ) -> RunProjection:
-        if status == "waived":
+        if status == "waived" or waiver_reason:
             raise ValueError("INVALID_TRANSITION: gate waiver is not supported yet")
         event_type_by_status = {
             "passed": "GATE_PASSED",
@@ -265,6 +266,10 @@ class WorkflowRuntimeService:
     ) -> RunProjection:
         if event_type == "ARTIFACT_SUBMITTED":
             raise ValueError("MISSING_ARTIFACT: use artifacts endpoint for artifact submissions")
+        if event_type in {"HUMAN_APPROVED", "HUMAN_REJECTED"}:
+            raise ValueError("MISSING_APPROVAL: use approval endpoint for approval decisions")
+        if event_type in {"GATE_PASSED", "GATE_FAILED"}:
+            raise ValueError("MISSING_GATE_RESULT: use gate endpoint for gate results")
         return self._transition_run(
             run_id,
             event_type,
@@ -294,7 +299,7 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
         payload: dict | None = None,
-        after_accept=None,
+        after_accept: Callable[[dict[str, Any]], None] | None = None,
     ) -> RunProjection:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
