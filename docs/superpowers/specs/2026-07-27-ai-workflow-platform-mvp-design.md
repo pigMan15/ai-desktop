@@ -1,37 +1,37 @@
-# AI Workflow Platform MVP Design
+# AI 工程工作流平台 MVP 设计
 
-## Context
+## 背景
 
-This design implements the MVP described by:
+本设计用于落实以下两份文档定义的 MVP：
 
 - `docs/ai-workflow-platform-development-spec.zh-CN.md`
 - `docs/ai-workflow-platform-implementation-plan.zh-CN.md`
 
-The product is a general AI engineering workflow platform, not a `.harness` editor, not a single terminal, and not a fixed process board. The MVP must preserve the platform boundary:
+产品定位是通用 AI 工程工作流平台，不是 `.harness` 文件编辑器、单一 Terminal，也不是固定流程看板。MVP 从第一版开始就要保留平台边界：
 
-- Files are imported protocols.
-- Adapters translate protocols into the canonical model.
-- Workflow Kernel is the trusted state transition boundary.
-- Runtime events are the source of truth.
-- Projections drive the UI.
-- Human approval, gates, artifacts, and evidence cannot be bypassed by Renderer, Terminal, or Agent execution.
+- 文件只是协议输入。
+- Adapter 将协议翻译为统一领域模型。
+- Workflow Kernel 是可信状态转换边界。
+- Runtime event 是运行时事实源。
+- Projection 驱动 UI。
+- Renderer、Terminal、Agent 都不能绕过人工确认、Gate、Artifact 和 Evidence 治理。
 
-## Approved Direction
+## 已确认方向
 
-Proceed with the implementation document's M1-M6 MVP sequence as a single coherent product track:
+按实施文档中的 M1-M6 MVP 顺序推进：
 
-1. M1: Foundation and contracts
-2. M2: Canonical model and adapter
-3. M3: Event store and kernel
-4. M4: Approval, gate, and artifact
-5. M5: Terminal and agent provider
-6. M6: UI MVP
+1. M1：基础工程和 Contracts
+2. M2：Canonical Model 和 Adapter
+3. M3：Event Store 和 Kernel
+4. M4：Approval / Gate / Artifact
+5. M5：Terminal 和 Agent Provider
+6. M6：UI MVP
 
-This is not a separate route from the implementation document. It is the execution strategy for that document: build the full MVP trunk first, keep every milestone runnable and testable, and avoid isolated UI demos or runtime-only islands.
+这不是替代实施文档的新路线，而是对实施文档的执行方式：先搭完整 MVP 主干，让每个里程碑都可运行、可测试，避免孤立 UI demo 或 Runtime 孤岛。
 
-## Architecture
+## 总体架构
 
-The repository will use the documented monorepo shape:
+仓库采用实施文档推荐的 monorepo 结构：
 
 ```text
 apps/
@@ -80,106 +80,106 @@ docs/
 scripts/
 ```
 
-Layer responsibilities:
+分层职责：
 
-- Electron desktop shell owns the desktop app process, preload bridge, and local runtime lifecycle.
-- React renderer owns the user interface and never directly mutates trusted workflow state.
-- TypeScript contracts define shared RPC, workflow, event, error, and UI-facing data shapes.
-- Python runtime owns canonical workflow import, persistence, transition validation, projection generation, terminal sessions, approvals, gates, artifacts, and recovery.
-- SQLite stores workflow versions, runs, runtime events, projections, artifacts, approvals, gate results, terminal sessions, and audit records.
+- Electron desktop shell 负责桌面壳、preload bridge 和本地 Runtime 生命周期。
+- React renderer 负责用户界面，不直接修改可信 workflow 状态。
+- TypeScript contracts 定义共享 RPC、workflow、event、error 和 UI-facing 数据结构。
+- Python runtime 负责 canonical workflow import、持久化、状态转换校验、projection 生成、terminal session、approval、gate、artifact 和 recovery。
+- SQLite 存储 workflow version、run、runtime event、projection、artifact、approval、gate result、terminal session 和 audit record。
 
-## Hard Boundaries
+## 硬边界
 
-The MVP must enforce these invariants from the beginning:
+MVP 必须从一开始强制以下约束：
 
-- Renderer does not directly read or write trusted workflow state.
-- Renderer actions call typed RPC/IPC endpoints.
-- Terminal sessions cannot submit `NODE_COMPLETED`.
-- Agent providers cannot submit `HUMAN_APPROVED`.
-- Gate pass/fail events require an authorized verifier or system actor.
-- Gate pass/fail requires evidence or an explicit waiver.
-- Runtime state advances only through `transition(runId, event, expectedRevision)`.
-- Projection state must be rebuildable from `run_events`.
-- UI buttons must come from Runtime-computed `allowedActions`.
-- Provider-native objects must not enter contracts, SQLite authority state, or renderer state.
+- Renderer 不直接读写可信 workflow 状态。
+- Renderer 动作只能调用 typed RPC/IPC。
+- Terminal session 不能提交 `NODE_COMPLETED`。
+- Agent provider 不能提交 `HUMAN_APPROVED`。
+- Gate pass/fail event 必须来自授权 verifier 或 system actor。
+- Gate pass/fail 必须绑定 evidence，或者提供明确 waiver。
+- Runtime 状态只能通过 `transition(runId, event, expectedRevision)` 推进。
+- Projection 必须能从 `run_events` 重建。
+- UI 按钮必须来自 Runtime 计算出的 `allowedActions`。
+- Provider-native object 不能进入 contracts、SQLite 权威状态或 renderer state。
 
-## Data Flow
+## 数据流
 
-Project import:
+项目导入：
 
-1. User selects a project root.
-2. Renderer calls `project.detect(rootPath)`.
-3. Runtime AdapterRegistry runs compatible adapters.
-4. User selects an adapter.
-5. Renderer calls `project.import(request)`.
-6. Runtime imports a canonical `WorkflowDefinition`.
-7. Runtime stores a workflow version and diagnostics.
-8. Project Dashboard opens with protocol, workflow version, and diagnostics.
+1. 用户选择项目根目录。
+2. Renderer 调用 `project.detect(rootPath)`。
+3. Runtime 的 AdapterRegistry 执行兼容 adapter 检测。
+4. 用户选择 adapter。
+5. Renderer 调用 `project.import(request)`。
+6. Runtime 导入 canonical `WorkflowDefinition`。
+7. Runtime 保存 workflow version 和 diagnostics。
+8. Project Dashboard 展示协议、workflow version 和 diagnostics。
 
-Run execution:
+Run 执行：
 
-1. User creates a run from a workflow version.
-2. Runtime appends `RUN_CREATED`.
-3. Kernel computes initial node states, current nodes, allowed actions, blocking reasons, and revision.
-4. Renderer displays only the returned projection.
-5. User or executor submits runtime events such as artifact submission, approval decision, gate result, retry, pause, resume, or archive.
-6. Kernel validates actor, revision, node state, requirements, evidence, and policy.
-7. Runtime appends accepted events and rebuilds the projection.
-8. UI refreshes timeline, current node, allowed actions, blocking reasons, artifacts, approval state, and gate state.
+1. 用户基于 workflow version 创建 run。
+2. Runtime 追加 `RUN_CREATED` event。
+3. Kernel 计算初始 node state、current node、allowed action、blocking reason 和 revision。
+4. Renderer 只展示 Runtime 返回的 projection。
+5. 用户或 executor 提交 artifact、approval decision、gate result、retry、pause、resume、archive 等 runtime event。
+6. Kernel 校验 actor、revision、node state、requirement、evidence 和 policy。
+7. Runtime 追加被接受的 event，并重建 projection。
+8. UI 刷新 timeline、current node、allowed action、blocking reason、artifact、approval state 和 gate state。
 
-Recovery:
+Recovery：
 
-1. On app start or project open, Runtime scans stored runs, terminal sessions, checkpoints, and orphan sessions.
-2. Runtime rebuilds projections from `run_events`.
-3. Recovery page shows recoverable runs and sessions.
-4. User chooses recover, stop, cleanup, or continue using Runtime-returned allowed actions.
+1. App 启动或项目打开时，Runtime 扫描已存储 run、terminal session、checkpoint 和 orphan session。
+2. Runtime 从 `run_events` 重建 projection。
+3. Recovery 页面展示可恢复 run 和 session。
+4. 用户通过 Runtime 返回的 allowed action 执行 recover、stop、cleanup 或 continue。
 
-## MVP Modules
+## MVP 模块
 
-Foundation:
+基础工程：
 
-- Workspace package scripts for renderer, desktop, contracts, runtime, tests, and development.
-- Electron shell that can start the renderer and communicate with Runtime through preload-safe APIs.
-- Python runtime health endpoint or local JSON-RPC endpoint.
-- SQLite migration runner with WAL mode.
-- Shared TypeScript contracts and Python Pydantic models aligned by tests.
+- Workspace package scripts，覆盖 renderer、desktop、contracts、runtime、tests 和 development。
+- Electron shell 可以启动 renderer，并通过 preload-safe API 与 Runtime 通信。
+- Python runtime 提供 health endpoint 或本地 JSON-RPC endpoint。
+- SQLite migration runner 启用 WAL mode。
+- TypeScript contracts 与 Python Pydantic models 通过测试保持一致。
 
-Canonical model and adapter:
+Canonical model 和 Adapter：
 
-- `WorkflowDefinition`, `WorkflowNode`, `WorkflowEdge`, `RequirementSpec`, roles, gates, policies, diagnostics.
-- AdapterRegistry with detection scores and compatibility diagnostics.
-- Harness Adapter MVP import for `.harness`-style workflow files.
-- Workflow version storage with content hash.
-- Basic compiler diagnostics and graph view model.
+- 定义 `WorkflowDefinition`、`WorkflowNode`、`WorkflowEdge`、`RequirementSpec`、role、gate、policy 和 diagnostic。
+- AdapterRegistry 支持 detection score 和 compatibility diagnostic。
+- Harness Adapter MVP 导入 `.harness` 风格 workflow 文件。
+- Workflow version 持久化，并计算 content hash。
+- 基础 compiler diagnostic 和 graph view model。
 
-Event store and kernel:
+Event Store 和 Kernel：
 
-- `run_events` as the runtime source of truth.
-- `run_projections` as read model.
-- `transition(runId, event, expectedRevision)` as the only state advancement entrypoint.
-- Guard rules for actor trust, revision conflicts, node state, approval, gate, artifact, and completion.
-- Projection rebuild from events.
-- Allowed action calculation.
-- Timeline API.
+- `run_events` 是运行时事实源。
+- `run_projections` 是读取模型。
+- `transition(runId, event, expectedRevision)` 是唯一状态推进入口。
+- Guard rules 覆盖 actor trust、revision conflict、node state、approval、gate、artifact 和 completion。
+- 支持从 event 重建 projection。
+- 计算 allowed action。
+- 提供 timeline API。
 
-Approval, gate, and artifact:
+Approval、Gate 和 Artifact：
 
-- Artifact metadata store with safe path validation and content hash.
-- Evidence references that can be bound to artifacts, terminal output, or gate results.
-- Approval inbox and approval decision handling.
-- Gate result submission, failure, retry, and waiver support.
-- Audit records for risky or governance-relevant decisions.
+- Artifact metadata store 支持 safe path validation 和 content hash。
+- Evidence reference 可绑定 artifact、terminal output 或 gate result。
+- Approval inbox 和 approval decision handling。
+- Gate result submission、failure、retry 和 waiver。
+- 高风险或治理相关决策写入 audit record。
 
-Terminal and agent provider:
+Terminal 和 Agent Provider：
 
-- Terminal session model bound to project, run, and optionally node.
-- Shell terminal MVP with session lifecycle and scrollback.
-- Terminal output can become evidence.
-- AgentExecutor interface with default provider boundary.
-- LangGraph provider may start as an adapter-compatible implementation or stub if dependency installation is unavailable, but contracts must already prevent provider objects from leaking into core.
-- Agent execution results normalize to `ExecutionResult`.
+- Terminal session model 绑定 project、run，并可选绑定 node。
+- Shell terminal MVP 支持 session lifecycle 和 scrollback。
+- Terminal output 可以转为 evidence。
+- AgentExecutor interface 定义默认 provider 边界。
+- LangGraph provider 可以先是符合接口的实现或 stub，前提是依赖不可用时边界仍然由测试保护。
+- Agent execution result 统一归一化为 `ExecutionResult`。
 
-Renderer UI:
+Renderer UI：
 
 - Project Dashboard
 - Workflow Viewer
@@ -191,11 +191,11 @@ Renderer UI:
 - Recovery page
 - Settings page
 
-UI must use restrained engineering-workbench styling: dense, clear, status-oriented, and optimized for scanning current run status, next actions, blocking reasons, evidence, and audit context.
+UI 风格应是克制的工程工作台：信息密度高、状态清晰、便于扫描当前 run 状态、下一步动作、阻塞原因、证据和审计上下文。
 
-## Error Handling
+## 错误处理
 
-Runtime errors should be typed and exposed through contracts:
+Runtime 错误需要类型化，并通过 contracts 暴露：
 
 - validation error
 - adapter unsupported
@@ -211,70 +211,70 @@ Runtime errors should be typed and exposed through contracts:
 - runtime unavailable
 - terminal unavailable
 
-Renderer must show blocking reasons from Runtime instead of inferring state locally.
+Renderer 必须展示 Runtime 返回的 blocking reason，不能本地推断可信状态。
 
-## Testing Strategy
+## 测试策略
 
-Python tests:
+Python 测试：
 
 - Canonical schema validation
-- Adapter detection and Harness import
+- Adapter detection 和 Harness import
 - SQLite migrations
 - Event append ordering
 - Transition guard rules
 - Allowed actions
 - Approval policy
 - Gate policy
-- Artifact safe path and hashing
+- Artifact safe path 和 hashing
 - Projection rebuild
 
-TypeScript tests:
+TypeScript 测试：
 
 - Contract shape exports
 - API client request/response handling
 - Renderer state mapping from projections
 - UI action rendering from allowed actions
 
-End-to-end tests:
+端到端测试：
 
-- Start app/runtime
-- Import a Harness-like project
-- Create a run
-- Start node
-- Submit artifact
-- Approve
-- Submit gate pass
-- Complete run through Kernel transitions
-- Rebuild projection after restart
+- 启动 app/runtime
+- 导入 Harness-like 项目
+- 创建 run
+- 启动 node
+- 提交 artifact
+- 人工 approval
+- 提交 gate pass
+- 通过 Kernel transition 完成 run
+- 重启后 rebuild projection
 
-## Acceptance Criteria
+## 验收标准
 
-The MVP is complete when current evidence proves:
+MVP 完成时，必须有当前证据证明：
 
-- A project can be imported.
-- At least one workflow can be compiled from a supported adapter.
-- A workflow version is persisted.
-- A run can be created.
-- Run state advances from events.
-- Projection state can be rebuilt from events.
-- A terminal session can be bound to a run/node.
-- A terminal output item can become evidence.
-- An artifact can be submitted with metadata and hash.
-- A human approval can be requested and decided by a trusted human actor.
-- An agent actor cannot perform human approval.
-- A gate requires authorized verifier/system actor and evidence or waiver.
-- A gate can pass or fail.
-- A run can reach done through Kernel-approved transitions.
-- UI exposes allowed actions returned by Runtime.
-- UI does not contain a direct state-completion path.
-- Agent provider integration is behind `AgentExecutor`.
-- Provider-native objects do not become authoritative runtime state.
-- Recovery can rebuild run projection from events.
+- 可以导入一个项目。
+- 至少一个 workflow 可以从受支持 adapter 编译。
+- Workflow version 可以持久化。
+- Run 可以创建。
+- Run 状态由 event 推进。
+- Projection 可以从 event 重建。
+- Terminal session 可以绑定 run/node。
+- Terminal output 可以转为 evidence。
+- Artifact 可以带 metadata 和 hash 提交。
+- Human approval 可以由 trusted human actor 请求和决策。
+- Agent actor 不能执行 human approval。
+- Gate 需要授权 verifier/system actor，并需要 evidence 或 waiver。
+- Gate 可以 pass 或 fail。
+- Run 可以通过 Kernel-approved transition 到达 done。
+- UI 暴露 Runtime 返回的 allowed action。
+- UI 不存在直接完成状态的绕过路径。
+- Agent provider 集成在 `AgentExecutor` 后面。
+- Provider-native object 不会成为权威 runtime state。
+- Recovery 可以从 event 重建 run projection。
 
-## Implementation Notes
+## 实施注意事项
 
-- Prefer small, well-bounded modules over a large runtime file.
-- Keep contracts stable and explicit; do not expose provider-specific internals.
-- Use SQLite JSON columns for canonical definitions and projection payloads in MVP, while keeping event and projection tables queryable.
-- Keep UI pages functional before decorative; each page must answer what is happening, what is blocked, and what actions are allowed.
-- When a dependency cannot be installed in the current environment, preserve the interface and provide a deterministic local implementation or stub with tests documenting the boundary.
+- 优先使用小而边界清晰的模块，避免大型 runtime 文件。
+- Contracts 保持稳定、显式，不暴露 provider-specific internals。
+- MVP 阶段可以使用 SQLite JSON 字段保存 canonical definition 和 projection payload，同时保持 event 和 projection 表可查询。
+- UI 先功能完整，再做视觉打磨；每个页面都必须回答当前发生了什么、卡在哪里、下一步能做什么。
+- 当当前环境不能安装某个依赖时，保留接口并提供确定性的本地实现或 stub，用测试记录边界。
