@@ -8,7 +8,16 @@ class WorkflowVersionRepository:
     def __init__(self, db: sqlite3.Connection) -> None:
         self._db = db
 
-    def save(self, definition: WorkflowDefinition) -> None:
+    def save(
+        self,
+        definition: WorkflowDefinition,
+        *,
+        id: str,
+        project_id: str,
+        content_hash: str,
+        created_at: str,
+        adapter_id: str | None = None,
+    ) -> None:
         definition_json = json.dumps(
             definition.model_dump(by_alias=True),
             separators=(",", ":"),
@@ -16,23 +25,47 @@ class WorkflowVersionRepository:
         )
         self._db.execute(
             """
-            INSERT INTO workflow_versions (workflow_id, version, definition_json)
-            VALUES (?, ?, ?)
-            ON CONFLICT(workflow_id, version) DO UPDATE SET
-                definition_json = excluded.definition_json
+            INSERT INTO workflow_versions (
+                id,
+                project_id,
+                adapter_id,
+                name,
+                version,
+                definition_json,
+                content_hash,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                adapter_id = excluded.adapter_id,
+                name = excluded.name,
+                version = excluded.version,
+                definition_json = excluded.definition_json,
+                content_hash = excluded.content_hash,
+                created_at = excluded.created_at
             """,
-            (definition.id, definition.version, definition_json),
+            (
+                id,
+                project_id,
+                adapter_id or definition.sourceAdapter,
+                definition.name,
+                definition.version,
+                definition_json,
+                content_hash,
+                created_at,
+            ),
         )
         self._db.commit()
 
-    def get(self, workflow_id: str, version: str) -> WorkflowDefinition | None:
+    def get(self, id: str) -> WorkflowDefinition | None:
         row = self._db.execute(
             """
             SELECT definition_json
             FROM workflow_versions
-            WHERE workflow_id = ? AND version = ?
+            WHERE id = ?
             """,
-            (workflow_id, version),
+            (id,),
         ).fetchone()
 
         if row is None:

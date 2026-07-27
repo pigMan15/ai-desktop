@@ -7,94 +7,103 @@ def migrate(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            root_path TEXT NOT NULL,
+            active_protocol TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS workflow_versions (
-            workflow_id TEXT NOT NULL,
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            adapter_id TEXT NOT NULL,
+            name TEXT NOT NULL,
             version TEXT NOT NULL,
             definition_json TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (workflow_id, version)
+            content_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY,
-            project_id TEXT,
-            workflow_id TEXT NOT NULL,
-            workflow_version TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            workflow_version_id TEXT NOT NULL,
+            title TEXT NOT NULL,
             status TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id),
-            FOREIGN KEY (workflow_id, workflow_version)
-                REFERENCES workflow_versions(workflow_id, version)
+            context_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS run_events (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
             type TEXT NOT NULL,
             node_id TEXT,
             actor_json TEXT NOT NULL,
             payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
             revision TEXT NOT NULL,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, sequence)
         );
 
         CREATE TABLE IF NOT EXISTS run_projections (
             run_id TEXT PRIMARY KEY,
-            projection_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            current_node_ids_json TEXT NOT NULL,
+            node_states_json TEXT NOT NULL,
+            allowed_actions_json TEXT NOT NULL,
+            blocking_reasons_json TEXT NOT NULL,
             revision TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS artifacts (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
-            node_id TEXT,
-            artifact_type TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
             uri TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            content_hash TEXT NOT NULL,
+            producer_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS approvals (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
             node_id TEXT NOT NULL,
-            role TEXT,
             status TEXT NOT NULL,
-            decision_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            requested_by_json TEXT NOT NULL,
+            decided_by_json TEXT,
+            comment TEXT,
+            created_at TEXT NOT NULL,
+            decided_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS gate_results (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
             gate_id TEXT NOT NULL,
             status TEXT NOT NULL,
-            result_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            evidence_json TEXT NOT NULL,
+            actor_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS terminal_sessions (
             id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
             run_id TEXT NOT NULL,
             node_id TEXT,
+            kind TEXT NOT NULL,
             status TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+            cwd TEXT NOT NULL,
+            pid INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
         """
     )
