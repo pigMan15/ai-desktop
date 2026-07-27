@@ -15,7 +15,7 @@ class HarnessAdapter:
 
     def detect(self, project_path: Path) -> DetectionResult:
         workflow_path = self._workflow_path(project_path)
-        if workflow_path.exists():
+        if workflow_path.is_file():
             return DetectionResult(
                 adapter_id=self.id,
                 name=self.name,
@@ -32,7 +32,7 @@ class HarnessAdapter:
 
     def import_workflow(self, project_path: Path) -> WorkflowDefinition:
         workflow_path = self._workflow_path(project_path)
-        if not workflow_path.exists():
+        if not workflow_path.is_file():
             raise FileNotFoundError(
                 f"\u672a\u627e\u5230 Harness workflow \u6587\u4ef6: {workflow_path}"
             )

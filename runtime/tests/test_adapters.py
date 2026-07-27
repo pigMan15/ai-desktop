@@ -48,6 +48,16 @@ def test_harness_detect_returns_zero_when_workflow_yaml_missing() -> None:
     assert "未找到 .harness/workflow.yaml" in result.diagnostics
 
 
+def test_harness_detect_ignores_workflow_yaml_directory(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    (project_path / ".harness" / "workflow.yaml").mkdir(parents=True)
+
+    result = HarnessAdapter().detect(project_path)
+
+    assert result.score == 0
+    assert ".harness/workflow.yaml" in result.diagnostics[0]
+
+
 def test_registry_filters_zero_scores_and_sorts_descending() -> None:
     registry = AdapterRegistry(
         [
