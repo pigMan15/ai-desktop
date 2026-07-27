@@ -4,7 +4,15 @@ version = "0.1.0"
 description = "Local runtime foundation for the AI workflow platform."
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.125.0",
     "PyYAML>=6.0",
+    "uvicorn>=0.38.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.0.0",
+    "pytest>=9.0.0",
 ]
 
 [tool.pytest.ini_options]
