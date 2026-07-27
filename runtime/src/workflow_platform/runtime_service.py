@@ -1,7 +1,7 @@
 import hashlib
 import sqlite3
-from threading import RLock
 from pathlib import Path
+from threading import RLock
 from uuid import uuid5, NAMESPACE_URL
 
 from workflow_platform.adapters.harness import HarnessAdapter
@@ -10,6 +10,9 @@ from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
 from workflow_platform.models import Actor, RunEvent, RunProjection
 from workflow_platform.persistence.repositories import (
+    ApprovalRepository,
+    ArtifactRepository,
+    GateResultRepository,
     ProjectRepository,
     ProjectionRepository,
     RunEventRepository,
@@ -26,6 +29,9 @@ class WorkflowRuntimeService:
         self._runs = RunRepository(db)
         self._events = RunEventRepository(db)
         self._projections = ProjectionRepository(db)
+        self._artifacts = ArtifactRepository(db)
+        self._approvals = ApprovalRepository(db)
+        self._gate_results = GateResultRepository(db)
         self._adapter = HarnessAdapter()
         self._lock = RLock()
 
@@ -129,18 +135,121 @@ class WorkflowRuntimeService:
     ) -> RunProjection:
         project_root = self._runs.project_root_for_run(run_id)
         safe_path = validate_safe_path(project_root, artifact_path)
+        artifact_uri = safe_path.as_uri()
+        content_hash = hash_artifact(safe_path)
         return self._transition_run(
             run_id,
             "ARTIFACT_SUBMITTED",
             node_id=node_id,
             actor=actor,
             payload={
-                "artifactUri": safe_path.as_uri(),
+                "artifactUri": artifact_uri,
                 "artifactType": artifact_type,
-                "contentHash": hash_artifact(safe_path),
+                "contentHash": content_hash,
             },
             expected_revision=expected_revision,
             now=now,
+            after_accept=lambda result: self._artifacts.save(
+                id=f"{run_id}:artifact:{node_id}:{result['emittedEvents'][0].revision}",
+                run_id=run_id,
+                node_id=node_id,
+                type=artifact_type,
+                uri=artifact_uri,
+                content_hash=content_hash,
+                producer=Actor.model_validate(actor),
+                created_at=now,
+            ),
+        )
+
+    def decide_approval(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        decision: str,
+        actor: dict,
+        comment: str | None,
+        expected_revision: str,
+        now: str,
+    ) -> RunProjection:
+        if decision == "deferred":
+            raise ValueError("INVALID_TRANSITION: deferred approvals are not supported yet")
+        event_type_by_decision = {
+            "approved": "HUMAN_APPROVED",
+            "rejected": "HUMAN_REJECTED",
+        }
+        try:
+            event_type = event_type_by_decision[decision]
+        except KeyError as exc:
+            raise ValueError(f"INVALID_TRANSITION: unsupported approval decision {decision}") from exc
+
+        actor_model = Actor.model_validate(actor)
+        requested_by = Actor(id="runtime", type="system", source="runtime", trusted=True)
+        return self._transition_run(
+            run_id,
+            event_type,
+            node_id=node_id,
+            actor=actor,
+            payload={"comment": comment},
+            expected_revision=expected_revision,
+            now=now,
+            after_accept=lambda result: self._approvals.save(
+                id=f"{run_id}:approval:{node_id}:{result['emittedEvents'][0].revision}",
+                run_id=run_id,
+                node_id=node_id,
+                status=decision,
+                requested_by=requested_by,
+                decided_by=actor_model,
+                comment=comment,
+                created_at=now,
+                decided_at=now,
+            ),
+        )
+
+    def submit_gate_result(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        gate_id: str,
+        status: str,
+        evidence: list[str],
+        waiver_reason: str | None,
+        actor: dict,
+        expected_revision: str,
+        now: str,
+    ) -> RunProjection:
+        if status == "waived":
+            raise ValueError("INVALID_TRANSITION: gate waiver is not supported yet")
+        event_type_by_status = {
+            "passed": "GATE_PASSED",
+            "failed": "GATE_FAILED",
+        }
+        try:
+            event_type = event_type_by_status[status]
+        except KeyError as exc:
+            raise ValueError(f"INVALID_TRANSITION: unsupported gate status {status}") from exc
+
+        actor_model = Actor.model_validate(actor)
+        return self._transition_run(
+            run_id,
+            event_type,
+            node_id=node_id,
+            actor=actor,
+            payload={"evidence": evidence, "waiverReason": waiver_reason, "gateId": gate_id},
+            expected_revision=expected_revision,
+            now=now,
+            after_accept=lambda result: self._gate_results.save(
+                id=f"{run_id}:gate:{node_id}:{gate_id}:{result['emittedEvents'][0].revision}",
+                run_id=run_id,
+                node_id=node_id,
+                gate_id=gate_id,
+                status=status,
+                evidence=evidence,
+                waiver_reason=waiver_reason,
+                actor=actor_model,
+                created_at=now,
+            ),
         )
 
     def transition_run(
@@ -166,6 +275,15 @@ class WorkflowRuntimeService:
             payload=payload,
         )
 
+    def list_artifacts(self, run_id: str) -> list[dict]:
+        return self._artifacts.list_for_run(run_id)
+
+    def list_approvals(self, run_id: str) -> list[dict]:
+        return self._approvals.list_for_run(run_id)
+
+    def list_gate_results(self, run_id: str) -> list[dict]:
+        return self._gate_results.list_for_run(run_id)
+
     def _transition_run(
         self,
         run_id: str,
@@ -176,6 +294,7 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
         payload: dict | None = None,
+        after_accept=None,
     ) -> RunProjection:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
@@ -203,6 +322,8 @@ class WorkflowRuntimeService:
                     self._events.append(emitted_event, next_sequence)
                     next_sequence += 1
                 self._projections.save(result["run"])
+                if after_accept is not None:
+                    after_accept(result)
                 self._db.commit()
                 return result["run"]
             except Exception:

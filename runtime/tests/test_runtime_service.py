@@ -97,6 +97,67 @@ def test_runtime_service_imports_project_and_advances_run_through_persistence(tm
     ]
 
 
+def test_runtime_service_persists_artifact_approval_and_gate_records(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path)
+    artifact_path = project_path / "plan.md"
+    artifact_path.write_text("计划内容", encoding="utf-8")
+
+    project = service.import_project(project_path, now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="治理记录", now=NOW)
+    started = service.transition_run(
+        run.runId,
+        "NODE_STARTED",
+        node_id="plan",
+        actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+        expected_revision=run.revision,
+        now=NOW,
+    )
+    submitted = service.submit_artifact(
+        run.runId,
+        node_id="plan",
+        artifact_path=artifact_path,
+        artifact_type="plan",
+        actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+        expected_revision=started.revision,
+        now=NOW,
+    )
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment="同意进入 gate",
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+    gated = service.submit_gate_result(
+        run.runId,
+        node_id="plan",
+        gate_id="plan-ready",
+        status="passed",
+        evidence=["artifact:plan"],
+        waiver_reason=None,
+        actor=trusted_verifier().model_dump(),
+        expected_revision=approval.revision,
+        now=NOW,
+    )
+
+    artifacts = service.list_artifacts(run.runId)
+    approvals = service.list_approvals(run.runId)
+    gates = service.list_gate_results(run.runId)
+
+    assert gated.nodeStates["review"] == "READY"
+    assert artifacts[0]["type"] == "plan"
+    assert artifacts[0]["contentHash"]
+    assert approvals[0]["status"] == "approved"
+    assert approvals[0]["comment"] == "同意进入 gate"
+    assert gates[0]["status"] == "passed"
+    assert gates[0]["evidence"] == ["artifact:plan"]
+
+
 def test_runtime_service_rejects_stale_revision_without_writing_event(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)

@@ -56,6 +56,7 @@ class WorkflowVersionRepository:
                 created_at,
             ),
         )
+
     def get(self, id: str) -> WorkflowDefinition | None:
         row = self._db.execute(
             """
@@ -232,6 +233,219 @@ class RunEventRepository:
                 event.createdAt,
             ),
         )
+
+
+class ArtifactRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def save(
+        self,
+        *,
+        id: str,
+        run_id: str,
+        node_id: str,
+        type: str,
+        uri: str,
+        content_hash: str,
+        producer: Actor,
+        created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO artifacts (
+                id,
+                run_id,
+                node_id,
+                type,
+                uri,
+                content_hash,
+                producer_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                id,
+                run_id,
+                node_id,
+                type,
+                uri,
+                content_hash,
+                json.dumps(producer.model_dump(), separators=(",", ":"), sort_keys=True),
+                created_at,
+            ),
+        )
+
+    def list_for_run(self, run_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT *
+            FROM artifacts
+            WHERE run_id = ?
+            ORDER BY created_at, id
+            """,
+            (run_id,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "runId": row["run_id"],
+                "nodeId": row["node_id"],
+                "type": row["type"],
+                "uri": row["uri"],
+                "contentHash": row["content_hash"],
+                "producer": json.loads(row["producer_json"]),
+                "createdAt": row["created_at"],
+            }
+            for row in rows
+        ]
+
+
+class ApprovalRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def save(
+        self,
+        *,
+        id: str,
+        run_id: str,
+        node_id: str,
+        status: str,
+        requested_by: Actor,
+        decided_by: Actor,
+        comment: str | None,
+        created_at: str,
+        decided_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO approvals (
+                id,
+                run_id,
+                node_id,
+                status,
+                requested_by_json,
+                decided_by_json,
+                comment,
+                created_at,
+                decided_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                id,
+                run_id,
+                node_id,
+                status,
+                json.dumps(requested_by.model_dump(), separators=(",", ":"), sort_keys=True),
+                json.dumps(decided_by.model_dump(), separators=(",", ":"), sort_keys=True),
+                comment,
+                created_at,
+                decided_at,
+            ),
+        )
+
+    def list_for_run(self, run_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT *
+            FROM approvals
+            WHERE run_id = ?
+            ORDER BY created_at, id
+            """,
+            (run_id,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "runId": row["run_id"],
+                "nodeId": row["node_id"],
+                "status": row["status"],
+                "requestedBy": json.loads(row["requested_by_json"]),
+                "decidedBy": json.loads(row["decided_by_json"])
+                if row["decided_by_json"]
+                else None,
+                "comment": row["comment"],
+                "createdAt": row["created_at"],
+                "decidedAt": row["decided_at"],
+            }
+            for row in rows
+        ]
+
+
+class GateResultRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def save(
+        self,
+        *,
+        id: str,
+        run_id: str,
+        node_id: str,
+        gate_id: str,
+        status: str,
+        evidence: list[str],
+        waiver_reason: str | None,
+        actor: Actor,
+        created_at: str,
+    ) -> None:
+        payload = {"evidence": evidence, "waiverReason": waiver_reason}
+        self._db.execute(
+            """
+            INSERT INTO gate_results (
+                id,
+                run_id,
+                node_id,
+                gate_id,
+                status,
+                evidence_json,
+                actor_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                id,
+                run_id,
+                node_id,
+                gate_id,
+                status,
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                json.dumps(actor.model_dump(), separators=(",", ":"), sort_keys=True),
+                created_at,
+            ),
+        )
+
+    def list_for_run(self, run_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT *
+            FROM gate_results
+            WHERE run_id = ?
+            ORDER BY created_at, id
+            """,
+            (run_id,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            payload = json.loads(row["evidence_json"])
+            results.append(
+                {
+                    "id": row["id"],
+                    "runId": row["run_id"],
+                    "nodeId": row["node_id"],
+                    "gateId": row["gate_id"],
+                    "status": row["status"],
+                    "evidence": payload["evidence"],
+                    "waiverReason": payload["waiverReason"],
+                    "actor": json.loads(row["actor_json"]),
+                    "createdAt": row["created_at"],
+                }
+            )
+        return results
 
 
 class ProjectionRepository:
