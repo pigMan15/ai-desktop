@@ -1,4 +1,15 @@
-export function RunDashboard() {
+import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
+
+type Props = { state: RuntimeWorkbenchState | null };
+
+export function RunDashboard({ state }: Props) {
+  const projection = state?.projection;
+  const nodeId = projection?.currentNodeIds[0];
+  const nodeState = nodeId ? projection.nodeStates[nodeId] : undefined;
+  const blockingReason = projection?.blockingReasons[0];
+  const canSubmitArtifact =
+    projection?.allowedActions.some((action) => action.label === "提交 Artifact") ?? false;
+
   return (
     <section id="runs" className="panel" aria-labelledby="runs-title">
       <div className="panel-heading">
@@ -6,27 +17,31 @@ export function RunDashboard() {
           <p className="section-kicker">Run</p>
           <h2 id="runs-title">Run Dashboard</h2>
         </div>
-        <span className="status-pill status-blocked">blocked</span>
+        <span className="status-pill status-blocked">{projection?.status ?? "加载中"}</span>
       </div>
       <p className="body-copy">
-        展示 Runtime projection 中的 run 状态、允许操作和关键 evidence；所有动作必须等待 Runtime allowedActions。
+        展示 Runtime projection 中的 run 状态、节点状态、阻塞原因和允许操作；所有动作必须等待 Runtime allowedActions。
       </p>
       <dl className="facts">
         <div>
           <dt>当前 Run 状态</dt>
-          <dd>waiting_for_gate</dd>
+          <dd>{projection?.status ?? "加载中"}</dd>
         </div>
         <div>
-          <dt>允许操作</dt>
-          <dd>Runtime API 已建立纵向路径，前端不本地推进状态。</dd>
+          <dt>当前节点状态</dt>
+          <dd>{nodeState ?? "加载中"}</dd>
         </div>
         <div>
-          <dt>Evidence</dt>
-          <dd>计划、测试输出、人工审批记录将由 Runtime 提供。</dd>
+          <dt>阻塞原因</dt>
+          <dd>
+            {blockingReason
+              ? `${blockingReason.code}：${blockingReason.message}`
+              : "暂无阻塞原因"}
+          </dd>
         </div>
       </dl>
-      <button className="quiet-button" disabled>
-        等待 Runtime allowedActions
+      <button className="quiet-button" disabled={!canSubmitArtifact}>
+        提交 Artifact
       </button>
     </section>
   );

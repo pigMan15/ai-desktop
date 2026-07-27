@@ -1,4 +1,11 @@
-export function ProjectDashboard() {
+import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
+
+type Props = { state: RuntimeWorkbenchState | null };
+
+export function ProjectDashboard({ state }: Props) {
+  const connectionText =
+    state?.connection === "connected" ? "Runtime API 已连接" : "Runtime API 不可用";
+
   return (
     <section id="projects" className="panel panel-wide" aria-labelledby="projects-title">
       <div className="panel-heading">
@@ -6,26 +13,21 @@ export function ProjectDashboard() {
           <p className="section-kicker">Workspace</p>
           <h2 id="projects-title">Project Dashboard</h2>
         </div>
-        <span className="status-pill status-watch">2 个阻塞</span>
+        <span className="status-pill status-watch">{connectionText}</span>
       </div>
       <p className="body-copy">
-        项目导入已接入 Runtime API 路径：Harness workflow 会被规范化、持久化为 workflow version，并用于创建 Run。
+        项目导入已接入 Runtime API 路径，Renderer 展示 Runtime 返回的项目、工作流和 Run 投影。
       </p>
       <div className="table-like" role="table" aria-label="项目状态">
         <div role="row" className="table-row table-head">
           <span role="columnheader">项目</span>
-          <span role="columnheader">当前 run 状态</span>
-          <span role="columnheader">阻塞原因</span>
+          <span role="columnheader">工作流</span>
+          <span role="columnheader">当前 Run 状态</span>
         </div>
         <div role="row" className="table-row">
-          <span role="cell">desktop-workflow</span>
-          <span role="cell">waiting_for_approval</span>
-          <span role="cell">需要用户确认文件写入范围</span>
-        </div>
-        <div role="row" className="table-row">
-          <span role="cell">runtime-contracts</span>
-          <span role="cell">collecting_evidence</span>
-          <span role="cell">等待测试 evidence 索引</span>
+          <span role="cell">{state?.projectName ?? "加载中"}</span>
+          <span role="cell">{state?.workflowName ?? "加载中"}</span>
+          <span role="cell">{state?.projection.status ?? "加载中"}</span>
         </div>
       </div>
     </section>
