@@ -282,6 +282,29 @@ def test_runtime_service_rejects_deferred_approval_without_writing_record(tmp_pa
     assert service.list_approvals(run.runId) == []
 
 
+def test_runtime_service_persists_rejected_artifact_approval_record(tmp_path) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+
+    assert submitted.status == "REVIEWING"
+    assert submitted.nodeStates["plan"] == "AWAITING_APPROVAL"
+
+    rejected = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="rejected",
+        actor=trusted_human().model_dump(),
+        comment="needs revision",
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    approvals = service.list_approvals(run.runId)
+
+    assert rejected.status == "BLOCKED"
+    assert rejected.nodeStates["plan"] == "BLOCKED"
+    assert approvals[0]["status"] == "rejected"
+
+
 def test_runtime_service_rejects_waived_gate_without_writing_record(tmp_path) -> None:
     service, run, submitted = create_submitted_run(tmp_path)
     approval = service.decide_approval(
@@ -308,6 +331,40 @@ def test_runtime_service_rejects_waived_gate_without_writing_record(tmp_path) ->
         )
 
     assert service.list_gate_results(run.runId) == []
+
+
+def test_runtime_service_persists_failed_gate_result_record(tmp_path) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment=None,
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    assert approval.status == "REVIEWING"
+    assert approval.nodeStates["plan"] == "AWAITING_GATE"
+
+    failed = service.submit_gate_result(
+        run.runId,
+        node_id="plan",
+        gate_id="plan-ready",
+        status="failed",
+        evidence=["artifact:plan"],
+        waiver_reason=None,
+        actor=trusted_verifier().model_dump(),
+        expected_revision=approval.revision,
+        now=NOW,
+    )
+
+    gates = service.list_gate_results(run.runId)
+
+    assert failed.status == "BLOCKED"
+    assert failed.nodeStates["plan"] == "BLOCKED"
+    assert gates[0]["status"] == "failed"
 
 
 def test_runtime_service_rejects_stale_revision_without_writing_event(tmp_path) -> None:
