@@ -9,7 +9,7 @@
   },
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node dist/contracts.test.js"
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "test": "node -e \"fs.rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node .test-dist/contracts.test.js && node -e \"fs.rmSync('.test-dist',{recursive:true,force:true})\""
   }
 }
