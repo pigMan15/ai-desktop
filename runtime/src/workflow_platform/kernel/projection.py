@@ -43,7 +43,19 @@ def rebuild_projection(
         elif run_event.type == "ARTIFACT_SUBMITTED" and run_event.nodeId:
             node_states[run_event.nodeId] = "AWAITING_APPROVAL"
             status = "REVIEWING"
-        elif run_event.type in {"HUMAN_APPROVED", "GATE_PASSED"} and run_event.nodeId:
+        elif run_event.type == "HUMAN_APPROVED" and run_event.nodeId:
+            if _node_requires_gate(workflow, run_event.nodeId):
+                node_states[run_event.nodeId] = "AWAITING_GATE"
+                status = "REVIEWING"
+            else:
+                node_states[run_event.nodeId] = "PASSED"
+                next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
+                if next_node_id is None:
+                    status = "DONE"
+                else:
+                    node_states[next_node_id] = "READY"
+                    status = "IN_PROGRESS"
+        elif run_event.type == "GATE_PASSED" and run_event.nodeId:
             node_states[run_event.nodeId] = "PASSED"
             next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
             if next_node_id is None:
@@ -89,6 +101,14 @@ def _first_outgoing_target(workflow: WorkflowDefinition, node_id: str) -> str | 
         if edge.from_ == node_id:
             return edge.to
     return None
+
+
+def _node_requires_gate(workflow: WorkflowDefinition, node_id: str) -> bool:
+    for node in workflow.nodes:
+        if node.id != node_id:
+            continue
+        return bool(node.gates) or any(requirement.type == "gate" for requirement in node.requires)
+    return False
 
 
 def _allowed_actions(

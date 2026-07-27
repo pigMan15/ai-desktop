@@ -82,11 +82,8 @@ def _validate_event(
     if event.type in {"GATE_PASSED", "GATE_FAILED"}:
         if event.actor.type not in {"verifier", "system"} or not event.actor.trusted:
             return ("PERMISSION_DENIED", "Only trusted verifier or system actors can submit gate decisions")
-        if event.nodeId is None or node_states.get(event.nodeId) not in {
-            "AWAITING_APPROVAL",
-            "AWAITING_GATE",
-        }:
-            return ("INVALID_TRANSITION", "Gate decisions require a node awaiting review")
+        if event.nodeId is None or node_states.get(event.nodeId) != "AWAITING_GATE":
+            return ("INVALID_TRANSITION", "Gate decisions require a node awaiting gate verification")
         return None
 
     return ("INVALID_TRANSITION", f"{event.type} is not accepted by the kernel")

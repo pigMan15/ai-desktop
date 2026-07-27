@@ -59,6 +59,23 @@ def linear_workflow() -> WorkflowDefinition:
     )
 
 
+def gated_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        id="workflow-1",
+        name="Gated",
+        version="1",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(id="deploy", name="Deploy", kind="deploy", gates=["security"]),
+        ],
+        edges=[],
+        roles=[],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+
+
 def test_rebuild_projection_without_events_marks_first_node_ready() -> None:
     projection = rebuild_projection("run-1", linear_workflow(), [])
 
@@ -180,21 +197,61 @@ def test_human_rejection_blocks_run() -> None:
     assert result["blockingReasons"][0].code == "NODE_BLOCKED"
 
 
-def test_verifier_can_pass_gate_and_complete_final_node_deterministically() -> None:
+def test_gate_pass_is_rejected_while_node_is_awaiting_approval() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
         event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor(), "2"),
-        event("event-3", "HUMAN_APPROVED", "draft", human_actor(), "3"),
-        event("event-4", "NODE_STARTED", "review", agent_actor(), "4"),
-        event("event-5", "ARTIFACT_SUBMITTED", "review", agent_actor(), "5"),
     ]
 
     result = transition(
         "run-1",
         linear_workflow(),
         events,
-        event("event-6", "GATE_PASSED", "review", verifier_actor()),
-        expected_revision="5",
+        event("event-3", "GATE_PASSED", "draft", verifier_actor()),
+        expected_revision="2",
+    )
+
+    assert result["accepted"] is False
+    assert result["emittedEvents"] == []
+    assert result["blockingReasons"][0].code == "INVALID_TRANSITION"
+
+
+def test_human_approval_moves_gated_node_to_awaiting_gate() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
+        event("event-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2"),
+    ]
+
+    result = transition(
+        "run-1",
+        gated_workflow(),
+        events,
+        event("event-3", "HUMAN_APPROVED", "deploy", human_actor()),
+        expected_revision="2",
+    )
+
+    assert result["accepted"] is True
+    assert result["run"].status == "REVIEWING"
+    assert result["run"].nodeStates["deploy"] == "AWAITING_GATE"
+    assert [action.eventType for action in result["allowedActions"]] == [
+        "GATE_PASSED",
+        "GATE_FAILED",
+    ]
+
+
+def test_system_can_pass_awaiting_gate_and_complete_final_node_deterministically() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
+        event("event-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2"),
+        event("event-3", "HUMAN_APPROVED", "deploy", human_actor(), "3"),
+    ]
+
+    result = transition(
+        "run-1",
+        gated_workflow(),
+        events,
+        event("event-4", "GATE_PASSED", "deploy", system_actor()),
+        expected_revision="3",
     )
 
     assert result["accepted"] is True
@@ -202,7 +259,7 @@ def test_verifier_can_pass_gate_and_complete_final_node_deterministically() -> N
         "GATE_PASSED",
         "RUN_COMPLETED",
     ]
-    assert result["revision"] == "7"
+    assert result["revision"] == "5"
     assert result["run"].status == "DONE"
     assert result["run"].currentNodeIds == []
 
