@@ -9,7 +9,7 @@ export function RunDashboard() {
         <span className="status-pill status-blocked">blocked</span>
       </div>
       <p className="body-copy">
-        展示当前 run 状态、允许操作和关键 evidence；所有动作必须等待 Runtime allowedActions。
+        展示 Runtime projection 中的 run 状态、允许操作和关键 evidence；所有动作必须等待 Runtime allowedActions。
       </p>
       <dl className="facts">
         <div>
@@ -18,7 +18,7 @@ export function RunDashboard() {
         </div>
         <div>
           <dt>允许操作</dt>
-          <dd>Runtime 未连接，前端不可本地推进状态。</dd>
+          <dd>Runtime API 已建立纵向路径，前端不本地推进状态。</dd>
         </div>
         <div>
           <dt>Evidence</dt>

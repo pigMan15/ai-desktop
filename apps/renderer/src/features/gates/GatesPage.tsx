@@ -9,7 +9,7 @@ export function GatesPage() {
         <span className="status-pill status-blocked">waiting</span>
       </div>
       <p className="body-copy">
-        gate 状态来自 Runtime；前端不提供本地通过、跳过或重置 gate 的状态变更。
+        gate 状态来自 Runtime projection；前端不提供本地通过、跳过或重置 gate 的状态变更。
       </p>
       <div className="gate-stack">
         <span>测试 gate：等待 evidence</span>

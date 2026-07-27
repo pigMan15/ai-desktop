@@ -141,6 +141,7 @@ def fresh_db_path(name: str) -> Path:
         path,
         path.with_name(f"{path.name}-shm"),
         path.with_name(f"{path.name}-wal"),
+        path.with_name(f"{path.name}-journal"),
     ):
         if candidate.exists():
             candidate.unlink()
@@ -385,7 +386,7 @@ def test_workflow_version_repository_round_trips_definition_json_aliases() -> No
     assert loaded == definition
 
 
-def test_workflow_version_repository_rejects_duplicate_id() -> None:
+def test_workflow_version_repository_upserts_duplicate_id_for_reimport() -> None:
     db = connect(fresh_db_path("workflow_versions_duplicate"))
     migrate(db)
     insert_project(db)
@@ -400,11 +401,19 @@ def test_workflow_version_repository_rejects_duplicate_id() -> None:
         created_at="2026-07-27T13:00:00Z",
     )
 
-    with pytest.raises(sqlite3.IntegrityError):
-        repository.save(
-            definition,
-            id="workflow-version-1",
-            project_id="project-1",
-            content_hash="sha256:workflow-2",
-            created_at="2026-07-27T14:00:00Z",
-        )
+    updated = workflow_definition().model_copy(update={"name": "Updated workflow"})
+
+    repository.save(
+        updated,
+        id="workflow-version-1",
+        project_id="project-1",
+        content_hash="sha256:workflow-2",
+        created_at="2026-07-27T14:00:00Z",
+    )
+    row = db.execute(
+        "SELECT name, content_hash FROM workflow_versions WHERE id = ?",
+        ("workflow-version-1",),
+    ).fetchone()
+
+    assert row["name"] == "Updated workflow"
+    assert row["content_hash"] == "sha256:workflow-2"

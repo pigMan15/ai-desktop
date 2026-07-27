@@ -1,0 +1,133 @@
+from pathlib import Path
+
+import pytest
+
+from workflow_platform.models import Actor
+from workflow_platform.persistence.database import connect
+from workflow_platform.persistence.migrations import migrate
+from workflow_platform.runtime_service import WorkflowRuntimeService
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+NOW = "2026-07-27T13:00:00Z"
+
+
+def copy_harness_project(tmp_path: Path) -> Path:
+    project_path = tmp_path / "harness_project"
+    workflow_dir = project_path / ".harness"
+    workflow_dir.mkdir(parents=True)
+    workflow_text = (FIXTURES / "harness_project" / ".harness" / "workflow.yaml").read_text(
+        encoding="utf-8"
+    )
+    (workflow_dir / "workflow.yaml").write_text(workflow_text, encoding="utf-8")
+    return project_path
+
+
+def trusted_human() -> Actor:
+    return Actor(id="human-1", type="human", source="renderer", trusted=True)
+
+
+def trusted_verifier() -> Actor:
+    return Actor(id="verifier-1", type="verifier", source="runtime", trusted=True)
+
+
+def test_runtime_service_imports_project_and_advances_run_through_persistence(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path)
+    artifact_path = project_path / "plan.md"
+    artifact_path.write_text("计划内容", encoding="utf-8")
+
+    project = service.import_project(project_path, now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="验证 Demo Run", now=NOW)
+    started = service.transition_run(
+        run.runId,
+        "NODE_STARTED",
+        node_id="plan",
+        actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+        expected_revision="1",
+        now=NOW,
+    )
+    submitted = service.submit_artifact(
+        run.runId,
+        node_id="plan",
+        artifact_path=artifact_path,
+        artifact_type="plan",
+        actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+        expected_revision=started.revision,
+        now=NOW,
+    )
+    approved = service.transition_run(
+        run.runId,
+        "HUMAN_APPROVED",
+        node_id="plan",
+        actor=trusted_human().model_dump(),
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+    advanced = service.transition_run(
+        run.runId,
+        "GATE_PASSED",
+        node_id="plan",
+        actor=trusted_verifier().model_dump(),
+        payload={"evidence": ["artifact:plan"], "gateId": "plan-ready"},
+        expected_revision=approved.revision,
+        now=NOW,
+    )
+
+    persisted = service.get_projection(run.runId)
+    rows = db.execute(
+        "SELECT sequence, type, revision FROM run_events WHERE run_id = ? ORDER BY sequence",
+        (run.runId,),
+    ).fetchall()
+
+    assert project["adapterId"] == "harness"
+    assert run.status == "CREATED"
+    assert advanced.status == "IN_PROGRESS"
+    assert advanced.nodeStates["plan"] == "PASSED"
+    assert advanced.nodeStates["review"] == "READY"
+    assert persisted == advanced
+    assert [(row["sequence"], row["type"], row["revision"]) for row in rows] == [
+        (1, "RUN_CREATED", "1"),
+        (2, "NODE_STARTED", "2"),
+        (3, "ARTIFACT_SUBMITTED", "3"),
+        (4, "HUMAN_APPROVED", "4"),
+        (5, "GATE_PASSED", "5"),
+    ]
+
+
+def test_runtime_service_rejects_stale_revision_without_writing_event(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project = service.import_project(copy_harness_project(tmp_path), now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="冲突测试", now=NOW)
+
+    with pytest.raises(ValueError, match="REVISION_CONFLICT"):
+        service.transition_run(
+            run.runId,
+            "NODE_STARTED",
+            node_id="plan",
+            actor={"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+            expected_revision="0",
+            now=NOW,
+        )
+
+    count = db.execute("SELECT COUNT(*) FROM run_events WHERE run_id = ?", (run.runId,)).fetchone()[0]
+    assert count == 1
+
+
+def test_runtime_service_reimport_keeps_workflow_version_available(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path)
+
+    first = service.import_project(project_path, now=NOW)
+    second = service.import_project(project_path, now=NOW)
+    run = service.create_run(second["workflowVersionId"], title="重复导入后创建", now=NOW)
+
+    assert second["projectId"] == first["projectId"]
+    assert second["workflowVersionId"] == first["workflowVersionId"]
+    assert run.revision == "1"

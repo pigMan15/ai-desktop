@@ -1,7 +1,9 @@
 import {
   ERROR_CODES,
   NODE_KINDS,
+  NODE_STATES,
   RUN_EVENT_TYPES,
+  type NodeState,
   type RunProjection,
   type TransitionResult,
   type WorkflowDefinition,
@@ -62,6 +64,21 @@ it("exports stable runtime event constants in plan order", () => {
   ]);
 });
 
+it("exports stable node state constants in runtime order", () => {
+  expect([...NODE_STATES]).toEqual([
+    "PENDING",
+    "READY",
+    "RUNNING",
+    "AWAITING_ARTIFACT",
+    "AWAITING_APPROVAL",
+    "AWAITING_GATE",
+    "PASSED",
+    "FAILED",
+    "BLOCKED",
+    "SKIPPED",
+  ]);
+});
+
 it("exports stable error constants in plan order", () => {
   expect([...ERROR_CODES]).toEqual([
     "VALIDATION_ERROR",
@@ -112,11 +129,12 @@ it("accepts planned workflow, projection, and transition shapes", () => {
     metadata: { importedAt: "2026-07-27T00:00:00.000Z" },
   };
 
+  const waitingForApproval: NodeState = "AWAITING_APPROVAL";
   const run: RunProjection = {
     runId: "run-1",
     status: "REVIEWING",
     currentNodeIds: ["node-1"],
-    nodeStates: { "node-1": "WAITING_FOR_APPROVAL" },
+    nodeStates: { "node-1": waitingForApproval },
     allowedActions: [
       {
         id: "approve-node-1",

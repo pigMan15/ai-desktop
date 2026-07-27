@@ -30,6 +30,7 @@ def event(
     revision: str = "0",
     run_id: str = "run-1",
     created_at: str = NOW,
+    payload: dict | None = None,
 ) -> RunEvent:
     return RunEvent(
         id=event_id,
@@ -37,9 +38,37 @@ def event(
         type=event_type,
         nodeId=node_id,
         actor=actor or system_actor(),
-        payload={},
+        payload=payload or {},
         createdAt=created_at,
         revision=revision,
+    )
+
+
+def artifact_event(
+    event_id: str,
+    node_id: str,
+    actor: Actor | None = None,
+    revision: str = "0",
+    run_id: str = "run-1",
+) -> RunEvent:
+    return event(
+        event_id,
+        "ARTIFACT_SUBMITTED",
+        node_id,
+        actor,
+        revision,
+        run_id,
+        payload={"artifactUri": f"artifact://{node_id}", "artifactType": "plan"},
+    )
+
+
+def gate_pass_event(event_id: str, node_id: str, actor: Actor | None = None) -> RunEvent:
+    return event(
+        event_id,
+        "GATE_PASSED",
+        node_id,
+        actor,
+        payload={"evidence": [f"artifact:{node_id}"], "gateId": "security"},
     )
 
 
@@ -147,6 +176,7 @@ def test_transition_starts_ready_node_and_advances_revision() -> None:
     assert [emitted.type for emitted in result["emittedEvents"]] == ["NODE_STARTED"]
     assert result["run"].status == "IN_PROGRESS"
     assert result["run"].nodeStates["draft"] == "RUNNING"
+    assert [action.eventType for action in result["allowedActions"]] == ["ARTIFACT_SUBMITTED"]
 
 
 def test_transition_expected_revision_uses_only_target_run_events() -> None:
@@ -159,7 +189,7 @@ def test_transition_expected_revision_uses_only_target_run_events() -> None:
         "run-1",
         linear_workflow(),
         events,
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor()),
+        artifact_event("event-2", "draft", agent_actor()),
         expected_revision="1",
     )
 
@@ -209,7 +239,7 @@ def test_artifact_submission_waits_for_approval_actions() -> None:
         "run-1",
         linear_workflow(),
         events,
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor()),
+        artifact_event("event-2", "draft", agent_actor()),
         expected_revision="1",
     )
 
@@ -222,10 +252,25 @@ def test_artifact_submission_waits_for_approval_actions() -> None:
     ]
 
 
+def test_artifact_submission_requires_artifact_payload() -> None:
+    events = [event("event-1", "NODE_STARTED", "draft", agent_actor(), "1")]
+
+    result = transition(
+        "run-1",
+        linear_workflow(),
+        events,
+        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor()),
+        expected_revision="1",
+    )
+
+    assert result["accepted"] is False
+    assert result["blockingReasons"][0].code == "MISSING_ARTIFACT"
+
+
 def test_agent_cannot_submit_human_approval() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor(), "2"),
+        artifact_event("event-2", "draft", agent_actor(), "2"),
     ]
 
     result = transition(
@@ -244,7 +289,7 @@ def test_agent_cannot_submit_human_approval() -> None:
 def test_human_approval_passes_node_and_readies_next_node() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor(), "2"),
+        artifact_event("event-2", "draft", agent_actor(), "2"),
     ]
 
     result = transition(
@@ -265,7 +310,7 @@ def test_human_approval_passes_node_and_readies_next_node() -> None:
 def test_human_rejection_blocks_run() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor(), "2"),
+        artifact_event("event-2", "draft", agent_actor(), "2"),
     ]
 
     result = transition(
@@ -285,7 +330,7 @@ def test_human_rejection_blocks_run() -> None:
 def test_gate_pass_is_rejected_while_node_is_awaiting_approval() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor(), "2"),
+        artifact_event("event-2", "draft", agent_actor(), "2"),
     ]
 
     result = transition(
@@ -304,7 +349,7 @@ def test_gate_pass_is_rejected_while_node_is_awaiting_approval() -> None:
 def test_human_approval_moves_gated_node_to_awaiting_gate() -> None:
     events = [
         event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2"),
+        artifact_event("event-2", "deploy", agent_actor(), "2"),
     ]
 
     result = transition(
@@ -327,7 +372,7 @@ def test_human_approval_moves_gated_node_to_awaiting_gate() -> None:
 def test_system_can_pass_awaiting_gate_and_complete_final_node_deterministically() -> None:
     events = [
         event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2"),
+        artifact_event("event-2", "deploy", agent_actor(), "2"),
         event("event-3", "HUMAN_APPROVED", "deploy", human_actor(), "3"),
     ]
 
@@ -335,7 +380,7 @@ def test_system_can_pass_awaiting_gate_and_complete_final_node_deterministically
         "run-1",
         gated_workflow(),
         events,
-        event("event-4", "GATE_PASSED", "deploy", system_actor()),
+        gate_pass_event("event-4", "deploy", system_actor()),
         expected_revision="3",
     )
 
@@ -349,12 +394,10 @@ def test_system_can_pass_awaiting_gate_and_complete_final_node_deterministically
     assert result["run"].currentNodeIds == []
 
 
-def test_auto_run_completed_revision_uses_target_run_count_in_mixed_events() -> None:
+def test_gate_pass_requires_evidence_or_waiver_payload() -> None:
     events = [
         event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
-        event("other-1", "NODE_STARTED", "deploy", agent_actor(), "1", run_id="run-2"),
-        event("event-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2"),
-        event("other-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2", run_id="run-2"),
+        artifact_event("event-2", "deploy", agent_actor(), "2"),
         event("event-3", "HUMAN_APPROVED", "deploy", human_actor(), "3"),
     ]
 
@@ -363,6 +406,27 @@ def test_auto_run_completed_revision_uses_target_run_count_in_mixed_events() -> 
         gated_workflow(),
         events,
         event("event-4", "GATE_PASSED", "deploy", verifier_actor()),
+        expected_revision="3",
+    )
+
+    assert result["accepted"] is False
+    assert result["blockingReasons"][0].code == "MISSING_EVIDENCE"
+
+
+def test_auto_run_completed_revision_uses_target_run_count_in_mixed_events() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
+        event("other-1", "NODE_STARTED", "deploy", agent_actor(), "1", run_id="run-2"),
+        artifact_event("event-2", "deploy", agent_actor(), "2"),
+        artifact_event("other-2", "deploy", agent_actor(), "2", run_id="run-2"),
+        event("event-3", "HUMAN_APPROVED", "deploy", human_actor(), "3"),
+    ]
+
+    result = transition(
+        "run-1",
+        gated_workflow(),
+        events,
+        gate_pass_event("event-4", "deploy", verifier_actor()),
         expected_revision="3",
     )
 
@@ -378,7 +442,7 @@ def test_auto_run_completed_revision_uses_target_run_count_in_mixed_events() -> 
 def test_agent_cannot_pass_gate() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
-        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor(), "2"),
+        artifact_event("event-2", "draft", agent_actor(), "2"),
     ]
 
     result = transition(

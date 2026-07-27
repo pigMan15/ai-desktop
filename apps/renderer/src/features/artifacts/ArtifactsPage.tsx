@@ -9,7 +9,7 @@ export function ArtifactsPage() {
         <span className="status-pill">index pending</span>
       </div>
       <p className="body-copy">
-        证据与产物索引暂以只读摘要呈现，包括测试日志、构建输出、计划文件和审计记录。
+        证据与产物索引来自 Runtime artifact guard，包括安全路径、内容哈希、测试日志和审计记录。
       </p>
       <dl className="facts">
         <div>

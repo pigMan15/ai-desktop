@@ -1,6 +1,6 @@
 # AI Workflow Platform
 
-本项目是一个本地桌面 AI 工程工作流平台 MVP，用于验证项目导入、工作流规范化、运行状态推进、治理边界和桌面工作台的基础闭环。
+本项目是一个本地桌面 AI 工程工作流平台 MVP，用于验证项目导入、工作流规范化、运行状态推进、治理边界、Runtime API 和桌面工作台的最小闭环。
 
 ## 开发命令
 
@@ -35,17 +35,19 @@ npm.cmd run test:e2e
 - Harness Adapter
 - Canonical Workflow storage
 - Event-sourced Run state
+- Transactional run event append 与 projection upsert
+- Runtime-backed Harness import -> create run -> transition path
 - Kernel transition
-- Approval-Gate-Artifact governance
+- Approval-Gate-Artifact kernel/service 层基础约束
 - Terminal boundary
 - AgentExecutor boundary
 - Renderer workbench
 - Recovery projection rebuild
 - TypeScript contracts 与 Python Pydantic models 对齐
-- FastAPI runtime health endpoint
-- Electron main/preload 基础边界
+- FastAPI runtime health/import/run/transition/artifact endpoints
+- Electron main/preload 基础边界与 renderer URL 安全校验
 - Playwright renderer smoke E2E
 
 ## 当前定位
 
-这是面向本地桌面工作流平台的 MVP 验证实现，不代表已经完成最终产品规格中的全部高级能力。真实 `node-pty` 终端、真实 LangGraph provider、完整 Runtime API、完整 Electron runtime process management、高级 Knowledge publishing 等能力仍属于后续建设范围。
+这是面向本地桌面工作流平台的 MVP 验证实现，不代表已经完成最终产品规格中的全部高级能力。真实 `node-pty` 终端、真实 LangGraph provider、完整交互式 UI、完整 Electron runtime process management、高级 Knowledge publishing 等能力仍属于后续建设范围。

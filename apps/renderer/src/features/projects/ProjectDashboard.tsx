@@ -9,7 +9,7 @@ export function ProjectDashboard() {
         <span className="status-pill status-watch">2 个阻塞</span>
       </div>
       <p className="body-copy">
-        项目列表展示工作区、最近 Run 和阻塞原因，当前数据为 renderer 静态 MVP 占位。
+        项目导入已接入 Runtime API 路径：Harness workflow 会被规范化、持久化为 workflow version，并用于创建 Run。
       </p>
       <div className="table-like" role="table" aria-label="项目状态">
         <div role="row" className="table-row table-head">

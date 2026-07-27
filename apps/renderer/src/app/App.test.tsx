@@ -44,9 +44,9 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Project Dashboard" })).toBeInTheDocument();
-    expect(screen.getByText(/项目列表展示工作区、最近 Run 和阻塞原因/)).toBeInTheDocument();
+    expect(screen.getByText(/项目导入已接入 Runtime API 路径/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Run Dashboard" })).toBeInTheDocument();
-    expect(screen.getByText(/展示当前 run 状态、允许操作和关键 evidence/)).toBeInTheDocument();
+    expect(screen.getByText(/展示 Runtime projection 中的 run 状态/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Workflow Viewer" })).toBeInTheDocument();
     expect(screen.getByText(/只读呈现节点、依赖和等待中的 gate/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Terminal" })).toBeInTheDocument();
@@ -54,9 +54,9 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Approval Inbox" })).toBeInTheDocument();
     expect(screen.getByText(/审批项需要 Runtime allowedActions 才能处理/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Gates" })).toBeInTheDocument();
-    expect(screen.getByText(/gate 状态来自 Runtime/)).toBeInTheDocument();
+    expect(screen.getByText(/gate 状态来自 Runtime projection/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Artifacts" })).toBeInTheDocument();
-    expect(screen.getByText(/证据与产物索引暂以只读摘要呈现/)).toBeInTheDocument();
+    expect(screen.getByText(/证据与产物索引来自 Runtime artifact guard/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recovery" })).toBeInTheDocument();
     expect(screen.getByText(/恢复建议需要后端快照和审计记录/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();

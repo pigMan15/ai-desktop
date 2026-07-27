@@ -19,6 +19,20 @@ export const RUN_EVENT_TYPES = [
 ] as const;
 
 export type RunEventType = (typeof RUN_EVENT_TYPES)[number];
+export const NODE_STATES = [
+  "PENDING",
+  "READY",
+  "RUNNING",
+  "AWAITING_ARTIFACT",
+  "AWAITING_APPROVAL",
+  "AWAITING_GATE",
+  "PASSED",
+  "FAILED",
+  "BLOCKED",
+  "SKIPPED",
+] as const;
+
+export type NodeState = (typeof NODE_STATES)[number];
 
 export type ActorType = "human" | "agent" | "system" | "verifier" | "executor" | "adapter";
 export type ActorSource = "renderer" | "runtime" | "terminal" | "agent" | "adapter";
@@ -53,7 +67,7 @@ export type RunProjection = {
   runId: string;
   status: "CREATED" | "IN_PROGRESS" | "REVIEWING" | "BLOCKED" | "DONE" | "ARCHIVED";
   currentNodeIds: string[];
-  nodeStates: Record<string, string>;
+  nodeStates: Record<string, NodeState>;
   allowedActions: AllowedAction[];
   blockingReasons: Array<{ code: string; message: string; nodeId?: string }>;
   revision: string;

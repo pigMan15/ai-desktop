@@ -79,6 +79,8 @@ def _validate_event(
     if event.type == "ARTIFACT_SUBMITTED":
         if event.nodeId is None or node_states.get(event.nodeId) != "RUNNING":
             return ("INVALID_TRANSITION", "Artifacts can only be submitted for RUNNING nodes")
+        if not event.payload.get("artifactUri") or not event.payload.get("artifactType"):
+            return ("MISSING_ARTIFACT", "Artifact submissions require artifactUri and artifactType")
         return None
 
     if event.type in {"HUMAN_APPROVED", "HUMAN_REJECTED"}:
@@ -93,6 +95,8 @@ def _validate_event(
             return ("PERMISSION_DENIED", "Only trusted verifier or system actors can submit gate decisions")
         if event.nodeId is None or node_states.get(event.nodeId) != "AWAITING_GATE":
             return ("INVALID_TRANSITION", "Gate decisions require a node awaiting gate verification")
+        if not event.payload.get("evidence") and not event.payload.get("waiverReason"):
+            return ("MISSING_EVIDENCE", "Gate decisions require evidence or waiverReason")
         return None
 
     return ("INVALID_TRANSITION", f"{event.type} is not accepted by the kernel")

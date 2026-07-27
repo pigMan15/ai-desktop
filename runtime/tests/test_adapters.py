@@ -33,6 +33,7 @@ def test_harness_detects_workflow_yaml() -> None:
     result = HarnessAdapter().detect(FIXTURES / "harness_project")
 
     assert result.adapter_id == "harness"
+    assert result.model_dump(by_alias=True)["adapterId"] == "harness"
     assert result.name == "Harness"
     assert result.score == 100
     assert result.diagnostics == []

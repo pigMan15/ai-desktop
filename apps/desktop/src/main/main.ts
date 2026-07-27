@@ -7,6 +7,7 @@ const { BrowserWindow, app, ipcMain } = electron;
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultRendererUrl = process.env.RENDERER_URL ?? "http://127.0.0.1:5173";
 const registeredRuntimeHandlers = new WeakSet<IpcMainLike>();
+const allowedRendererHosts = new Set(["127.0.0.1", "localhost"]);
 
 export type IpcMainLike = {
   handle(channel: "runtime:health", handler: () => ReturnType<typeof runtimeHealth>): void;
@@ -48,12 +49,23 @@ export async function createMainWindow(options: {
     width: 1280,
     height: 800,
     webPreferences: {
-      preload: preloadPath
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
     }
   });
 
-  await window.loadURL(rendererUrl);
+  await window.loadURL(validateRendererUrl(rendererUrl));
   return window;
+}
+
+export function validateRendererUrl(rendererUrl: string): string {
+  const parsedUrl = new URL(rendererUrl);
+  if (parsedUrl.protocol !== "http:" || !allowedRendererHosts.has(parsedUrl.hostname)) {
+    throw new Error(`Unsafe renderer URL: ${rendererUrl}`);
+  }
+  return parsedUrl.toString();
 }
 
 export function bootstrap(options: {

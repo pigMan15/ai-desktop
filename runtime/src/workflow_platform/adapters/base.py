@@ -1,13 +1,15 @@
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from workflow_platform.models import WorkflowDefinition
 
 
 class DetectionResult(BaseModel):
-    adapter_id: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    adapter_id: str = Field(alias="adapterId")
     name: str
     score: int
     diagnostics: list[str] = Field(default_factory=list)

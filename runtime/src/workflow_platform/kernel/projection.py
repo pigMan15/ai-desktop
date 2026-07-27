@@ -125,6 +125,16 @@ def _allowed_actions(
                     risk="low",
                 )
             )
+        elif state == "RUNNING":
+            actions.append(
+                AllowedAction(
+                    id=f"submit-artifact:{node_id}",
+                    label="Submit artifact",
+                    eventType="ARTIFACT_SUBMITTED",
+                    nodeId=node_id,
+                    risk="medium",
+                )
+            )
         elif state == "AWAITING_APPROVAL":
             actions.extend(
                 [
