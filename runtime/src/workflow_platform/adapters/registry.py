@@ -15,6 +15,12 @@ class AdapterRegistry:
         matches = [result for result in results if result.score > 0]
         return sorted(matches, key=lambda result: result.score, reverse=True)
 
+    def adapter_for(self, adapter_id: str) -> WorkflowAdapter:
+        for adapter in self._adapters:
+            if adapter.id == adapter_id:
+                return adapter
+        raise KeyError(f"Adapter not registered: {adapter_id}")
+
 
 def default_registry() -> AdapterRegistry:
     return AdapterRegistry(

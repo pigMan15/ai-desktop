@@ -5,7 +5,7 @@ from threading import RLock
 from typing import Any, Callable
 from uuid import uuid5, NAMESPACE_URL
 
-from workflow_platform.adapters.harness import HarnessAdapter
+from workflow_platform.adapters.registry import default_registry
 from workflow_platform.artifacts.service import hash_artifact, validate_safe_path
 from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
@@ -33,16 +33,18 @@ class WorkflowRuntimeService:
         self._artifacts = ArtifactRepository(db)
         self._approvals = ApprovalRepository(db)
         self._gate_results = GateResultRepository(db)
-        self._adapter = HarnessAdapter()
+        self._adapter_registry = default_registry()
         self._lock = RLock()
 
     def import_project(self, project_path: Path, *, now: str) -> dict:
         project_path = project_path.resolve()
-        detection = self._adapter.detect(project_path)
-        if detection.score <= 0:
-            raise ValueError("ADAPTER_UNSUPPORTED: 未检测到 Harness workflow")
+        detections = self._adapter_registry.detect(project_path)
+        if not detections:
+            raise ValueError("ADAPTER_UNSUPPORTED: 未检测到支持的 workflow")
 
-        workflow = self._adapter.import_workflow(project_path)
+        detection = detections[0]
+        adapter = self._adapter_registry.adapter_for(detection.adapter_id)
+        workflow = adapter.import_workflow(project_path)
         project_id = _stable_id("project", project_path.as_posix())
         workflow_version_id = _stable_id("workflow-version", f"{project_id}:{workflow.id}:{workflow.version}")
         content_hash = hashlib.sha256(

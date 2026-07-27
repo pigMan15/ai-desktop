@@ -148,13 +148,31 @@ def test_harness_import_rejects_non_mapping_metadata(fixture_name: str) -> None:
 
 
 def test_markdown_checklist_adapter_imports_checked_tasks_as_workflow() -> None:
+    result = MarkdownChecklistAdapter().detect(FIXTURES / "markdown_checklist_project")
     workflow = MarkdownChecklistAdapter().import_workflow(
         FIXTURES / "markdown_checklist_project"
     )
+
+    assert result.score == 80
     assert workflow.sourceAdapter == "markdown-checklist"
+    assert workflow.name == "Release Checklist"
+    assert workflow.metadata["sourcePath"].endswith("workflow.md")
     assert [node.id for node in workflow.nodes] == ["step-1", "step-2"]
+    assert [node.name for node in workflow.nodes] == [
+        "Draft implementation plan",
+        "Review evidence and approve",
+    ]
     assert workflow.edges[0].from_ == "step-1"
     assert workflow.edges[0].to == "step-2"
+
+
+def test_markdown_checklist_detect_ignores_workflow_md_directory(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    (project_path / "workflow.md").mkdir(parents=True)
+
+    result = MarkdownChecklistAdapter().detect(project_path)
+
+    assert result.score == 0
 
 
 def test_markdown_checklist_detect_returns_clear_error_when_workflow_md_missing() -> None:
@@ -172,11 +190,66 @@ def test_markdown_checklist_import_raises_clear_error_when_workflow_md_missing()
     assert "未找到 workflow.md" in message
 
 
+def test_markdown_checklist_import_raises_clear_error_when_no_items(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workflow_path = project_path / "workflow.md"
+    workflow_path.write_text("# Empty Checklist\n\nNo tasks yet.\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        MarkdownChecklistAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Markdown checklist" in message
+    assert str(workflow_path) in message
+
+
 def test_generic_yaml_adapter_imports_canonical_schema() -> None:
+    result = GenericYamlAdapter().detect(FIXTURES / "generic_yaml_project")
     workflow = GenericYamlAdapter().import_workflow(FIXTURES / "generic_yaml_project")
+
+    assert result.score == 70
     assert workflow.sourceAdapter == "generic-yaml"
+    assert workflow.metadata["sourcePath"].endswith("workflow.yaml")
     assert workflow.nodes[0].kind == "agent"
     assert workflow.gates[0].id == "tests"
+
+
+def test_generic_yaml_adapter_merges_source_path_into_metadata(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workflow_path = project_path / "workflow.yaml"
+    workflow_path.write_text(
+        "\n".join(
+            [
+                "id: generic-demo",
+                "name: Generic Demo",
+                "version: '1'",
+                "nodes: []",
+                "edges: []",
+                "roles: []",
+                "gates: []",
+                "policies: {}",
+                "metadata:",
+                "  domain: testing",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    workflow = GenericYamlAdapter().import_workflow(project_path)
+
+    assert workflow.metadata["domain"] == "testing"
+    assert workflow.metadata["sourcePath"] == workflow_path.as_posix()
+
+
+def test_generic_yaml_detect_ignores_workflow_yaml_directory(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    (project_path / "workflow.yaml").mkdir(parents=True)
+
+    result = GenericYamlAdapter().detect(project_path)
+
+    assert result.score == 0
 
 
 def test_generic_yaml_detect_returns_clear_error_when_workflow_yaml_missing() -> None:
@@ -192,6 +265,78 @@ def test_generic_yaml_import_raises_clear_error_when_workflow_yaml_missing() -> 
 
     message = str(exc_info.value)
     assert "未找到 workflow.yaml" in message
+
+
+def test_generic_yaml_import_raises_clear_error_when_workflow_yaml_empty(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workflow_path = project_path / "workflow.yaml"
+    workflow_path.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        GenericYamlAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Generic YAML workflow 文件为空" in message
+    assert str(workflow_path) in message
+
+
+def test_generic_yaml_import_rejects_non_mapping_yaml(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workflow_path = project_path / "workflow.yaml"
+    workflow_path.write_text("- not\n- mapping\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        GenericYamlAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Generic YAML workflow 顶层必须是 mapping" in message
+    assert str(workflow_path) in message
+
+
+@pytest.mark.parametrize("metadata", ["null", "[]"])
+def test_generic_yaml_import_rejects_non_mapping_metadata(
+    tmp_path: Path,
+    metadata: str,
+) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workflow_path = project_path / "workflow.yaml"
+    workflow_path.write_text(
+        "\n".join(
+            [
+                "id: demo",
+                "name: Demo",
+                "version: '1'",
+                "nodes: []",
+                f"metadata: {metadata}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        GenericYamlAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "metadata" in message
+    assert "mapping" in message
+    assert str(workflow_path) in message
+
+
+def test_generic_yaml_import_wraps_validation_error_with_context(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    workflow_path = project_path / "workflow.yaml"
+    workflow_path.write_text("name: Missing Required Fields\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        GenericYamlAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Generic YAML workflow 导入失败" in message
+    assert str(workflow_path) in message
 
 
 def test_registry_includes_three_p1_adapters() -> None:

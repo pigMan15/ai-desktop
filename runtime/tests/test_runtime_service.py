@@ -1,4 +1,5 @@
 from pathlib import Path
+from shutil import copytree
 
 import pytest
 
@@ -20,6 +21,12 @@ def copy_harness_project(tmp_path: Path) -> Path:
         encoding="utf-8"
     )
     (workflow_dir / "workflow.yaml").write_text(workflow_text, encoding="utf-8")
+    return project_path
+
+
+def copy_fixture_project(tmp_path: Path, fixture_name: str) -> Path:
+    project_path = tmp_path / fixture_name
+    copytree(FIXTURES / fixture_name, project_path)
     return project_path
 
 
@@ -130,6 +137,30 @@ def test_runtime_service_imports_project_and_advances_run_through_persistence(tm
         (4, "HUMAN_APPROVED", "4"),
         (5, "GATE_PASSED", "5"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "adapter_id"),
+    [
+        ("markdown_checklist_project", "markdown-checklist"),
+        ("generic_yaml_project", "generic-yaml"),
+    ],
+)
+def test_runtime_service_imports_project_through_detected_adapter(
+    tmp_path: Path,
+    fixture_name: str,
+    adapter_id: str,
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_fixture_project(tmp_path, fixture_name)
+
+    project = service.import_project(project_path, now=NOW)
+
+    assert project["adapterId"] == adapter_id
+    assert project["score"] > 0
+    assert project["workflowVersionId"]
 
 
 def test_runtime_service_persists_artifact_approval_and_gate_records(tmp_path) -> None:
