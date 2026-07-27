@@ -66,6 +66,18 @@ RunEventType = Literal[
 ActorType = Literal["human", "agent", "system", "verifier", "executor", "adapter"]
 ActorSource = Literal["renderer", "runtime", "terminal", "agent", "adapter"]
 RunStatus = Literal["CREATED", "IN_PROGRESS", "REVIEWING", "BLOCKED", "DONE", "ARCHIVED"]
+NodeState = Literal[
+    "PENDING",
+    "READY",
+    "RUNNING",
+    "AWAITING_ARTIFACT",
+    "AWAITING_APPROVAL",
+    "AWAITING_GATE",
+    "PASSED",
+    "FAILED",
+    "BLOCKED",
+    "SKIPPED",
+]
 ActionRisk = Literal["low", "medium", "high"]
 RequirementType = Literal["artifact", "approval", "gate", "evidence"]
 
@@ -80,7 +92,7 @@ class RequirementSpec(CanonicalModel):
     approvalRole: str | None = None
     gateId: str | None = None
     evidenceType: str | None = None
-    required: bool | None = None
+    required: bool = True
 
 
 class WorkflowNode(CanonicalModel):
@@ -89,9 +101,9 @@ class WorkflowNode(CanonicalModel):
     kind: NodeKind
     role: str | None = None
     description: str | None = None
-    requires: list[RequirementSpec] | None = None
-    gates: list[str] | None = None
-    metadata: dict[str, Any] | None = None
+    requires: list[RequirementSpec] = Field(default_factory=list)
+    gates: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowEdge(CanonicalModel):
@@ -100,7 +112,7 @@ class WorkflowEdge(CanonicalModel):
     to: str
     condition: str | None = None
     trigger: str | None = None
-    metadata: dict[str, Any] | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Role(CanonicalModel):
@@ -163,7 +175,7 @@ class RunProjection(CanonicalModel):
     runId: str
     status: RunStatus
     currentNodeIds: list[str]
-    nodeStates: dict[str, str]
+    nodeStates: dict[str, NodeState]
     allowedActions: list[AllowedAction]
     blockingReasons: list[BlockingReason]
     revision: str
