@@ -1,37 +1,44 @@
 export const RUN_EVENT_TYPES = [
-  "RUN_STARTED",
+  "RUN_CREATED",
   "NODE_STARTED",
-  "NODE_COMPLETED",
-  "NODE_FAILED",
-  "HUMAN_REVIEW_REQUESTED",
+  "ARTIFACT_SUBMITTED",
+  "APPROVAL_REQUESTED",
   "HUMAN_APPROVED",
   "HUMAN_REJECTED",
+  "HUMAN_DEFERRED",
+  "GATE_STARTED",
+  "GATE_PASSED",
+  "GATE_FAILED",
+  "GATE_WAIVED",
+  "NODE_COMPLETED",
+  "NODE_FAILED",
+  "NODE_RETRIED",
+  "RUN_BLOCKED",
   "RUN_COMPLETED",
-  "RUN_FAILED",
+  "RUN_ARCHIVED",
 ] as const;
 
 export type RunEventType = (typeof RUN_EVENT_TYPES)[number];
 
-export type ActorType = "system" | "user" | "agent" | "tool";
-
-export type ActorSource = {
-  id: string;
-  label?: string;
-};
+export type ActorType = "human" | "agent" | "system" | "verifier" | "executor" | "adapter";
+export type ActorSource = "renderer" | "runtime" | "terminal" | "agent" | "adapter";
 
 export type Actor = {
+  id: string;
   type: ActorType;
-  source?: ActorSource;
+  source: ActorSource;
+  trusted: boolean;
 };
 
 export type RunEvent = {
   id: string;
   runId: string;
   type: RunEventType;
-  timestamp: string;
-  actor: Actor;
   nodeId?: string;
-  payload?: Record<string, unknown>;
+  actor: Actor;
+  payload: Record<string, unknown>;
+  createdAt: string;
+  revision: string;
 };
 
 export type AllowedAction = {
@@ -39,14 +46,16 @@ export type AllowedAction = {
   label: string;
   eventType: RunEventType;
   nodeId?: string;
-  payloadSchema?: Record<string, unknown>;
+  risk: "low" | "medium" | "high";
 };
 
 export type RunProjection = {
   runId: string;
-  workflowId: string;
-  status: "pending" | "running" | "waiting_for_human" | "completed" | "failed";
+  status: "CREATED" | "IN_PROGRESS" | "REVIEWING" | "BLOCKED" | "DONE" | "ARCHIVED";
   currentNodeIds: string[];
-  events: RunEvent[];
+  nodeStates: Record<string, string>;
   allowedActions: AllowedAction[];
+  blockingReasons: Array<{ code: string; message: string; nodeId?: string }>;
+  revision: string;
+  updatedAt: string;
 };

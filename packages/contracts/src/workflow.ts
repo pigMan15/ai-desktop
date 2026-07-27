@@ -1,21 +1,31 @@
-export const NODE_KINDS = ["input", "agent", "tool", "human", "output"] as const;
+export const NODE_KINDS = [
+  "task",
+  "agent",
+  "approval",
+  "gate",
+  "evidence",
+  "deploy",
+  "report",
+  "composite",
+] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
 
-export type RequirementSpec = {
-  id: string;
-  title: string;
-  description?: string;
-  acceptanceCriteria: string[];
-};
+export type RequirementSpec =
+  | { type: "artifact"; artifactType: string; required: boolean }
+  | { type: "approval"; approvalRole?: string; required: boolean }
+  | { type: "gate"; gateId: string; required: boolean }
+  | { type: "evidence"; evidenceType: string; required: boolean };
 
 export type WorkflowNode = {
   id: string;
-  kind: NodeKind;
   name: string;
+  kind: NodeKind;
+  role?: string;
   description?: string;
-  requirementIds?: string[];
-  config?: Record<string, unknown>;
+  requires?: RequirementSpec[];
+  gates?: string[];
+  metadata?: Record<string, unknown>;
 };
 
 export type WorkflowEdge = {
@@ -23,14 +33,19 @@ export type WorkflowEdge = {
   from: string;
   to: string;
   condition?: string;
+  trigger?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type WorkflowDefinition = {
   id: string;
-  version: string;
   name: string;
-  description?: string;
-  requirements: RequirementSpec[];
+  version: string;
+  sourceAdapter: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  roles: Array<{ id: string; name: string }>;
+  gates: Array<{ id: string; name: string; description?: string }>;
+  policies: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 };
