@@ -9,6 +9,7 @@ def transition(
     event: RunEvent,
     expected_revision: str,
 ) -> dict:
+    target_events = [candidate for candidate in events if candidate.runId == run_id]
     current_projection = rebuild_projection(run_id, workflow, events)
 
     if expected_revision != current_projection.revision:
@@ -24,7 +25,7 @@ def transition(
         code, message = rejection
         return _rejected(current_projection, code, message, event.nodeId)
 
-    first_revision = len(events) + 1
+    first_revision = len(target_events) + 1
     accepted_event = event.model_copy(update={"revision": str(first_revision)})
     emitted_events = [accepted_event]
 

@@ -28,15 +28,17 @@ def event(
     node_id: str | None = None,
     actor: Actor | None = None,
     revision: str = "0",
+    run_id: str = "run-1",
+    created_at: str = NOW,
 ) -> RunEvent:
     return RunEvent(
         id=event_id,
-        runId="run-1",
+        runId=run_id,
         type=event_type,
         nodeId=node_id,
         actor=actor or system_actor(),
         payload={},
-        createdAt=NOW,
+        createdAt=created_at,
         revision=revision,
     )
 
@@ -86,6 +88,51 @@ def test_rebuild_projection_without_events_marks_first_node_ready() -> None:
     assert [action.eventType for action in projection.allowedActions] == ["NODE_STARTED"]
 
 
+def test_rebuild_projection_revision_and_updated_at_ignore_other_runs() -> None:
+    events = [
+        event(
+            "other-1",
+            "NODE_STARTED",
+            "draft",
+            agent_actor(),
+            "1",
+            run_id="run-2",
+            created_at="2026-07-27T13:01:00Z",
+        ),
+        event(
+            "event-1",
+            "NODE_STARTED",
+            "draft",
+            agent_actor(),
+            "1",
+            created_at="2026-07-27T13:02:00Z",
+        ),
+        event(
+            "other-2",
+            "ARTIFACT_SUBMITTED",
+            "draft",
+            agent_actor(),
+            "2",
+            run_id="run-2",
+            created_at="2026-07-27T13:03:00Z",
+        ),
+        event(
+            "event-2",
+            "ARTIFACT_SUBMITTED",
+            "draft",
+            agent_actor(),
+            "2",
+            created_at="2026-07-27T13:04:00Z",
+        ),
+    ]
+
+    projection = rebuild_projection("run-1", linear_workflow(), events)
+
+    assert projection.revision == "2"
+    assert projection.updatedAt == "2026-07-27T13:04:00Z"
+    assert projection.nodeStates["draft"] == "AWAITING_APPROVAL"
+
+
 def test_transition_starts_ready_node_and_advances_revision() -> None:
     result = transition(
         "run-1",
@@ -100,6 +147,26 @@ def test_transition_starts_ready_node_and_advances_revision() -> None:
     assert [emitted.type for emitted in result["emittedEvents"]] == ["NODE_STARTED"]
     assert result["run"].status == "IN_PROGRESS"
     assert result["run"].nodeStates["draft"] == "RUNNING"
+
+
+def test_transition_expected_revision_uses_only_target_run_events() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
+        event("other-1", "NODE_STARTED", "draft", agent_actor(), "1", run_id="run-2"),
+    ]
+
+    result = transition(
+        "run-1",
+        linear_workflow(),
+        events,
+        event("event-2", "ARTIFACT_SUBMITTED", "draft", agent_actor()),
+        expected_revision="1",
+    )
+
+    assert result["accepted"] is True
+    assert [emitted.revision for emitted in result["emittedEvents"]] == ["2"]
+    assert result["revision"] == "2"
+    assert result["run"].nodeStates["draft"] == "AWAITING_APPROVAL"
 
 
 def test_transition_rejects_revision_conflict_without_emitting_events() -> None:
@@ -262,6 +329,32 @@ def test_system_can_pass_awaiting_gate_and_complete_final_node_deterministically
     assert result["revision"] == "5"
     assert result["run"].status == "DONE"
     assert result["run"].currentNodeIds == []
+
+
+def test_auto_run_completed_revision_uses_target_run_count_in_mixed_events() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
+        event("other-1", "NODE_STARTED", "deploy", agent_actor(), "1", run_id="run-2"),
+        event("event-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2"),
+        event("other-2", "ARTIFACT_SUBMITTED", "deploy", agent_actor(), "2", run_id="run-2"),
+        event("event-3", "HUMAN_APPROVED", "deploy", human_actor(), "3"),
+    ]
+
+    result = transition(
+        "run-1",
+        gated_workflow(),
+        events,
+        event("event-4", "GATE_PASSED", "deploy", verifier_actor()),
+        expected_revision="3",
+    )
+
+    assert result["accepted"] is True
+    assert [emitted.revision for emitted in result["emittedEvents"]] == ["4", "5"]
+    assert [emitted.type for emitted in result["emittedEvents"]] == [
+        "GATE_PASSED",
+        "RUN_COMPLETED",
+    ]
+    assert result["revision"] == "5"
 
 
 def test_agent_cannot_pass_gate() -> None:

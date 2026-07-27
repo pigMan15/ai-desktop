@@ -25,7 +25,7 @@ def rebuild_projection(
     workflow: WorkflowDefinition,
     events: Iterable[RunEvent],
 ) -> RunProjection:
-    ordered_events = list(events)
+    ordered_events = [event for event in events if event.runId == run_id]
     node_states: dict[str, NodeState] = {node.id: "PENDING" for node in workflow.nodes}
     if workflow.nodes:
         node_states[workflow.nodes[0].id] = "READY"
@@ -34,9 +34,6 @@ def rebuild_projection(
     updated_at = ordered_events[-1].createdAt if ordered_events else ""
 
     for run_event in ordered_events:
-        if run_event.runId != run_id:
-            continue
-
         if run_event.type == "NODE_STARTED" and run_event.nodeId:
             node_states[run_event.nodeId] = "RUNNING"
             status = "IN_PROGRESS"
