@@ -231,6 +231,10 @@ class WorkflowRuntimeService:
         except KeyError as exc:
             raise ValueError(f"INVALID_TRANSITION: unsupported gate status {status}") from exc
 
+        evidence = [item.strip() for item in evidence if item.strip()]
+        if not evidence:
+            raise ValueError("MISSING_EVIDENCE: Gate decisions require evidence or waiverReason")
+
         actor_model = Actor.model_validate(actor)
         return self._transition_run(
             run_id,

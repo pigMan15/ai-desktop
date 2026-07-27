@@ -295,6 +295,38 @@ def test_runtime_service_rejects_empty_gate_waiver_reason_for_passed_status_with
     assert service.list_gate_results(run.runId) == []
 
 
+@pytest.mark.parametrize("status", ["passed", "failed"])
+def test_runtime_service_rejects_blank_only_gate_evidence_without_writing_record(
+    tmp_path,
+    status: str,
+) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment=None,
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    with pytest.raises(ValueError, match="MISSING_EVIDENCE|INVALID_TRANSITION"):
+        service.submit_gate_result(
+            run.runId,
+            node_id="plan",
+            gate_id="plan-ready",
+            status=status,
+            evidence=["", "   "],
+            waiver_reason=None,
+            actor=trusted_verifier().model_dump(),
+            expected_revision=approval.revision,
+            now=NOW,
+        )
+
+    assert service.list_gate_results(run.runId) == []
+
+
 def test_runtime_service_rejects_deferred_approval_without_writing_record(tmp_path) -> None:
     service, run, submitted = create_submitted_run(tmp_path)
 
