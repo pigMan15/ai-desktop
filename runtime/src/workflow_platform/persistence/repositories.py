@@ -36,14 +36,6 @@ class WorkflowVersionRepository:
                 created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                project_id = excluded.project_id,
-                adapter_id = excluded.adapter_id,
-                name = excluded.name,
-                version = excluded.version,
-                definition_json = excluded.definition_json,
-                content_hash = excluded.content_hash,
-                created_at = excluded.created_at
             """,
             (
                 id,

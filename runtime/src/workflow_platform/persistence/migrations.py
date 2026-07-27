@@ -21,7 +21,8 @@ def migrate(db: sqlite3.Connection) -> None:
             version TEXT NOT NULL,
             definition_json TEXT NOT NULL,
             content_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS runs (
@@ -32,7 +33,9 @@ def migrate(db: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             context_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (workflow_version_id) REFERENCES workflow_versions(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS run_events (
@@ -45,6 +48,7 @@ def migrate(db: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL,
             revision TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
             UNIQUE(run_id, sequence)
         );
 
@@ -56,7 +60,8 @@ def migrate(db: sqlite3.Connection) -> None:
             allowed_actions_json TEXT NOT NULL,
             blocking_reasons_json TEXT NOT NULL,
             revision TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS artifacts (
@@ -67,7 +72,8 @@ def migrate(db: sqlite3.Connection) -> None:
             uri TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             producer_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS approvals (
@@ -79,7 +85,8 @@ def migrate(db: sqlite3.Connection) -> None:
             decided_by_json TEXT,
             comment TEXT,
             created_at TEXT NOT NULL,
-            decided_at TEXT
+            decided_at TEXT,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS gate_results (
@@ -90,7 +97,8 @@ def migrate(db: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             evidence_json TEXT NOT NULL,
             actor_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS terminal_sessions (
@@ -103,7 +111,9 @@ def migrate(db: sqlite3.Connection) -> None:
             cwd TEXT NOT NULL,
             pid INTEGER,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
         """
     )
