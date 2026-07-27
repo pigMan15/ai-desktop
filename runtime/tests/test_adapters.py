@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from workflow_platform.adapters.base import DetectionResult
 from workflow_platform.adapters.harness import HarnessAdapter
@@ -76,3 +77,51 @@ def test_harness_imports_workflow_definition_with_source_metadata() -> None:
 def test_harness_import_raises_clear_error_when_workflow_yaml_missing() -> None:
     with pytest.raises(FileNotFoundError, match=r"\.harness[/\\]workflow\.yaml"):
         HarnessAdapter().import_workflow(FIXTURES / "missing_project")
+
+
+def test_harness_import_raises_clear_error_when_workflow_yaml_empty() -> None:
+    project_path = FIXTURES / "empty_harness_project"
+    workflow_path = project_path / ".harness" / "workflow.yaml"
+
+    with pytest.raises(ValueError) as exc_info:
+        HarnessAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Harness workflow 文件为空" in message
+    assert str(workflow_path) in message
+
+
+def test_harness_import_wraps_invalid_yaml_with_context() -> None:
+    project_path = FIXTURES / "invalid_yaml_harness_project"
+    workflow_path = project_path / ".harness" / "workflow.yaml"
+
+    with pytest.raises(ValueError) as exc_info:
+        HarnessAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert f"Harness workflow 文件无效: {workflow_path}" in message
+    assert isinstance(exc_info.value.__cause__, yaml.YAMLError)
+
+
+def test_harness_import_rejects_non_mapping_yaml() -> None:
+    project_path = FIXTURES / "non_mapping_harness_project"
+    workflow_path = project_path / ".harness" / "workflow.yaml"
+
+    with pytest.raises(ValueError) as exc_info:
+        HarnessAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Harness workflow 顶层必须是 mapping" in message
+    assert str(workflow_path) in message
+
+
+def test_harness_import_wraps_validation_error_with_context() -> None:
+    project_path = FIXTURES / "missing_required_harness_project"
+    workflow_path = project_path / ".harness" / "workflow.yaml"
+
+    with pytest.raises(ValueError) as exc_info:
+        HarnessAdapter().import_workflow(project_path)
+
+    message = str(exc_info.value)
+    assert "Harness workflow 导入失败" in message
+    assert str(workflow_path) in message

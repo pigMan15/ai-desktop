@@ -1,0 +1,6 @@
+id: demo-workflow
+nodes:
+  - id: plan
+    name: Plan
+    kind: task
+  - broken: [
