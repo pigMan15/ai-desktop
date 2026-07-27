@@ -291,13 +291,38 @@ class WorkflowRuntimeService:
         )
 
     def list_artifacts(self, run_id: str) -> list[dict]:
+        self.get_projection(run_id)
         return self._artifacts.list_for_run(run_id)
 
     def list_approvals(self, run_id: str) -> list[dict]:
+        self.get_projection(run_id)
         return self._approvals.list_for_run(run_id)
 
     def list_gate_results(self, run_id: str) -> list[dict]:
+        self.get_projection(run_id)
         return self._gate_results.list_for_run(run_id)
+
+    def get_run(self, run_id: str) -> dict:
+        return self.get_projection(run_id).model_dump()
+
+    def timeline(self, run_id: str) -> list[dict]:
+        self.get_projection(run_id)
+        return [event.model_dump() for event in self._events.list_for_run(run_id)]
+
+    def rebuild_projection(self, run_id: str, *, now: str) -> RunProjection:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                workflow = self._runs.workflow_for_run(run_id)
+                events = self._events.list_for_run(run_id)
+                projection = rebuild_projection(run_id, workflow, events)
+                self._projections.save(projection)
+                self._db.commit()
+                return projection
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
 
     def _transition_run(
         self,
