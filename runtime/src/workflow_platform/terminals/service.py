@@ -20,6 +20,19 @@ class TerminalSession(TypedDict):
     updatedAt: str
 
 
+class TerminalSessionRecord(TypedDict):
+    id: str
+    project_id: str
+    run_id: str
+    node_id: str
+    kind: TerminalKind
+    status: str
+    cwd: str
+    pid: int | None
+    created_at: str
+    updated_at: str
+
+
 def create_terminal_session(
     *,
     project_id: str,
@@ -32,13 +45,16 @@ def create_terminal_session(
     if kind not in {"shell", "codex"}:
         raise ValueError("terminal kind must be shell or codex")
 
-    resolved_cwd = Path(cwd).resolve()
+    cwd_path = Path(cwd)
     if project_root is not None:
         resolved_root = Path(project_root).resolve()
+        resolved_cwd = (resolved_root / cwd_path if not cwd_path.is_absolute() else cwd_path).resolve()
         try:
             resolved_cwd.relative_to(resolved_root)
         except ValueError as exc:
             raise ValueError("terminal cwd must stay within project root") from exc
+    else:
+        resolved_cwd = cwd_path.resolve()
 
     now = datetime.now(UTC).isoformat()
 
@@ -53,4 +69,19 @@ def create_terminal_session(
         "pid": None,
         "createdAt": now,
         "updatedAt": now,
+    }
+
+
+def terminal_session_to_record(session: TerminalSession) -> TerminalSessionRecord:
+    return {
+        "id": session["id"],
+        "project_id": session["projectId"],
+        "run_id": session["runId"],
+        "node_id": session["nodeId"],
+        "kind": session["kind"],
+        "status": session["status"],
+        "cwd": session["cwd"],
+        "pid": session["pid"],
+        "created_at": session["createdAt"],
+        "updated_at": session["updatedAt"],
     }

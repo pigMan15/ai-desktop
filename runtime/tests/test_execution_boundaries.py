@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from workflow_platform.execution.agent import AgentExecutor, DefaultAgentExecutor
-from workflow_platform.terminals.service import create_terminal_session
+from workflow_platform.terminals.service import create_terminal_session, terminal_session_to_record
 
 
 @pytest.fixture
@@ -59,6 +59,37 @@ def test_create_terminal_session_returns_stable_schema_fields(workspace_path: Pa
     assert session["createdAt"] == session["updatedAt"]
 
 
+def test_terminal_session_to_record_maps_api_dto_to_persistence_schema(workspace_path: Path) -> None:
+    session = create_terminal_session(
+        project_id="project-1",
+        run_id="run-1",
+        node_id="node-1",
+        kind="shell",
+        cwd=workspace_path,
+        project_root=workspace_path.parent,
+    )
+
+    record = terminal_session_to_record(session)
+
+    assert set(record) == {
+        "id",
+        "project_id",
+        "run_id",
+        "node_id",
+        "kind",
+        "status",
+        "cwd",
+        "pid",
+        "created_at",
+        "updated_at",
+    }
+    assert record["project_id"] == session["projectId"]
+    assert record["run_id"] == session["runId"]
+    assert record["node_id"] == session["nodeId"]
+    assert record["created_at"] == session["createdAt"]
+    assert record["updated_at"] == session["updatedAt"]
+
+
 @pytest.mark.parametrize("kind", ["shell", "codex"])
 def test_create_terminal_session_accepts_supported_kinds(workspace_path: Path, kind: str) -> None:
     session = create_terminal_session(
@@ -70,6 +101,57 @@ def test_create_terminal_session_accepts_supported_kinds(workspace_path: Path, k
     )
 
     assert session["kind"] == kind
+
+
+def test_create_terminal_session_resolves_relative_cwd_inside_project_root(workspace_path: Path) -> None:
+    session = create_terminal_session(
+        project_id="project-1",
+        run_id="run-1",
+        node_id="node-1",
+        kind="shell",
+        cwd="child",
+        project_root=workspace_path,
+    )
+
+    assert session["cwd"] == str((workspace_path / "child").resolve())
+
+
+def test_create_terminal_session_allows_relative_project_root_cwd(workspace_path: Path) -> None:
+    session = create_terminal_session(
+        project_id="project-1",
+        run_id="run-1",
+        node_id="node-1",
+        kind="shell",
+        cwd=".",
+        project_root=workspace_path,
+    )
+
+    assert session["cwd"] == str(workspace_path.resolve())
+
+
+def test_create_terminal_session_allows_project_root_as_cwd(workspace_path: Path) -> None:
+    session = create_terminal_session(
+        project_id="project-1",
+        run_id="run-1",
+        node_id="node-1",
+        kind="shell",
+        cwd=workspace_path,
+        project_root=workspace_path,
+    )
+
+    assert session["cwd"] == str(workspace_path.resolve())
+
+
+def test_create_terminal_session_rejects_relative_cwd_escape(workspace_path: Path) -> None:
+    with pytest.raises(ValueError, match="within project root"):
+        create_terminal_session(
+            project_id="project-1",
+            run_id="run-1",
+            node_id="node-1",
+            kind="shell",
+            cwd="..",
+            project_root=workspace_path,
+        )
 
 
 def test_create_terminal_session_rejects_cwd_outside_project_root(workspace_path: Path) -> None:
