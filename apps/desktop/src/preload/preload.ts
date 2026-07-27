@@ -1,5 +1,5 @@
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 
-contextBridge.exposeInMainWorld("workflowPlatform", {
-  version: "0.1.0"
+contextBridge.exposeInMainWorld("workflowRuntime", {
+  health: () => ipcRenderer.invoke("runtime:health")
 });

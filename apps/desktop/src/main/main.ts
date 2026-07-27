@@ -1,8 +1,12 @@
-import { BrowserWindow, app } from "electron";
+import { BrowserWindow, app, ipcMain } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runtimeHealth } from "./runtime.js";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const rendererUrl = process.env.RENDERER_URL ?? "http://127.0.0.1:5173";
+
+ipcMain.handle("runtime:health", () => runtimeHealth());
 
 async function createWindow() {
   const window = new BrowserWindow({
@@ -13,14 +17,7 @@ async function createWindow() {
     }
   });
 
-  const rendererUrl = process.env.VITE_DEV_SERVER_URL;
-
-  if (rendererUrl) {
-    await window.loadURL(rendererUrl);
-    return;
-  }
-
-  await window.loadFile(path.join(currentDir, "../../../renderer/index.html"));
+  await window.loadURL(rendererUrl);
 }
 
 app.whenReady().then(async () => {
