@@ -196,7 +196,7 @@ def test_runtime_service_persists_artifact_approval_and_gate_records(tmp_path) -
 def test_runtime_service_rejects_generic_human_approval_without_writing_record(tmp_path) -> None:
     service, run, submitted = create_submitted_run(tmp_path)
 
-    with pytest.raises(ValueError, match="MISSING_APPROVAL"):
+    with pytest.raises(ValueError, match="typed governance service methods"):
         service.transition_run(
             run.runId,
             "HUMAN_APPROVED",
@@ -221,7 +221,7 @@ def test_runtime_service_rejects_generic_gate_pass_without_writing_record(tmp_pa
         now=NOW,
     )
 
-    with pytest.raises(ValueError, match="MISSING_GATE_RESULT"):
+    with pytest.raises(ValueError, match="typed governance service methods"):
         service.transition_run(
             run.runId,
             "GATE_PASSED",
@@ -257,6 +257,36 @@ def test_runtime_service_rejects_gate_waiver_reason_for_passed_status_without_wr
             status="passed",
             evidence=[],
             waiver_reason="temporary",
+            actor=trusted_verifier().model_dump(),
+            expected_revision=approval.revision,
+            now=NOW,
+        )
+
+    assert service.list_gate_results(run.runId) == []
+
+
+def test_runtime_service_rejects_empty_gate_waiver_reason_for_passed_status_without_writing_record(
+    tmp_path,
+) -> None:
+    service, run, submitted = create_submitted_run(tmp_path)
+    approval = service.decide_approval(
+        run.runId,
+        node_id="plan",
+        decision="approved",
+        actor=trusted_human().model_dump(),
+        comment=None,
+        expected_revision=submitted.revision,
+        now=NOW,
+    )
+
+    with pytest.raises(ValueError, match="INVALID_TRANSITION"):
+        service.submit_gate_result(
+            run.runId,
+            node_id="plan",
+            gate_id="plan-ready",
+            status="passed",
+            evidence=["artifact:plan"],
+            waiver_reason="",
             actor=trusted_verifier().model_dump(),
             expected_revision=approval.revision,
             now=NOW,
