@@ -6,8 +6,8 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "electron .",
-    "build": "tsc --outDir dist --rootDir src --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --esModuleInterop --skipLibCheck src/main/main.ts src/preload/preload.ts",
-    "test": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --esModuleInterop --skipLibCheck src/main/main.ts src/preload/preload.ts"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "electron": "^31.0.0"

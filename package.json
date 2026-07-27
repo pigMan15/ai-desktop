@@ -10,8 +10,8 @@
   "scripts": {
     "dev:renderer": "npm --workspace apps/renderer run dev",
     "dev:desktop": "npm --workspace apps/desktop run dev",
-    "build": "npm --workspaces run build",
-    "test": "npm --workspaces run test",
+    "build": "npm --workspace packages/contracts run build && npm --workspace apps/renderer run build && npm --workspace apps/desktop run build",
+    "test": "npm --workspace packages/contracts run test && npm --workspace apps/renderer run test && npm --workspace apps/desktop run test",
     "test:runtime": "cd runtime && python -m pytest",
     "verify": "npm run test && npm run test:runtime"
   },

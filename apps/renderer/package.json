@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build",
-    "test": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --strict --jsx react-jsx --esModuleInterop --skipLibCheck src/main.tsx src/app/App.tsx"
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "test": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@workflow-platform/contracts": "0.1.0",
