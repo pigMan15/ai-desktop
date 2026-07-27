@@ -169,6 +169,24 @@ def test_transition_expected_revision_uses_only_target_run_events() -> None:
     assert result["run"].nodeStates["draft"] == "AWAITING_APPROVAL"
 
 
+def test_transition_rejects_new_event_for_different_run_id_without_emitting() -> None:
+    result = transition(
+        "run-1",
+        linear_workflow(),
+        [],
+        event("event-1", "NODE_STARTED", "draft", agent_actor(), run_id="run-2"),
+        expected_revision="0",
+    )
+
+    assert result["accepted"] is False
+    assert result["revision"] == "0"
+    assert result["run"].revision == "0"
+    assert result["run"].nodeStates["draft"] == "READY"
+    assert result["emittedEvents"] == []
+    assert result["blockingReasons"][0].code == "INVALID_TRANSITION"
+    assert "runId" in result["blockingReasons"][0].message
+
+
 def test_transition_rejects_revision_conflict_without_emitting_events() -> None:
     result = transition(
         "run-1",

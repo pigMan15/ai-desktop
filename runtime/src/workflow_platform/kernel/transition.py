@@ -12,6 +12,14 @@ def transition(
     target_events = [candidate for candidate in events if candidate.runId == run_id]
     current_projection = rebuild_projection(run_id, workflow, events)
 
+    if event.runId != run_id:
+        return _rejected(
+            current_projection,
+            "INVALID_TRANSITION",
+            "Event runId does not match target run",
+            event.nodeId,
+        )
+
     if expected_revision != current_projection.revision:
         return _rejected(
             current_projection,
