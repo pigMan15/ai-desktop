@@ -33,13 +33,15 @@ class MarkdownChecklistAdapter:
     def import_workflow(self, project_path: Path) -> WorkflowDefinition:
         workflow_path = self._workflow_path(project_path)
         if not workflow_path.exists():
-            raise FileNotFoundError(f"未找到 Markdown checklist 文件: {workflow_path}")
+            raise FileNotFoundError(f"未找到 workflow.md: {workflow_path}")
 
         content = workflow_path.read_text(encoding="utf-8")
         title = self._parse_title(content) or "Markdown Checklist"
         items = self._parse_checklist_items(content)
         if not items:
-            raise ValueError(f"Markdown checklist 未找到任务项: {workflow_path}")
+            raise ValueError(
+                f"Markdown checklist 中没有可导入的任务项: {workflow_path}"
+            )
 
         nodes = [
             {

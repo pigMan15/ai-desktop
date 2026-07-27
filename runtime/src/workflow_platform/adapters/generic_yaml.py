@@ -33,7 +33,7 @@ class GenericYamlAdapter:
     def import_workflow(self, project_path: Path) -> WorkflowDefinition:
         workflow_path = self._workflow_path(project_path)
         if not workflow_path.exists():
-            raise FileNotFoundError(f"未找到 Generic YAML workflow 文件: {workflow_path}")
+            raise FileNotFoundError(f"未找到 workflow.yaml: {workflow_path}")
 
         try:
             with workflow_path.open("r", encoding="utf-8") as workflow_file:

@@ -157,11 +157,41 @@ def test_markdown_checklist_adapter_imports_checked_tasks_as_workflow() -> None:
     assert workflow.edges[0].to == "step-2"
 
 
+def test_markdown_checklist_detect_returns_clear_error_when_workflow_md_missing() -> None:
+    result = MarkdownChecklistAdapter().detect(FIXTURES / "missing_project")
+
+    assert result.score == 0
+    assert "未找到 workflow.md" in result.diagnostics
+
+
+def test_markdown_checklist_import_raises_clear_error_when_workflow_md_missing() -> None:
+    with pytest.raises(FileNotFoundError) as exc_info:
+        MarkdownChecklistAdapter().import_workflow(FIXTURES / "missing_project")
+
+    message = str(exc_info.value)
+    assert "未找到 workflow.md" in message
+
+
 def test_generic_yaml_adapter_imports_canonical_schema() -> None:
     workflow = GenericYamlAdapter().import_workflow(FIXTURES / "generic_yaml_project")
     assert workflow.sourceAdapter == "generic-yaml"
     assert workflow.nodes[0].kind == "agent"
     assert workflow.gates[0].id == "tests"
+
+
+def test_generic_yaml_detect_returns_clear_error_when_workflow_yaml_missing() -> None:
+    result = GenericYamlAdapter().detect(FIXTURES / "missing_project")
+
+    assert result.score == 0
+    assert "未找到 workflow.yaml" in result.diagnostics
+
+
+def test_generic_yaml_import_raises_clear_error_when_workflow_yaml_missing() -> None:
+    with pytest.raises(FileNotFoundError) as exc_info:
+        GenericYamlAdapter().import_workflow(FIXTURES / "missing_project")
+
+    message = str(exc_info.value)
+    assert "未找到 workflow.yaml" in message
 
 
 def test_registry_includes_three_p1_adapters() -> None:
