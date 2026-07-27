@@ -1,8 +1,22 @@
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, TypedDict
 from uuid import uuid4
 
 
-AgentResult = dict[str, Any]
+class CheckpointRef(TypedDict):
+    id: str
+    provider: str
+
+
+class ExecutionResult(TypedDict):
+    status: Literal["interrupted", "completed"]
+    messages: list[str]
+    checkpoint: CheckpointRef
+
+
+class ExecutionHandle(TypedDict):
+    status: Literal["interrupted", "completed"]
+    messages: list[str]
+    checkpoint: CheckpointRef
 
 
 class AgentExecutor(Protocol):
@@ -14,11 +28,11 @@ class AgentExecutor(Protocol):
         node_id: str,
         agent: str,
         input: dict[str, Any],
-    ) -> AgentResult: ...
+    ) -> ExecutionResult: ...
 
-    def resume(self, *, handle: AgentResult, input: dict[str, Any]) -> AgentResult: ...
+    def resume(self, *, handle: ExecutionHandle, input: dict[str, Any]) -> ExecutionResult: ...
 
-    def stop(self, *, handle: AgentResult) -> None: ...
+    def stop(self, *, handle: ExecutionHandle) -> None: ...
 
 
 class DefaultAgentExecutor:
@@ -30,25 +44,38 @@ class DefaultAgentExecutor:
         node_id: str,
         agent: str,
         input: dict[str, Any],
-    ) -> AgentResult:
+    ) -> ExecutionResult:
         return {
-            "project_id": project_id,
-            "run_id": run_id,
-            "node_id": node_id,
-            "agent": agent,
-            "checkpoint": str(uuid4()),
             "status": "interrupted",
+            "messages": [],
+            "checkpoint": {
+                "id": str(uuid4()),
+                "provider": agent,
+            },
         }
 
-    def resume(self, *, handle: AgentResult, input: dict[str, Any]) -> AgentResult:
+    def resume(self, *, handle: ExecutionHandle, input: dict[str, Any]) -> ExecutionResult:
+        checkpoint = _require_checkpoint(handle)
         return {
-            "project_id": handle.get("project_id"),
-            "run_id": handle.get("run_id"),
-            "node_id": handle.get("node_id"),
-            "agent": handle.get("agent"),
-            "checkpoint": handle["checkpoint"],
             "status": "completed",
+            "messages": [],
+            "checkpoint": checkpoint,
         }
 
-    def stop(self, *, handle: AgentResult) -> None:
+    def stop(self, *, handle: ExecutionHandle) -> None:
         return None
+
+
+def _require_checkpoint(handle: ExecutionHandle) -> CheckpointRef:
+    checkpoint = handle.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        raise ValueError("execution handle requires checkpoint")
+
+    checkpoint_id = checkpoint.get("id")
+    provider = checkpoint.get("provider")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        raise ValueError("execution handle checkpoint requires id")
+    if not isinstance(provider, str) or not provider:
+        raise ValueError("execution handle checkpoint requires provider")
+
+    return {"id": checkpoint_id, "provider": provider}

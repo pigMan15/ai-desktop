@@ -18,16 +18,45 @@ def test_create_terminal_session_binds_scope_and_status(workspace_path: Path) ->
         node_id="node-1",
         kind="shell",
         cwd=workspace_path,
+        project_root=workspace_path.parent,
     )
 
     assert session["id"]
     assert isinstance(session["id"], str)
-    assert session["project_id"] == "project-1"
-    assert session["run_id"] == "run-1"
-    assert session["node_id"] == "node-1"
+    assert session["projectId"] == "project-1"
+    assert session["runId"] == "run-1"
+    assert session["nodeId"] == "node-1"
     assert session["kind"] == "shell"
     assert session["cwd"] == str(workspace_path.resolve())
     assert session["status"] == "created"
+
+
+def test_create_terminal_session_returns_stable_schema_fields(workspace_path: Path) -> None:
+    session = create_terminal_session(
+        project_id="project-1",
+        run_id="run-1",
+        node_id="node-1",
+        kind="shell",
+        cwd=workspace_path,
+        project_root=workspace_path.parent,
+    )
+
+    assert set(session) == {
+        "id",
+        "projectId",
+        "runId",
+        "nodeId",
+        "kind",
+        "status",
+        "cwd",
+        "pid",
+        "createdAt",
+        "updatedAt",
+    }
+    assert session["pid"] is None
+    assert session["createdAt"]
+    assert session["updatedAt"]
+    assert session["createdAt"] == session["updatedAt"]
 
 
 @pytest.mark.parametrize("kind", ["shell", "codex"])
@@ -41,6 +70,18 @@ def test_create_terminal_session_accepts_supported_kinds(workspace_path: Path, k
     )
 
     assert session["kind"] == kind
+
+
+def test_create_terminal_session_rejects_cwd_outside_project_root(workspace_path: Path) -> None:
+    with pytest.raises(ValueError, match="within project root"):
+        create_terminal_session(
+            project_id="project-1",
+            run_id="run-1",
+            node_id="node-1",
+            kind="shell",
+            cwd=workspace_path.parent / "other-project",
+            project_root=workspace_path,
+        )
 
 
 def test_create_terminal_session_rejects_unsupported_kind(workspace_path: Path) -> None:
@@ -64,8 +105,11 @@ def test_default_agent_executor_start_returns_interrupted_checkpoint() -> None:
     )
 
     assert result["status"] == "interrupted"
-    assert result["checkpoint"]
-    assert isinstance(result["checkpoint"], str)
+    assert result["messages"] == []
+    assert set(result["checkpoint"]) == {"id", "provider"}
+    assert result["checkpoint"]["id"]
+    assert isinstance(result["checkpoint"]["id"], str)
+    assert result["checkpoint"]["provider"] == "codex"
 
 
 def test_default_agent_executor_resume_completes_and_preserves_checkpoint() -> None:
@@ -82,6 +126,18 @@ def test_default_agent_executor_resume_completes_and_preserves_checkpoint() -> N
 
     assert resumed["status"] == "completed"
     assert resumed["checkpoint"] == started["checkpoint"]
+    assert resumed["messages"] == []
+
+
+def test_default_agent_executor_resume_rejects_handle_without_checkpoint() -> None:
+    with pytest.raises(ValueError, match="checkpoint"):
+        DefaultAgentExecutor().resume(
+            handle={
+                "status": "interrupted",
+                "messages": [],
+            },
+            input={"answer": "continue"},
+        )
 
 
 def test_default_agent_executor_stop_returns_no_status_event() -> None:
