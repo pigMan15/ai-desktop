@@ -13,6 +13,7 @@
 ```powershell
 npm.cmd run verify
 npm.cmd run test:e2e
+npm.cmd run test:e2e:p1
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 git status --short
 ```
@@ -20,7 +21,8 @@ git status --short
 结果摘要：
 
 - `npm.cmd run verify`：通过。contracts 5 个测试通过，renderer 4 个测试通过，desktop 测试/类型检查通过，runtime pytest 102 个测试通过；pytest 输出 1 个 `StarletteDeprecationWarning`，不影响通过结果。默认 verify 不运行浏览器 E2E。
-- `npm.cmd run test:e2e`：通过。Playwright Chromium 1 个 smoke 测试通过，验证 MVP workbench 中 `Projects`、`Run Dashboard`、`Recovery` 可见。
+- `npm.cmd run test:e2e`：通过。Playwright Chromium smoke 测试通过，验证 MVP workbench 中 `Projects`、`Run Dashboard`、`Recovery` 可见，并覆盖 P1 Runtime-backed product loop 状态。
+- `npm.cmd run test:e2e:p1`：通过。Playwright Chromium 1 个 P1 smoke 测试通过，验证 renderer 中 `Runtime API 已连接`、`demo-workflow`、`artifact://plan.md`、`WAITING_FOR_HUMAN` 可见。
 - `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1`：通过。执行与默认 verify 等价的 PowerShell 验证路径，runtime pytest 102 个测试通过，并保留同一个 `StarletteDeprecationWarning`。
 - `git status --short`：提交后应为空。
 
@@ -43,7 +45,7 @@ git status --short
 | Runtime API | `runtime/tests/test_api.py` 验证 FastAPI `/health`、`/projects/import`、`/runs`、`/runs/{run_id}/transition` 和 `/runs/{run_id}/artifacts` endpoint。 | `runtime/src/workflow_platform/api/app.py`, `runtime/src/workflow_platform/main.py` |
 | Electron desktop boundary | `apps/desktop/test/main.test.ts`、`apps/desktop/test/runtime-health.test-d.ts` 覆盖 desktop main/preload/runtime 的基础边界、显式 webPreferences 安全配置和 renderer URL 白名单。 | `apps/desktop/src/main/*.ts`, `apps/desktop/src/preload/*.ts` |
 | Renderer workbench | `apps/renderer/src/app/App.test.tsx` 验证 MVP 导航和页面入口。 | `apps/renderer/src/app/App.tsx`, `apps/renderer/src/features/*/*.tsx` |
-| Browser E2E smoke | `tests/e2e/workflow-mvp.spec.ts` 验证浏览器中可见 `Projects`、`Run Dashboard`、`Recovery`。 | `playwright.config.ts`, `tests/e2e/workflow-mvp.spec.ts` |
+| Browser E2E smoke | `tests/e2e/workflow-mvp.spec.ts` 验证浏览器中可见 `Projects`、`Run Dashboard`、`Recovery`；`tests/e2e/workflow-p1.spec.ts` 提供 P1 Runtime-backed product loop 状态 smoke 路径。 | `playwright.config.ts`, `tests/e2e/workflow-mvp.spec.ts`, `tests/e2e/workflow-p1.spec.ts` |
 | Recovery projection rebuild | `runtime/tests/test_kernel.py` 覆盖 projection rebuild；renderer Recovery 页面提供 MVP 入口。 | `runtime/src/workflow_platform/kernel/projection.py`, `apps/renderer/src/features/recovery/RecoveryPage.tsx` |
 | Unified verification path | `npm.cmd run verify` 和 `scripts/verify.ps1` 覆盖默认非浏览器验证路径；E2E 通过 `npm.cmd run test:e2e` 单独运行。 | `package.json`, `scripts/verify.ps1` |
 
@@ -59,7 +61,7 @@ git status --short
 - Renderer workbench 是 MVP 信息架构和 Runtime-backed 路径说明，不是完整交互式产品 UI。
 - Approval/Gate/Artifact 已有基础治理约束，但完整审计日志、策略引擎、签名、证据链和角色权限模型仍需后续补齐。
 - Knowledge publishing、跨项目知识库、搜索索引、引用追踪和高级发布流不在当前 MVP 完成范围。
-- 浏览器 E2E 不包含在默认 `verify` 中，需要通过 `npm.cmd run test:e2e` 单独执行。
+- 浏览器 E2E 不包含在默认 `verify` 中，需要通过 `npm.cmd run test:e2e` 单独执行；P1 smoke 路径可通过 `npm.cmd run test:e2e:p1` 单独执行。
 
 ## 自审说明
 

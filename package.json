@@ -14,6 +14,7 @@
     "test": "npm --workspace packages/contracts run test && npm --workspace apps/renderer run test && npm --workspace apps/desktop run test",
     "test:runtime": "cd runtime && python -m pytest",
     "test:e2e": "playwright test",
+    "test:e2e:p1": "playwright test tests/e2e/workflow-p1.spec.ts",
     "verify": "npm run test && npm run test:runtime",
     "verify:ps": "powershell -ExecutionPolicy Bypass -File scripts/verify.ps1"
   },
