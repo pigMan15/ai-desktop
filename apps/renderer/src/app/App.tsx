@@ -10,6 +10,7 @@ import { SettingsPage } from "../features/settings/SettingsPage";
 import { TerminalPage } from "../features/terminal/TerminalPage";
 import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
 import { Navigation } from "./navigation";
+import { normalizeRoute, routeHash } from "./routes";
 import {
   createRuntimeClient,
   loadWorkbenchState,
@@ -19,6 +20,7 @@ import {
 
 export function App() {
   const [state, setState] = useState<RuntimeWorkbenchState | null>(null);
+  const [currentRoute, setCurrentRoute] = useState(() => normalizeRoute(window.location.hash));
   const [apiBaseUrl, setApiBaseUrl] = useState("http://127.0.0.1:8765");
   const [projectPath, setProjectPath] = useState("");
   const [artifactPath, setArtifactPath] = useState("");
@@ -47,6 +49,20 @@ export function App() {
     return () => {
       isMounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const route = normalizeRoute(window.location.hash);
+      if (window.location.hash !== routeHash(route)) {
+        window.history.replaceState(null, "", routeHash(route));
+      }
+      setCurrentRoute(route);
+    };
+
+    syncRoute();
+    window.addEventListener("hashchange", syncRoute);
+    return () => window.removeEventListener("hashchange", syncRoute);
   }, []);
 
   const connectionText =
@@ -193,7 +209,7 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <Navigation />
+      <Navigation currentRoute={currentRoute} />
       <main className="workbench" aria-labelledby="app-title">
         <header className="workbench-header">
           <div>
@@ -206,7 +222,8 @@ export function App() {
             <span>{connectionText}</span>
           </div>
         </header>
-        <section className="panel panel-wide" aria-labelledby="operations-title">
+        {currentRoute === "runs" ? (
+          <section className="panel panel-wide" aria-labelledby="operations-title">
           <div className="panel-heading">
             <div>
               <p className="section-kicker">Operations</p>
@@ -266,10 +283,12 @@ export function App() {
               <li key={event.id}>{formatAgentPayload(event.payload)}</li>
             ))}
           </ul>
-        </section>
+          </section>
+        ) : null}
         <div className="content-grid">
-          <ProjectDashboard state={state} />
-          <RunDashboard
+          {currentRoute === "projects" ? <ProjectDashboard state={state} /> : null}
+          {currentRoute === "runs" ? (
+            <RunDashboard
             state={state}
             onStartNode={() =>
               updateProjection(
@@ -306,14 +325,15 @@ export function App() {
                 `Gate 已通过：${nodeId}`,
               )
             }
-          />
-          <WorkflowViewer />
-          <TerminalPage />
-          <GatesPage state={state} />
-          <ArtifactsPage state={state} />
-          <ApprovalInbox state={state} />
-          <RecoveryPage state={state} />
-          <SettingsPage />
+            />
+          ) : null}
+          {currentRoute === "workflow" ? <WorkflowViewer /> : null}
+          {currentRoute === "terminal" ? <TerminalPage /> : null}
+          {currentRoute === "gates" ? <GatesPage state={state} /> : null}
+          {currentRoute === "artifacts" ? <ArtifactsPage state={state} /> : null}
+          {currentRoute === "approvals" ? <ApprovalInbox state={state} /> : null}
+          {currentRoute === "recovery" ? <RecoveryPage state={state} /> : null}
+          {currentRoute === "settings" ? <SettingsPage /> : null}
         </div>
       </main>
     </div>

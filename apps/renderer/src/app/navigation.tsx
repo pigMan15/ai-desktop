@@ -1,16 +1,6 @@
-export const navigationItems = [
-  { label: "Projects", href: "#projects" },
-  { label: "Runs", href: "#runs" },
-  { label: "Workflow", href: "#workflow" },
-  { label: "Terminal", href: "#terminal" },
-  { label: "Gates", href: "#gates" },
-  { label: "Artifacts", href: "#artifacts" },
-  { label: "Approvals", href: "#approvals" },
-  { label: "Recovery", href: "#recovery" },
-  { label: "Settings", href: "#settings" },
-];
+import { routes, type RouteId } from "./routes";
 
-export function Navigation() {
+export function Navigation({ currentRoute }: { currentRoute: RouteId }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -18,8 +8,13 @@ export function Navigation() {
         <p className="product-name">工作台</p>
       </div>
       <nav aria-label="主导航" className="nav-list">
-        {navigationItems.map((item) => (
-          <a href={item.href} key={item.href} className="nav-link">
+        {routes.map((item) => (
+          <a
+            href={item.hash}
+            key={item.id}
+            className="nav-link"
+            aria-current={item.id === currentRoute ? "page" : undefined}
+          >
             {item.label}
           </a>
         ))}
