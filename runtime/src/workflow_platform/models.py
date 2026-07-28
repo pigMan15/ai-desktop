@@ -66,6 +66,8 @@ RunEventType = Literal[
 ActorType = Literal["human", "agent", "system", "verifier", "executor", "adapter"]
 ActorSource = Literal["renderer", "runtime", "terminal", "agent", "adapter"]
 RunStatus = Literal["CREATED", "IN_PROGRESS", "REVIEWING", "BLOCKED", "DONE", "ARCHIVED"]
+AgentProvider = Literal["codex", "claude", "fake"]
+AgentJobStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
 NodeState = Literal[
     "PENDING",
     "READY",
@@ -180,3 +182,27 @@ class RunProjection(CanonicalModel):
     blockingReasons: list[BlockingReason]
     revision: str
     updatedAt: str
+
+
+class AgentJob(CanonicalModel):
+    id: str
+    runId: str
+    nodeId: str
+    provider: AgentProvider
+    status: AgentJobStatus
+    command: list[str]
+    cwd: str
+    pid: int | None = None
+    summary: str | None = None
+    error: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class AgentOutputEvent(CanonicalModel):
+    id: str
+    jobId: str
+    sequence: int
+    kind: str
+    payload: dict[str, Any]
+    createdAt: str

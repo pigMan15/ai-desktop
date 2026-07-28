@@ -448,6 +448,176 @@ class GateResultRepository:
         return results
 
 
+class AgentJobRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def create(
+        self,
+        *,
+        id: str,
+        run_id: str,
+        node_id: str,
+        provider: str,
+        status: str,
+        command: list[str],
+        cwd: str,
+        created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO agent_jobs (
+                id,
+                run_id,
+                node_id,
+                provider,
+                status,
+                command_json,
+                cwd,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                id,
+                run_id,
+                node_id,
+                provider,
+                status,
+                json.dumps(command, separators=(",", ":"), sort_keys=True),
+                cwd,
+                created_at,
+                created_at,
+            ),
+        )
+
+    def set_running(self, *, id: str, pid: int, updated_at: str) -> None:
+        self._db.execute(
+            """
+            UPDATE agent_jobs
+            SET status = ?, pid = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("RUNNING", pid, updated_at, id),
+        )
+
+    def finish(
+        self,
+        *,
+        id: str,
+        status: str,
+        summary: str | None,
+        error: str | None,
+        updated_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            UPDATE agent_jobs
+            SET status = ?, summary = ?, error = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, summary, error, updated_at, id),
+        )
+
+    def get(self, id: str) -> dict | None:
+        row = self._db.execute(
+            """
+            SELECT *
+            FROM agent_jobs
+            WHERE id = ?
+            """,
+            (id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._job_row_to_dict(row)
+
+    def list_for_run(self, run_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT *
+            FROM agent_jobs
+            WHERE run_id = ?
+            ORDER BY created_at, id
+            """,
+            (run_id,),
+        ).fetchall()
+        return [self._job_row_to_dict(row) for row in rows]
+
+    def append_output(
+        self,
+        *,
+        id: str,
+        job_id: str,
+        sequence: int,
+        kind: str,
+        payload: dict,
+        created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO agent_output_events (
+                id,
+                job_id,
+                sequence,
+                kind,
+                payload_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                id,
+                job_id,
+                sequence,
+                kind,
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                created_at,
+            ),
+        )
+
+    def list_output(self, job_id: str, after_sequence: int = 0) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT *
+            FROM agent_output_events
+            WHERE job_id = ? AND sequence > ?
+            ORDER BY sequence
+            """,
+            (job_id, after_sequence),
+        ).fetchall()
+        return [self._output_row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _job_row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "runId": row["run_id"],
+            "nodeId": row["node_id"],
+            "provider": row["provider"],
+            "status": row["status"],
+            "command": json.loads(row["command_json"]),
+            "cwd": row["cwd"],
+            "pid": row["pid"],
+            "summary": row["summary"],
+            "error": row["error"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    @staticmethod
+    def _output_row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "jobId": row["job_id"],
+            "sequence": row["sequence"],
+            "kind": row["kind"],
+            "payload": json.loads(row["payload_json"]),
+            "createdAt": row["created_at"],
+        }
+
+
 class ProjectionRepository:
     def __init__(self, db: sqlite3.Connection) -> None:
         self._db = db

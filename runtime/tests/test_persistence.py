@@ -4,10 +4,16 @@ import sqlite3
 
 import pytest
 
-from workflow_platform.models import WorkflowDefinition, WorkflowEdge, WorkflowNode
+from workflow_platform.models import (
+    AgentJob,
+    AgentOutputEvent,
+    WorkflowDefinition,
+    WorkflowEdge,
+    WorkflowNode,
+)
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
-from workflow_platform.persistence.repositories import WorkflowVersionRepository
+from workflow_platform.persistence.repositories import AgentJobRepository, WorkflowVersionRepository
 
 
 CORE_TABLES = {
@@ -20,6 +26,8 @@ CORE_TABLES = {
     "approvals",
     "gate_results",
     "terminal_sessions",
+    "agent_jobs",
+    "agent_output_events",
 }
 
 EXPECTED_COLUMNS = {
@@ -115,6 +123,28 @@ EXPECTED_COLUMNS = {
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
     ],
+    "agent_jobs": [
+        ("id", "TEXT", False, True),
+        ("run_id", "TEXT", True, False),
+        ("node_id", "TEXT", True, False),
+        ("provider", "TEXT", True, False),
+        ("status", "TEXT", True, False),
+        ("command_json", "TEXT", True, False),
+        ("cwd", "TEXT", True, False),
+        ("pid", "INTEGER", False, False),
+        ("summary", "TEXT", False, False),
+        ("error", "TEXT", False, False),
+        ("created_at", "TEXT", True, False),
+        ("updated_at", "TEXT", True, False),
+    ],
+    "agent_output_events": [
+        ("id", "TEXT", False, True),
+        ("job_id", "TEXT", True, False),
+        ("sequence", "INTEGER", True, False),
+        ("kind", "TEXT", True, False),
+        ("payload_json", "TEXT", True, False),
+        ("created_at", "TEXT", True, False),
+    ],
 }
 
 EXPECTED_FOREIGN_KEYS = {
@@ -132,6 +162,8 @@ EXPECTED_FOREIGN_KEYS = {
         ("project_id", "projects", "id"),
         ("run_id", "runs", "id"),
     ],
+    "agent_jobs": [("run_id", "runs", "id")],
+    "agent_output_events": [("job_id", "agent_jobs", "id")],
 }
 
 
@@ -218,6 +250,61 @@ def insert_project(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def insert_run(db: sqlite3.Connection) -> None:
+    insert_project(db)
+    db.execute(
+        """
+        INSERT INTO workflow_versions (
+            id,
+            project_id,
+            adapter_id,
+            name,
+            version,
+            definition_json,
+            content_hash,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "workflow-version-1",
+            "project-1",
+            "fixture",
+            "Demo workflow",
+            "1",
+            "{}",
+            "sha256:workflow-1",
+            "2026-07-27T13:00:00Z",
+        ),
+    )
+    db.execute(
+        """
+        INSERT INTO runs (
+            id,
+            project_id,
+            workflow_version_id,
+            title,
+            status,
+            context_json,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "run-1",
+            "project-1",
+            "workflow-version-1",
+            "Demo run",
+            "CREATED",
+            "{}",
+            "2026-07-27T13:00:00Z",
+            "2026-07-27T13:00:00Z",
+        ),
+    )
+    db.commit()
+
+
 def test_connect_enables_row_factory_wal_and_foreign_keys() -> None:
     db = connect(fresh_db_path("connect"))
 
@@ -252,6 +339,14 @@ def test_run_events_has_unique_run_sequence_index() -> None:
     migrate(db)
 
     assert ("run_id", "sequence") in unique_index_columns(db, "run_events")
+
+
+def test_agent_output_events_has_unique_job_sequence_index() -> None:
+    db = connect(fresh_db_path("agent_output_unique"))
+
+    migrate(db)
+
+    assert ("job_id", "sequence") in unique_index_columns(db, "agent_output_events")
 
 
 def test_migrate_adds_foreign_keys_for_relationship_columns() -> None:
@@ -417,3 +512,168 @@ def test_workflow_version_repository_upserts_duplicate_id_for_reimport() -> None
 
     assert row["name"] == "Updated workflow"
     assert row["content_hash"] == "sha256:workflow-2"
+
+
+def test_agent_job_models_accept_camel_case_alias_payloads() -> None:
+    job = AgentJob.model_validate(
+        {
+            "id": "agent-job-1",
+            "runId": "run-1",
+            "nodeId": "implement",
+            "provider": "fake",
+            "status": "QUEUED",
+            "command": ["fake-agent", "run"],
+            "cwd": "C:/project",
+            "pid": None,
+            "summary": None,
+            "error": None,
+            "createdAt": "2026-07-27T13:00:00Z",
+            "updatedAt": "2026-07-27T13:00:00Z",
+        }
+    )
+    event = AgentOutputEvent.model_validate(
+        {
+            "id": "agent-output-1",
+            "jobId": "agent-job-1",
+            "sequence": 1,
+            "kind": "message",
+            "payload": {"text": "planning"},
+            "createdAt": "2026-07-27T13:00:00Z",
+        }
+    )
+
+    assert job.model_dump(by_alias=True)["runId"] == "run-1"
+    assert job.provider == "fake"
+    assert event.model_dump(by_alias=True)["jobId"] == "agent-job-1"
+
+
+def test_agent_job_repository_round_trips_job_and_output() -> None:
+    db = connect(fresh_db_path("agent_job_round_trip"))
+    migrate(db)
+    insert_run(db)
+    repository = AgentJobRepository(db)
+
+    repository.create(
+        id="agent-job-1",
+        run_id="run-1",
+        node_id="implement",
+        provider="codex",
+        status="QUEUED",
+        command=["codex.cmd", "exec", "--json"],
+        cwd="C:/project",
+        created_at="2026-07-27T13:00:00Z",
+    )
+    repository.set_running(
+        id="agent-job-1",
+        pid=1234,
+        updated_at="2026-07-27T13:01:00Z",
+    )
+    repository.append_output(
+        id="agent-output-1",
+        job_id="agent-job-1",
+        sequence=1,
+        kind="message",
+        payload={"text": "planning"},
+        created_at="2026-07-27T13:01:01Z",
+    )
+    repository.finish(
+        id="agent-job-1",
+        status="COMPLETED",
+        summary="done",
+        error=None,
+        updated_at="2026-07-27T13:02:00Z",
+    )
+
+    assert repository.get("agent-job-1") == {
+        "id": "agent-job-1",
+        "runId": "run-1",
+        "nodeId": "implement",
+        "provider": "codex",
+        "status": "COMPLETED",
+        "command": ["codex.cmd", "exec", "--json"],
+        "cwd": "C:/project",
+        "pid": 1234,
+        "summary": "done",
+        "error": None,
+        "createdAt": "2026-07-27T13:00:00Z",
+        "updatedAt": "2026-07-27T13:02:00Z",
+    }
+    assert repository.list_output("agent-job-1", after_sequence=0) == [
+        {
+            "id": "agent-output-1",
+            "jobId": "agent-job-1",
+            "sequence": 1,
+            "kind": "message",
+            "payload": {"text": "planning"},
+            "createdAt": "2026-07-27T13:01:01Z",
+        }
+    ]
+
+
+def test_agent_job_repository_lists_run_jobs_in_creation_order() -> None:
+    db = connect(fresh_db_path("agent_job_list_for_run"))
+    migrate(db)
+    insert_run(db)
+    repository = AgentJobRepository(db)
+
+    repository.create(
+        id="agent-job-2",
+        run_id="run-1",
+        node_id="test",
+        provider="claude",
+        status="QUEUED",
+        command=["claude.cmd", "-p", "test"],
+        cwd="C:/project",
+        created_at="2026-07-27T13:02:00Z",
+    )
+    repository.create(
+        id="agent-job-1",
+        run_id="run-1",
+        node_id="implement",
+        provider="fake",
+        status="QUEUED",
+        command=["fake-agent", "run"],
+        cwd="C:/project",
+        created_at="2026-07-27T13:01:00Z",
+    )
+
+    assert [job["id"] for job in repository.list_for_run("run-1")] == [
+        "agent-job-1",
+        "agent-job-2",
+    ]
+
+
+def test_agent_job_repository_lists_output_after_sequence_cursor() -> None:
+    db = connect(fresh_db_path("agent_output_cursor"))
+    migrate(db)
+    insert_run(db)
+    repository = AgentJobRepository(db)
+    repository.create(
+        id="agent-job-1",
+        run_id="run-1",
+        node_id="implement",
+        provider="fake",
+        status="RUNNING",
+        command=["fake-agent", "run"],
+        cwd="C:/project",
+        created_at="2026-07-27T13:00:00Z",
+    )
+
+    for sequence in (1, 2, 3):
+        repository.append_output(
+            id=f"agent-output-{sequence}",
+            job_id="agent-job-1",
+            sequence=sequence,
+            kind="message",
+            payload={"sequence": sequence},
+            created_at=f"2026-07-27T13:00:0{sequence}Z",
+        )
+
+    sequences = [
+        event["sequence"]
+        for event in repository.list_output("agent-job-1", after_sequence=1)
+    ]
+    assert sequences == [
+        2,
+        3,
+    ]

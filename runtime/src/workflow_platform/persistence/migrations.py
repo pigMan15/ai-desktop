@@ -115,6 +115,39 @@ def migrate(db: sqlite3.Connection) -> None:
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS agent_jobs (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL,
+            command_json TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            pid INTEGER,
+            summary TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_output_events (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE,
+            UNIQUE(job_id, sequence)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_jobs_run_id
+            ON agent_jobs(run_id);
+
+        CREATE INDEX IF NOT EXISTS idx_agent_output_events_job_sequence
+            ON agent_output_events(job_id, sequence);
         """
     )
     db.commit()
