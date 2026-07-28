@@ -42,6 +42,7 @@ npm.cmd run test:e2e
 - Artifact / Approval / Gate 持久化记录与 kernel/service 层基础约束
 - Terminal boundary
 - AgentExecutor boundary
+- P2 CLI Agent Runtime：Codex / Claude Code provider 命令构造、受控子进程执行、fake CLI 集成测试、agent job/output 持久化和 Run-bound API
 - Runtime Timeline 和 Projection rebuild
 - Renderer Runtime-backed workbench（配置 Runtime endpoint 和项目路径后从 API 拉取 P1 状态；未配置时显示不可用 fallback）
 - TypeScript contracts 与 Python Pydantic models 对齐
@@ -52,4 +53,4 @@ npm.cmd run test:e2e
 
 ## 当前定位
 
-这是面向本地桌面工作流平台的 MVP 验证实现，不代表已经完成最终产品规格中的全部高级能力。真实 `node-pty` 终端、真实 LangGraph provider、完整交互式 UI、完整 Electron runtime process management、高级 Knowledge publishing 等能力仍属于后续建设范围。
+这是面向本地桌面工作流平台的 MVP/P2 验证实现，不代表已经完成最终产品规格中的全部高级能力。真实 `node-pty` 终端、真实 LangGraph provider、完整交互式 UI、完整 Electron runtime process management、高级 Knowledge publishing 等能力仍属于后续建设范围。
