@@ -43,12 +43,12 @@ npm.cmd run test:e2e
 - Terminal boundary
 - AgentExecutor boundary
 - Runtime Timeline 和 Projection rebuild
-- Renderer Runtime-backed workbench
+- Renderer Runtime-backed workbench（配置 Runtime endpoint 和项目路径后从 API 拉取 P1 状态；未配置时显示不可用 fallback）
 - TypeScript contracts 与 Python Pydantic models 对齐
 - FastAPI runtime health/import/run/transition/artifact endpoints
 - Electron main/preload 基础边界与 renderer URL 安全校验
 - Playwright renderer smoke E2E
-- P1 Playwright smoke path
+- P1 Playwright Runtime-backed product loop path
 
 ## 当前定位
 

@@ -40,6 +40,14 @@ export function RunDashboard({ state }: Props) {
           </dd>
         </div>
       </dl>
+      <ul className="compact-list" aria-label="Runtime Timeline">
+        {(state?.timeline ?? []).map((event) => (
+          <li key={event.id}>
+            {event.type}
+            {event.nodeId ? `：${event.nodeId}` : ""}
+          </li>
+        ))}
+      </ul>
       <button className="quiet-button" disabled={!canSubmitArtifact}>
         提交 Artifact
       </button>

@@ -23,7 +23,7 @@ describe("App", () => {
   it("renders Runtime-backed P1 state and actions", async () => {
     render(<App />);
 
-    expect(await screen.findByText("Runtime API 已连接")).toBeInTheDocument();
+    expect(await screen.findByText("Runtime API 不可用")).toBeInTheDocument();
     expect(screen.getByText("demo-workflow")).toBeInTheDocument();
     expect(screen.getByText("AWAITING_APPROVAL")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交 Artifact" })).toBeDisabled();
@@ -75,7 +75,7 @@ describe("App", () => {
   it("does not expose local completion, approval, or gate-pass actions", async () => {
     render(<App />);
 
-    await screen.findByText("Runtime API 已连接");
+    await screen.findByText("Runtime API 不可用");
     expect(screen.queryByRole("button", { name: /完成节点|批准|通过 gate/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交 Artifact" })).toBeDisabled();
     expect(screen.getAllByRole("button", { name: "等待 Runtime allowedActions" })).toHaveLength(2);

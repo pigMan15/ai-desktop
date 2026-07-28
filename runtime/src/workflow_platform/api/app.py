@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -7,10 +8,17 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from workflow_platform.main import health
+from workflow_platform.persistence.database import connect
+from workflow_platform.persistence.migrations import migrate
 from workflow_platform.runtime_service import WorkflowRuntimeService
+
+
+DEFAULT_RUNTIME_DB_ENV = "WORKFLOW_PLATFORM_RUNTIME_DB"
+DEFAULT_RUNTIME_DB_PATH = ".workflow-platform/runtime.db"
 
 
 class ImportProjectRequest(BaseModel):
@@ -67,6 +75,12 @@ class RebuildProjectionRequest(BaseModel):
 
 def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI:
     application = FastAPI(title="AI Workflow Platform Runtime")
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(
@@ -250,6 +264,15 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail=str(error)) from error
 
     return application
+
+
+def create_runtime_app(db_path: str | Path | None = None) -> FastAPI:
+    runtime_db_path = Path(
+        db_path or os.environ.get(DEFAULT_RUNTIME_DB_ENV, DEFAULT_RUNTIME_DB_PATH)
+    )
+    db = connect(runtime_db_path)
+    migrate(db)
+    return create_app(WorkflowRuntimeService(db))
 
 
 def _require_service(runtime_service: WorkflowRuntimeService | None) -> WorkflowRuntimeService:

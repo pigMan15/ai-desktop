@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from workflow_platform.api.app import app, create_app
+from workflow_platform.api.app import app, create_app, create_runtime_app
 from workflow_platform.main import health, run
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
@@ -88,6 +88,21 @@ def test_health_endpoint_returns_health_result() -> None:
     assert response.json() == health()
 
 
+def test_runtime_api_allows_local_renderer_cors() -> None:
+    client = TestClient(create_app())
+
+    response = client.options(
+        "/health",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
 def test_module_app_is_created_app() -> None:
     client = TestClient(app)
 
@@ -108,12 +123,26 @@ def test_run_starts_uvicorn_with_runtime_app(monkeypatch) -> None:
 
     assert calls == [
         {
-            "app_path": "workflow_platform.api.app:app",
+            "app_path": "workflow_platform.api.app:create_runtime_app",
             "host": "127.0.0.1",
             "port": 8765,
             "reload": False,
+            "factory": True,
         }
     ]
+
+
+def test_runtime_app_factory_configures_service(tmp_path) -> None:
+    client = TestClient(create_runtime_app(tmp_path / "runtime.db"))
+    project_path = copy_harness_project(tmp_path)
+
+    response = client.post(
+        "/projects/import",
+        json={"projectPath": str(project_path), "now": NOW},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["workflowVersionId"].startswith("workflow-version-")
 
 
 def test_runtime_api_imports_project_creates_run_and_transitions(tmp_path) -> None:

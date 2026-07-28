@@ -9,8 +9,9 @@ def run() -> None:
     import uvicorn
 
     uvicorn.run(
-        "workflow_platform.api.app:app",
+        "workflow_platform.api.app:create_runtime_app",
         host="127.0.0.1",
         port=8765,
         reload=False,
+        factory=True,
     )
