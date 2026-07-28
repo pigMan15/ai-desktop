@@ -2,6 +2,15 @@
 node_modules/
 dist/
 build/
+release/
+release-*/
+release-full/
+release-full-*/
+release-installer/
+release-portable/
+runtime/dist/
+runtime/build/
+runtime/*.spec
 .venv/
 __pycache__/
 .pytest_cache/

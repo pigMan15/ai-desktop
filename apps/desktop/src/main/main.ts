@@ -1,6 +1,6 @@
 import electron from "electron";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ManagedRuntime,
   runtimeHealth,
@@ -15,6 +15,9 @@ const registeredRuntimeHandlers = new WeakSet<IpcMainLike>();
 const allowedRendererHosts = new Set(["127.0.0.1", "localhost"]);
 const defaultRuntimeManager = new ManagedRuntime({
   externalUrl: process.env.WORKFLOW_PLATFORM_RUNTIME_URL,
+  runtimeExecutablePath: isElectronPackaged()
+    ? path.join(runtimeResourcesPath(), "runtime", "workflow-runtime.exe")
+    : undefined,
   cwd: path.resolve(currentDir, "../../../..")
 });
 
@@ -55,11 +58,17 @@ export function registerRuntimeHandlers(
 export async function createMainWindow(options: {
   BrowserWindowClass?: BrowserWindowConstructor;
   rendererUrl?: string;
+  rendererDistPath?: string;
+  isPackaged?: boolean;
   preloadPath?: string;
 } = {}): Promise<BrowserWindowLike> {
   const {
     BrowserWindowClass = BrowserWindow,
     rendererUrl = defaultRendererUrl,
+    isPackaged = isElectronPackaged(),
+    rendererDistPath = isPackaged
+      ? path.join(runtimeResourcesPath(), "app.asar", "renderer", "dist")
+      : path.resolve(currentDir, "../../../renderer/dist"),
     preloadPath = path.join(currentDir, "../preload/preload.js")
   } = options;
 
@@ -74,8 +83,16 @@ export async function createMainWindow(options: {
     }
   });
 
-  await window.loadURL(validateRendererUrl(rendererUrl));
+  await window.loadURL(resolveRendererUrl({ isPackaged, rendererUrl, rendererDistPath }));
   return window;
+}
+
+function isElectronPackaged(): boolean {
+  return Boolean(app?.isPackaged);
+}
+
+function runtimeResourcesPath(): string {
+  return process.resourcesPath ?? path.resolve(currentDir, "../../../..", "resources");
 }
 
 export function validateRendererUrl(rendererUrl: string): string {
@@ -84,6 +101,20 @@ export function validateRendererUrl(rendererUrl: string): string {
     throw new Error(`Unsafe renderer URL: ${rendererUrl}`);
   }
   return parsedUrl.toString();
+}
+
+export function resolveRendererUrl(options: {
+  isPackaged: boolean;
+  rendererUrl?: string;
+  rendererDistPath?: string;
+}): string {
+  if (!options.isPackaged) {
+    return validateRendererUrl(options.rendererUrl ?? defaultRendererUrl);
+  }
+  if (!options.rendererDistPath) {
+    throw new Error("Packaged renderer dist path is required");
+  }
+  return pathToFileURL(path.join(options.rendererDistPath, "index.html")).toString();
 }
 
 export function bootstrap(options: {

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createMainWindow, registerRuntimeHandlers, validateRendererUrl } from "../src/main/main.js";
+import {
+  createMainWindow,
+  registerRuntimeHandlers,
+  resolveRendererUrl,
+  validateRendererUrl
+} from "../src/main/main.js";
 import { ManagedRuntime } from "../src/main/runtime.js";
 
 const registeredChannels: string[] = [];
@@ -15,6 +20,17 @@ const fakeIpcMain = {
 const runtimeManager = new ManagedRuntime({
   spawnProcess: (command, args, options) => {
     fakeSpawnCalls.push({ command, args, cwd: options.cwd });
+    return fakeProcess;
+  },
+  healthCheck: async () => ({ status: "ok", service: "workflow-runtime" }),
+  cwd: "G:\\Project\\ai\\ai-desktop",
+  port: 8765
+});
+
+const packagedRuntime = new ManagedRuntime({
+  runtimeExecutablePath: "G:\\App\\resources\\runtime\\workflow-runtime.exe",
+  spawnProcess: (command, args, options) => {
+    packagedSpawnCalls.push({ command, args, cwd: options.cwd });
     return fakeProcess;
   },
   healthCheck: async () => ({ status: "ok", service: "workflow-runtime" }),
@@ -62,8 +78,16 @@ assert.deepEqual(createdWindows[0].webPreferences, {
 
 assert.equal(validateRendererUrl("http://127.0.0.1:5173"), "http://127.0.0.1:5173/");
 assert.throws(() => validateRendererUrl("https://example.com"), /Unsafe renderer URL/);
+assert.equal(
+  resolveRendererUrl({
+    isPackaged: true,
+    rendererDistPath: "G:\\Project\\ai\\ai-desktop\\apps\\renderer\\dist"
+  }),
+  "file:///G:/Project/ai/ai-desktop/apps/renderer/dist/index.html"
+);
 
 const fakeSpawnCalls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+const packagedSpawnCalls: Array<{ command: string; args: string[]; cwd?: string }> = [];
 const fakeProcess = new EventEmitter() as EventEmitter & {
   pid: number;
   stdout: EventEmitter;
@@ -110,3 +134,10 @@ assert.equal(runtimeManager.status().state, "stopped");
 
 await runtimeManager.restart();
 assert.equal(runtimeManager.status().state, "ready");
+
+await packagedRuntime.start();
+assert.deepEqual(packagedSpawnCalls[0], {
+  command: "G:\\App\\resources\\runtime\\workflow-runtime.exe",
+  args: [],
+  cwd: "G:\\Project\\ai\\ai-desktop"
+});

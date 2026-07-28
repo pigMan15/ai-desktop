@@ -36,6 +36,7 @@ type SpawnProcess = (
 
 type ManagedRuntimeOptions = {
   externalUrl?: string;
+  runtimeExecutablePath?: string;
   port?: number;
   host?: string;
   cwd?: string;
@@ -51,6 +52,7 @@ export function runtimeHealth(): RuntimeHealth {
 
 export class ManagedRuntime {
   private readonly externalUrl?: string;
+  private readonly runtimeExecutablePath?: string;
   private readonly host: string;
   private readonly portValue: number;
   private readonly cwdValue?: string;
@@ -66,6 +68,7 @@ export class ManagedRuntime {
 
   constructor(options: ManagedRuntimeOptions = {}) {
     this.externalUrl = options.externalUrl;
+    this.runtimeExecutablePath = options.runtimeExecutablePath;
     this.host = options.host ?? "127.0.0.1";
     this.portValue = options.port ?? 8765;
     this.cwdValue = options.cwd;
@@ -93,7 +96,7 @@ export class ManagedRuntime {
     this.lastError = null;
 
     if (!this.externalUrl) {
-      this.process = this.spawnProcess(this.pythonCommand, this.runtimeArgs(), {
+      this.process = this.spawnProcess(this.runtimeCommand(), this.runtimeArgs(), {
         cwd: this.cwdValue,
         windowsHide: true,
         env: this.env,
@@ -145,6 +148,9 @@ export class ManagedRuntime {
   }
 
   private runtimeArgs(): string[] {
+    if (this.runtimeExecutablePath) {
+      return [];
+    }
     return [
       "-m",
       "uvicorn",
@@ -155,6 +161,10 @@ export class ManagedRuntime {
       "--port",
       String(this.portValue),
     ];
+  }
+
+  private runtimeCommand(): string {
+    return this.runtimeExecutablePath ?? this.pythonCommand;
   }
 
   private attachProcessListeners(runtimeProcess: RuntimeProcess): void {
