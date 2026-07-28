@@ -1,0 +1,43 @@
+id: demo-workflow
+name: Demo Workflow
+version: "1.0"
+nodes:
+  - id: plan
+    name: Plan Task
+    kind: task
+    role: planner
+    description: Create the implementation plan.
+    requires:
+      - type: artifact
+        artifactType: plan
+        required: true
+    gates:
+      - plan-ready
+  - id: review
+    name: Review Approval
+    kind: approval
+    role: reviewer
+    description: Approve the plan before execution.
+    requires:
+      - type: approval
+        approvalRole: reviewer
+        required: true
+edges:
+  - id: plan-to-review
+    from: plan
+    to: review
+    trigger: plan_submitted
+roles:
+  - id: planner
+    name: Planner
+  - id: reviewer
+    name: Reviewer
+gates:
+  - id: plan-ready
+    name: Plan Ready
+    description: Plan includes scope, risks, and verification.
+policies:
+  approvals:
+    requireHumanReview: true
+  retries:
+    maxAttempts: 2

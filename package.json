@@ -1,0 +1,26 @@
+{
+  "name": "ai-workflow-platform",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:renderer": "npm --workspace apps/renderer run dev --",
+    "dev:desktop": "npm --workspace apps/desktop run dev",
+    "build": "npm --workspace packages/contracts run build && npm --workspace apps/renderer run build && npm --workspace apps/desktop run build",
+    "test": "npm --workspace packages/contracts run test && npm --workspace apps/renderer run test && npm --workspace apps/desktop run test",
+    "test:runtime": "cd runtime && python -m pytest",
+    "test:e2e": "playwright test",
+    "test:e2e:p1": "playwright test tests/e2e/workflow-p1.spec.ts",
+    "verify": "npm run test && npm run test:runtime",
+    "verify:ps": "powershell -ExecutionPolicy Bypass -File scripts/verify.ps1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
