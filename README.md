@@ -43,6 +43,10 @@ npm.cmd run test:e2e
 - Terminal boundary
 - AgentExecutor boundary
 - P2 CLI Agent Runtime：Codex / Claude Code provider 命令构造、受控子进程执行、fake CLI 集成测试、agent job/output 持久化和 Run-bound API
+- P3 中文交互工作台：项目导入、创建 Run、节点推进、Artifact、审批、Gate 和 Agent job/log 操作均经由 Runtime API
+- P4 Electron Runtime 管理：受控 Python Runtime 启动、健康状态、重启和诊断日志 IPC
+- P5 受控终端会话：受限 cwd、stdin 写入、scrollback、尺寸、停止和重启的 Runtime session manager
+- P6 本地治理与 Knowledge：追加式审计记录、候选知识人工审核、发布和本地检索
 - Runtime Timeline 和 Projection rebuild
 - Renderer Runtime-backed workbench（配置 Runtime endpoint 和项目路径后从 API 拉取 P1 状态；未配置时显示不可用 fallback）
 - TypeScript contracts 与 Python Pydantic models 对齐
@@ -53,4 +57,4 @@ npm.cmd run test:e2e
 
 ## 当前定位
 
-这是面向本地桌面工作流平台的 MVP/P2 验证实现，不代表已经完成最终产品规格中的全部高级能力。真实 `node-pty` 终端、真实 LangGraph provider、完整交互式 UI、完整 Electron runtime process management、高级 Knowledge publishing 等能力仍属于后续建设范围。
+这是面向本地桌面工作流平台的本地可验证实现。真实 `node-pty`/ConPTY 适配、LangGraph provider、跨进程终端持久化、安装包签名和高级 Knowledge 索引仍可在后续版本继续增强。
