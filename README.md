@@ -32,21 +32,23 @@ npm.cmd run test:e2e
 
 - Project import
 - Adapter detection
-- Harness Adapter
+- Harness / Markdown Checklist / Generic YAML Adapter import
 - Canonical Workflow storage
 - Event-sourced Run state
 - Transactional run event append 与 projection upsert
 - Runtime-backed Harness import -> create run -> transition path
+- Runtime-backed Project / Workflow / Run API
 - Kernel transition
-- Approval-Gate-Artifact kernel/service 层基础约束
+- Artifact / Approval / Gate 持久化记录与 kernel/service 层基础约束
 - Terminal boundary
 - AgentExecutor boundary
-- Renderer workbench
-- Recovery projection rebuild
+- Runtime Timeline 和 Projection rebuild
+- Renderer Runtime-backed workbench
 - TypeScript contracts 与 Python Pydantic models 对齐
 - FastAPI runtime health/import/run/transition/artifact endpoints
 - Electron main/preload 基础边界与 renderer URL 安全校验
 - Playwright renderer smoke E2E
+- P1 Playwright smoke path
 
 ## 当前定位
 

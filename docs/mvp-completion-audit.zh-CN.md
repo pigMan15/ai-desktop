@@ -6,25 +6,32 @@
 
 本审计不声明最终完整产品已经完成。高级运行时、真实外部 provider、完整桌面进程管理、完整交互式 UI 和知识发布等能力仍为后续工作。
 
+## P1 补充验收
+
+- Runtime service 覆盖 import -> run -> artifact -> approval -> gate -> timeline。
+- API 覆盖 P1 纵向路径和错误映射。
+- Renderer 展示 Runtime-backed state，不本地推进状态。
+- E2E 覆盖 P1 workbench state。
+
 ## 证据命令和结果摘要
 
-以下命令作为 Task 14 最终验证命令：
+以下命令作为 P1 文档审计后的最终验证命令：
 
 ```powershell
 npm.cmd run verify
 npm.cmd run test:e2e
 npm.cmd run test:e2e:p1
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
-git status --short
+git status --short --branch
 ```
 
 结果摘要：
 
-- `npm.cmd run verify`：通过。contracts 5 个测试通过，renderer 4 个测试通过，desktop 测试/类型检查通过，runtime pytest 102 个测试通过；pytest 输出 1 个 `StarletteDeprecationWarning`，不影响通过结果。默认 verify 不运行浏览器 E2E。
-- `npm.cmd run test:e2e`：通过。Playwright Chromium smoke 测试通过，验证 MVP workbench 中 `Projects`、`Run Dashboard`、`Recovery` 可见，并覆盖 P1 Runtime-backed product loop 状态。
+- `npm.cmd run verify`：通过。contracts 5 个测试通过，renderer 5 个测试通过，desktop 测试/类型检查通过，runtime pytest 136 个测试通过；pytest 输出 1 个 `StarletteDeprecationWarning`，不影响通过结果。默认 verify 不运行浏览器 E2E。
+- `npm.cmd run test:e2e`：通过。Playwright Chromium 2 个 smoke 测试通过，验证 MVP workbench 中 `Projects`、`Run Dashboard`、`Recovery` 可见，并覆盖 P1 Runtime-backed product loop 状态。
 - `npm.cmd run test:e2e:p1`：通过。Playwright Chromium 1 个 P1 smoke 测试通过，验证 renderer 中 `Runtime API 已连接`、`demo-workflow`、`artifact://plan.md`、`WAITING_FOR_HUMAN` 可见。
-- `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1`：通过。执行与默认 verify 等价的 PowerShell 验证路径，runtime pytest 102 个测试通过，并保留同一个 `StarletteDeprecationWarning`。
-- `git status --short`：提交后应为空。
+- `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1`：通过。执行与默认 verify 等价的 PowerShell 验证路径，contracts 5 个测试通过，renderer 5 个测试通过，desktop 测试/类型检查通过，runtime pytest 136 个测试通过，并保留同一个 `StarletteDeprecationWarning`。
+- `git status --short --branch`：提交前仅包含 README 和审计文档变更；提交后应为空。
 
 ## 验收映射
 
