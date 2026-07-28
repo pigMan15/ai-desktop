@@ -1,9 +1,42 @@
 from pathlib import Path
+import sys
+from threading import Thread
+import time
 
+import pytest
+
+from workflow_platform.execution.cli import CliAgentExecutor
 from workflow_platform.execution.providers import (
+    CliCommand,
     ClaudeCliProvider,
     CodexCliProvider,
 )
+
+
+FAKE_CLI = Path(__file__).parent / "fixtures" / "fake_cli.py"
+
+
+class FakeProvider:
+    id = "fake"
+
+    def __init__(self, mode: str) -> None:
+        self._mode = mode
+
+    def build_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        allowed_tools: list[str],
+    ) -> CliCommand:
+        return CliCommand(
+            executable=sys.executable,
+            args=[str(FAKE_CLI), self._mode],
+            cwd=cwd,
+        )
+
+    def parse_line(self, line: str) -> dict:
+        return CodexCliProvider(platform="linux").parse_line(line)
 
 
 def test_codex_provider_uses_windows_cmd_json_output_and_workspace_sandbox() -> None:
@@ -101,3 +134,94 @@ def test_providers_preserve_unrecognized_or_invalid_lines_as_raw_output() -> Non
         "kind": "raw",
         "payload": {"text": '{"type":"unknown","value":1}'},
     }
+
+
+def test_executor_runs_provider_and_parses_output(tmp_path: Path) -> None:
+    events: list[dict] = []
+    executor = CliAgentExecutor(provider=FakeProvider("complete"), on_output=events.append)
+
+    result = executor.run(
+        job_id="agent-job-1",
+        prompt="实现节点",
+        cwd=tmp_path,
+        project_root=tmp_path,
+        timeout_seconds=5,
+        max_output_bytes=4096,
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.summary == "fake-cli: completed"
+    assert result.error is None
+    assert [event["kind"] for event in events] == ["message", "final"]
+
+
+def test_executor_rejects_cwd_outside_project_root(tmp_path: Path) -> None:
+    executor = CliAgentExecutor(provider=FakeProvider("complete"))
+
+    with pytest.raises(ValueError, match="AGENT_UNSAFE_CWD"):
+        executor.run(
+            job_id="agent-job-1",
+            prompt="x",
+            cwd=tmp_path.parent,
+            project_root=tmp_path,
+            timeout_seconds=5,
+            max_output_bytes=4096,
+        )
+
+
+def test_executor_fails_when_output_exceeds_limit(tmp_path: Path) -> None:
+    executor = CliAgentExecutor(provider=FakeProvider("large"))
+
+    result = executor.run(
+        job_id="agent-job-1",
+        prompt="x",
+        cwd=tmp_path,
+        project_root=tmp_path,
+        timeout_seconds=5,
+        max_output_bytes=64,
+    )
+
+    assert result.status == "FAILED"
+    assert result.error == "AGENT_OUTPUT_LIMIT: CLI output exceeded 64 bytes"
+
+
+def test_executor_timeout_terminates_process(tmp_path: Path) -> None:
+    executor = CliAgentExecutor(provider=FakeProvider("sleep"))
+
+    result = executor.run(
+        job_id="agent-job-1",
+        prompt="x",
+        cwd=tmp_path,
+        project_root=tmp_path,
+        timeout_seconds=0.1,
+        max_output_bytes=4096,
+    )
+
+    assert result.status == "FAILED"
+    assert result.error == "AGENT_TIMEOUT: CLI process exceeded 0.1 seconds"
+
+
+def test_executor_cancel_terminates_running_process(tmp_path: Path) -> None:
+    executor = CliAgentExecutor(provider=FakeProvider("sleep"))
+    result_holder = {}
+
+    thread = Thread(
+        target=lambda: result_holder.update(
+            result=executor.run(
+                job_id="agent-job-1",
+                prompt="x",
+                cwd=tmp_path,
+                project_root=tmp_path,
+                timeout_seconds=10,
+                max_output_bytes=4096,
+            )
+        )
+    )
+    thread.start()
+    for _ in range(50):
+        if executor.cancel("agent-job-1"):
+            break
+        time.sleep(0.02)
+    thread.join(timeout=5)
+
+    assert result_holder["result"].status == "CANCELLED"
