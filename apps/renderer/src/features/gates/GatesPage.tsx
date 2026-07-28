@@ -3,7 +3,7 @@ import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
 type Props = { state: RuntimeWorkbenchState | null };
 
 export function GatesPage({ state }: Props) {
-  const gates = state?.gates ?? [];
+  const gates = Array.isArray(state?.gates) ? state.gates : [];
 
   return (
     <section id="gates" className="panel" aria-labelledby="gates-title">

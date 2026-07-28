@@ -9,6 +9,8 @@ export type RuntimeWorkbenchState = {
   artifacts: Array<{ id: string; type: string; uri: string; contentHash: string }>;
   approvals: Array<{ id: string; status: string; comment?: string }>;
   gates: Array<{ id: string; status: string; evidence: string[] }>;
+  agentJobs: AgentJobSummary[];
+  agentOutput: AgentOutputSummary[];
 };
 
 type RuntimeImportResult = {
@@ -16,6 +18,30 @@ type RuntimeImportResult = {
   workflowVersionId: string;
   workflowId?: string;
   workflowName?: string;
+};
+
+export type AgentJobSummary = {
+  id: string;
+  runId: string;
+  nodeId: string;
+  provider: "codex" | "claude" | "fake";
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  command: string[];
+  cwd: string;
+  pid?: number | null;
+  summary?: string | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentOutputSummary = {
+  id: string;
+  jobId: string;
+  sequence: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
 };
 
 const RUNTIME_API_BASE_URL =
@@ -61,64 +87,44 @@ export async function loadRuntimeState({
   artifactPath: string;
   now: string;
 }): Promise<RuntimeWorkbenchState> {
-  await request(apiBaseUrl, "/health");
+  const client = createRuntimeClient(apiBaseUrl);
+  await client.health();
 
-  const imported = await request<RuntimeImportResult>(apiBaseUrl, "/projects/import", {
-    projectPath,
-    now,
-  });
+  const imported = await client.importProject(projectPath, now);
   const runTitle = `Renderer P1 ${now} ${globalThis.crypto?.randomUUID?.() ?? Math.random()}`;
-  let projection = await request<RunProjection>(apiBaseUrl, "/runs", {
-    workflowVersionId: imported.workflowVersionId,
-    title: runTitle,
-    now,
-  });
-  projection = await request<RunProjection>(
-    apiBaseUrl,
-    `/runs/${projection.runId}/transition`,
-    {
-      eventType: "NODE_STARTED",
-      nodeId: "plan",
-      actor: AGENT_ACTOR,
-      expectedRevision: projection.revision,
-      now,
-    },
-  );
-  projection = await request<RunProjection>(apiBaseUrl, `/runs/${projection.runId}/artifacts`, {
-    nodeId: "plan",
+  let projection = await client.createRun(imported.workflowVersionId, runTitle, now);
+  projection = await client.startNode(projection.runId, "plan", projection.revision, now);
+  projection = await client.submitArtifact(
+    projection.runId,
+    "plan",
     artifactPath,
-    artifactType: "plan",
-    actor: AGENT_ACTOR,
-    expectedRevision: projection.revision,
+    "plan",
+    projection.revision,
     now,
-  });
-  projection = await request<RunProjection>(
-    apiBaseUrl,
-    `/runs/${projection.runId}/approvals/plan/decide`,
-    {
-      decision: "approved",
-      actor: HUMAN_ACTOR,
-      comment: "Renderer P1 人工审批通过",
-      expectedRevision: projection.revision,
-      now,
-    },
   );
-  projection = await request<RunProjection>(apiBaseUrl, `/runs/${projection.runId}/gates`, {
-    nodeId: "plan",
-    gateId: "plan-ready",
-    status: "passed",
-    evidence: [`file://${artifactPath}#p1-e2e`],
-    waiverReason: null,
-    actor: VERIFIER_ACTOR,
-    expectedRevision: projection.revision,
+  projection = await client.decideApproval(
+    projection.runId,
+    "plan",
+    "approved",
+    "Renderer P1 人工审批通过",
+    projection.revision,
     now,
-  });
+  );
+  projection = await client.submitGate(
+    projection.runId,
+    "plan",
+    "plan-ready",
+    "passed",
+    [`file://${artifactPath}#p1-e2e`],
+    projection.revision,
+    now,
+  );
 
   const [timeline, artifacts, approvals, gates] = await Promise.all([
-    request<RuntimeWorkbenchState["timeline"]>(apiBaseUrl, `/runs/${projection.runId}/timeline`),
-    request<RuntimeWorkbenchState["artifacts"]>(apiBaseUrl, `/runs/${projection.runId}/artifacts`),
-    request<RuntimeWorkbenchState["approvals"]>(apiBaseUrl, `/runs/${projection.runId}/approvals`),
-    request<RuntimeWorkbenchState["gates"]>(apiBaseUrl, `/runs/${projection.runId}/gates`),
+    client.getTimeline(projection.runId),
+    client.listArtifacts(projection.runId),
+    client.listApprovals(projection.runId),
+    client.listGates(projection.runId),
   ]);
 
   return {
@@ -130,6 +136,111 @@ export async function loadRuntimeState({
     artifacts,
     approvals,
     gates,
+    agentJobs: [],
+    agentOutput: [],
+  };
+}
+
+export function createRuntimeClient(apiBaseUrl: string) {
+  return {
+    health: () => request(apiBaseUrl, "/health"),
+    importProject: (projectPath: string, now: string) =>
+      request<RuntimeImportResult>(apiBaseUrl, "/projects/import", { projectPath, now }),
+    createRun: (workflowVersionId: string, title: string, now: string) =>
+      request<RunProjection>(apiBaseUrl, "/runs", { workflowVersionId, title, now }),
+    startNode: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
+      request<RunProjection>(apiBaseUrl, `/runs/${runId}/transition`, {
+        eventType: "NODE_STARTED",
+        nodeId,
+        actor: AGENT_ACTOR,
+        expectedRevision,
+        now,
+      }),
+    submitArtifact: (
+      runId: string,
+      nodeId: string,
+      artifactPath: string,
+      artifactType: string,
+      expectedRevision: string,
+      now: string,
+    ) =>
+      request<RunProjection>(apiBaseUrl, `/runs/${runId}/artifacts`, {
+        nodeId,
+        artifactPath,
+        artifactType,
+        actor: AGENT_ACTOR,
+        expectedRevision,
+        now,
+      }),
+    decideApproval: (
+      runId: string,
+      nodeId: string,
+      decision: "approved" | "rejected",
+      comment: string,
+      expectedRevision: string,
+      now: string,
+    ) =>
+      request<RunProjection>(apiBaseUrl, `/runs/${runId}/approvals/${nodeId}/decide`, {
+        decision,
+        actor: HUMAN_ACTOR,
+        comment,
+        expectedRevision,
+        now,
+      }),
+    submitGate: (
+      runId: string,
+      nodeId: string,
+      gateId: string,
+      status: "passed" | "failed" | "waived",
+      evidence: string[],
+      expectedRevision: string,
+      now: string,
+    ) =>
+      request<RunProjection>(apiBaseUrl, `/runs/${runId}/gates`, {
+        nodeId,
+        gateId,
+        status,
+        evidence,
+        waiverReason: null,
+        actor: VERIFIER_ACTOR,
+        expectedRevision,
+        now,
+      }),
+    getTimeline: (runId: string) =>
+      request<RuntimeWorkbenchState["timeline"]>(apiBaseUrl, `/runs/${runId}/timeline`),
+    listArtifacts: (runId: string) =>
+      request<RuntimeWorkbenchState["artifacts"]>(apiBaseUrl, `/runs/${runId}/artifacts`),
+    listApprovals: (runId: string) =>
+      request<RuntimeWorkbenchState["approvals"]>(apiBaseUrl, `/runs/${runId}/approvals`),
+    listGates: (runId: string) =>
+      request<RuntimeWorkbenchState["gates"]>(apiBaseUrl, `/runs/${runId}/gates`),
+    getProjection: (runId: string) => request<RunProjection>(apiBaseUrl, `/runs/${runId}/projection`),
+    startAgentJob: (
+      runId: string,
+      nodeId: string,
+      provider: AgentJobSummary["provider"],
+      prompt: string,
+      now: string,
+    ) =>
+      request<AgentJobSummary>(apiBaseUrl, `/runs/${runId}/agents`, {
+        nodeId,
+        provider,
+        prompt,
+        actor: AGENT_ACTOR,
+        allowedTools: [],
+        timeoutSeconds: 300,
+        maxOutputBytes: 1_000_000,
+        now,
+      }),
+    listAgentJobs: (runId: string) =>
+      request<AgentJobSummary[]>(apiBaseUrl, `/runs/${runId}/agents`),
+    listAgentOutput: (runId: string, jobId: string, afterSequence: number) =>
+      request<AgentOutputSummary[]>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/output?afterSequence=${afterSequence}`,
+      ),
+    cancelAgentJob: (runId: string, jobId: string) =>
+      request<AgentJobSummary>(apiBaseUrl, `/runs/${runId}/agents/${jobId}/cancel`, {}),
   };
 }
 
@@ -176,5 +287,7 @@ function demoWorkbenchState(connection: RuntimeWorkbenchState["connection"]): Ru
     artifacts: [{ id: "artifact-1", type: "plan", uri: "artifact://plan.md", contentHash: "sha256:demo" }],
     approvals: [{ id: "approval-1", status: "pending" }],
     gates: [{ id: "gate-1", status: "waiting", evidence: ["artifact:plan"] }],
+    agentJobs: [],
+    agentOutput: [],
   };
 }

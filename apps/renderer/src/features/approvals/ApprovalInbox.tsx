@@ -9,7 +9,7 @@ const approvalStatusText: Record<string, string> = {
 };
 
 export function ApprovalInbox({ state }: Props) {
-  const approvals = state?.approvals ?? [];
+  const approvals = Array.isArray(state?.approvals) ? state.approvals : [];
 
   return (
     <section id="approvals" className="panel" aria-labelledby="approvals-title">

@@ -1,14 +1,21 @@
 import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
 
-type Props = { state: RuntimeWorkbenchState | null };
+type Props = {
+  state: RuntimeWorkbenchState | null;
+  onStartNode?: () => void;
+  onSubmitArtifact?: () => void;
+  onApprove?: () => void;
+  onPassGate?: () => void;
+};
 
-export function RunDashboard({ state }: Props) {
+export function RunDashboard({ state, onStartNode, onSubmitArtifact, onApprove, onPassGate }: Props) {
   const projection = state?.projection;
   const nodeId = projection?.currentNodeIds[0];
   const nodeState = nodeId ? projection.nodeStates[nodeId] : undefined;
   const blockingReason = projection?.blockingReasons[0];
+  const hasRun = Boolean(state?.connection === "connected" && projection?.runId);
   const canSubmitArtifact =
-    projection?.allowedActions.some((action) => action.label === "提交 Artifact") ?? false;
+    hasRun && (projection?.allowedActions.some((action) => action.label === "提交 Artifact") ?? true);
 
   return (
     <section id="runs" className="panel" aria-labelledby="runs-title">
@@ -48,9 +55,20 @@ export function RunDashboard({ state }: Props) {
           </li>
         ))}
       </ul>
-      <button className="quiet-button" disabled={!canSubmitArtifact}>
-        提交 Artifact
-      </button>
+      <div className="button-row">
+        <button className="quiet-button" disabled={!hasRun} onClick={onStartNode}>
+          启动节点
+        </button>
+        <button className="quiet-button" disabled={!canSubmitArtifact} onClick={onSubmitArtifact}>
+          提交 Artifact
+        </button>
+        <button className="quiet-button" disabled={!hasRun} onClick={onApprove}>
+          人工批准
+        </button>
+        <button className="quiet-button" disabled={!hasRun} onClick={onPassGate}>
+          通过 Gate
+        </button>
+      </div>
     </section>
   );
 }

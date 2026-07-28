@@ -3,7 +3,7 @@ import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
 type Props = { state: RuntimeWorkbenchState | null };
 
 export function ArtifactsPage({ state }: Props) {
-  const artifacts = state?.artifacts ?? [];
+  const artifacts = Array.isArray(state?.artifacts) ? state.artifacts : [];
 
   return (
     <section id="artifacts" className="panel" aria-labelledby="artifacts-title">
