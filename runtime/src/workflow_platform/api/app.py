@@ -73,6 +73,17 @@ class RebuildProjectionRequest(BaseModel):
     now: str
 
 
+class StartAgentJobRequest(BaseModel):
+    nodeId: str
+    provider: str
+    prompt: str
+    actor: dict[str, Any]
+    allowedTools: list[str] = Field(default_factory=list)
+    timeoutSeconds: float = 300
+    maxOutputBytes: int = 1_000_000
+    now: str
+
+
 def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI:
     application = FastAPI(title="AI Workflow Platform Runtime")
     application.add_middleware(
@@ -255,6 +266,63 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
+    @application.post("/runs/{run_id}/agents")
+    def start_agent_job(run_id: str, request: StartAgentJobRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.start_agent_job(
+                run_id,
+                node_id=request.nodeId,
+                provider=request.provider,
+                prompt=request.prompt,
+                actor=request.actor,
+                allowed_tools=request.allowedTools,
+                timeout_seconds=request.timeoutSeconds,
+                max_output_bytes=request.maxOutputBytes,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/runs/{run_id}/agents")
+    def list_agent_jobs(run_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_agent_jobs(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/agents/{job_id}")
+    def get_agent_job(run_id: str, job_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_agent_job(run_id, job_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/agents/{job_id}/output")
+    def list_agent_output(
+        run_id: str,
+        job_id: str,
+        afterSequence: int = 0,
+    ) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            service.get_agent_job(run_id, job_id)
+            return service.list_agent_output(job_id, after_sequence=afterSequence)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/cancel")
+    def cancel_agent_job(run_id: str, job_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.cancel_agent_job(run_id, job_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     @application.get("/runs/{run_id}/projection")
     def get_projection(run_id: str) -> dict[str, Any]:
         service = _require_service(runtime_service)
@@ -292,6 +360,11 @@ def _http_error_from_value_error(error: ValueError) -> HTTPException:
         "MISSING_GATE_RESULT": 400,
         "MISSING_EVIDENCE": 400,
         "UNSAFE_PATH": 400,
+        "AGENT_UNKNOWN_NODE": 400,
+        "AGENT_PROVIDER_UNAVAILABLE": 400,
+        "AGENT_UNSAFE_CWD": 400,
+        "AGENT_TIMEOUT": 408,
+        "AGENT_OUTPUT_LIMIT": 413,
     }
     return HTTPException(status_code=status_by_code.get(code, 400), detail=str(error))
 

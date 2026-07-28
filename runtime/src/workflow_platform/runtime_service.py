@@ -3,14 +3,17 @@ import sqlite3
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable
-from uuid import uuid5, NAMESPACE_URL
+from uuid import uuid4, uuid5, NAMESPACE_URL
 
 from workflow_platform.adapters.registry import default_registry
 from workflow_platform.artifacts.service import hash_artifact, validate_safe_path
+from workflow_platform.execution.cli import CliAgentExecutor
+from workflow_platform.execution.providers import ClaudeCliProvider, CliProvider, CodexCliProvider
 from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
 from workflow_platform.models import Actor, RunEvent, RunProjection
 from workflow_platform.persistence.repositories import (
+    AgentJobRepository,
     ApprovalRepository,
     ArtifactRepository,
     GateResultRepository,
@@ -23,7 +26,12 @@ from workflow_platform.persistence.repositories import (
 
 
 class WorkflowRuntimeService:
-    def __init__(self, db: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        db: sqlite3.Connection,
+        *,
+        agent_provider_factory: Callable[[str], CliProvider] | None = None,
+    ) -> None:
         self._db = db
         self._projects = ProjectRepository(db)
         self._workflow_versions = WorkflowVersionRepository(db)
@@ -33,7 +41,10 @@ class WorkflowRuntimeService:
         self._artifacts = ArtifactRepository(db)
         self._approvals = ApprovalRepository(db)
         self._gate_results = GateResultRepository(db)
+        self._agent_jobs = AgentJobRepository(db)
         self._adapter_registry = default_registry()
+        self._agent_provider_factory = agent_provider_factory or _default_agent_provider
+        self._agent_executors: dict[str, CliAgentExecutor] = {}
         self._lock = RLock()
 
     def import_project(self, project_path: Path, *, now: str) -> dict:
@@ -302,6 +313,113 @@ class WorkflowRuntimeService:
         self.get_projection(run_id)
         return self._gate_results.list_for_run(run_id)
 
+    def start_agent_job(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        provider: str,
+        prompt: str,
+        actor: dict,
+        now: str,
+        allowed_tools: list[str] | None = None,
+        timeout_seconds: float = 300,
+        max_output_bytes: int = 1_000_000,
+    ) -> dict:
+        Actor.model_validate(actor)
+        workflow = self._runs.workflow_for_run(run_id)
+        if node_id not in {node.id for node in workflow.nodes}:
+            raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+
+        project_root = self._runs.project_root_for_run(run_id)
+        cli_provider = self._agent_provider_factory(provider)
+        command = cli_provider.build_command(
+            cwd=project_root,
+            prompt=prompt,
+            allowed_tools=allowed_tools or [],
+        )
+        job_id = f"agent-job-{uuid4()}"
+        output_sequence = 0
+
+        def append_output(event: dict[str, Any]) -> None:
+            nonlocal output_sequence
+            output_sequence += 1
+            with self._lock:
+                self._agent_jobs.append_output(
+                    id=f"{job_id}:output:{output_sequence}",
+                    job_id=job_id,
+                    sequence=output_sequence,
+                    kind=event["kind"],
+                    payload=event["payload"],
+                    created_at=now,
+                )
+                self._db.commit()
+
+        with self._lock:
+            self._agent_jobs.create(
+                id=job_id,
+                run_id=run_id,
+                node_id=node_id,
+                provider=provider,
+                status="QUEUED",
+                command=[command.executable, *command.args],
+                cwd=str(project_root),
+                created_at=now,
+            )
+            self._db.commit()
+
+        executor = CliAgentExecutor(provider=cli_provider, on_output=append_output)
+        self._agent_executors[job_id] = executor
+        try:
+            result = executor.run(
+                job_id=job_id,
+                prompt=prompt,
+                cwd=project_root,
+                project_root=project_root,
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+                allowed_tools=allowed_tools or [],
+            )
+        finally:
+            self._agent_executors.pop(job_id, None)
+
+        with self._lock:
+            self._agent_jobs.finish(
+                id=job_id,
+                status=result.status,
+                summary=result.summary,
+                error=result.error,
+                updated_at=now,
+            )
+            self._db.commit()
+            job = self._agent_jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"Agent job not found: {job_id}")
+        return job
+
+    def list_agent_jobs(self, run_id: str) -> list[dict]:
+        self.get_projection(run_id)
+        return self._agent_jobs.list_for_run(run_id)
+
+    def get_agent_job(self, run_id: str, job_id: str) -> dict:
+        self.get_projection(run_id)
+        job = self._agent_jobs.get(job_id)
+        if job is None or job["runId"] != run_id:
+            raise KeyError(f"Agent job not found: {job_id}")
+        return job
+
+    def list_agent_output(self, job_id: str, *, after_sequence: int = 0) -> list[dict]:
+        if self._agent_jobs.get(job_id) is None:
+            raise KeyError(f"Agent job not found: {job_id}")
+        return self._agent_jobs.list_output(job_id, after_sequence=after_sequence)
+
+    def cancel_agent_job(self, run_id: str, job_id: str) -> dict:
+        job = self.get_agent_job(run_id, job_id)
+        executor = self._agent_executors.get(job_id)
+        if executor is not None:
+            executor.cancel(job_id)
+        return job
+
     def get_run(self, run_id: str) -> dict:
         return self.get_projection(run_id).model_dump()
 
@@ -380,3 +498,11 @@ class WorkflowRuntimeService:
 
 def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}-{uuid5(NAMESPACE_URL, value)}"
+
+
+def _default_agent_provider(provider: str) -> CliProvider:
+    if provider == "codex":
+        return CodexCliProvider()
+    if provider == "claude":
+        return ClaudeCliProvider()
+    raise ValueError(f"AGENT_PROVIDER_UNAVAILABLE: Unsupported agent provider: {provider}")

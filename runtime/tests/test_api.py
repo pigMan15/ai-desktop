@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pathlib import Path
+import sys
 
+from workflow_platform.execution.providers import CliCommand, CodexCliProvider
 from workflow_platform.api.app import app, create_app, create_runtime_app
 from workflow_platform.main import health, run
 from workflow_platform.persistence.database import connect
@@ -21,6 +24,27 @@ UNTRUSTED_HUMAN_ACTOR = {
     "trusted": False,
 }
 VERIFIER_ACTOR = {"id": "verifier-1", "type": "verifier", "source": "runtime", "trusted": True}
+FAKE_CLI = FIXTURES / "fake_cli.py"
+
+
+class FakeProvider:
+    id = "fake"
+
+    def build_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        allowed_tools: list[str],
+    ) -> CliCommand:
+        return CliCommand(
+            executable=sys.executable,
+            args=[str(FAKE_CLI), "complete"],
+            cwd=cwd,
+        )
+
+    def parse_line(self, line: str) -> dict:
+        return CodexCliProvider(platform="linux").parse_line(line)
 
 
 def copy_harness_project(tmp_path):
@@ -411,3 +435,66 @@ def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
     assert conflict.status_code == 409
     assert missing_run.status_code == 404
     assert validation_error.status_code == 400
+
+
+def test_runtime_api_runs_agent_job_and_returns_output_without_advancing_run(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(
+        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
+    )
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    started = client.post(
+        f"/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "fake",
+            "prompt": "生成计划",
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    jobs = client.get(f"/runs/{run['runId']}/agents")
+    output = client.get(f"/runs/{run['runId']}/agents/{started.json()['id']}/output")
+    current = client.get(f"/runs/{run['runId']}")
+
+    assert started.status_code == 200
+    assert started.json()["status"] == "COMPLETED"
+    assert jobs.json()[0]["id"] == started.json()["id"]
+    assert output.json()[-1]["payload"]["text"] == "fake-cli: completed"
+    assert current.json()["revision"] == run["revision"]
+
+
+def test_runtime_api_rejects_agent_job_for_unknown_node(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(
+        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
+    )
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    response = client.post(
+        f"/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "missing",
+            "provider": "fake",
+            "prompt": "生成计划",
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "AGENT_UNKNOWN_NODE" in response.json()["detail"]
+
+
+def test_runtime_api_cancel_missing_agent_job_maps_404(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    response = client.post(f"/runs/{run['runId']}/agents/agent-job-missing/cancel")
+
+    assert response.status_code == 404

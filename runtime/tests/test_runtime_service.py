@@ -1,8 +1,10 @@
 from pathlib import Path
 from shutil import copytree
+import sys
 
 import pytest
 
+from workflow_platform.execution.providers import CliCommand, CodexCliProvider
 from workflow_platform.models import Actor, RunProjection
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
@@ -11,6 +13,28 @@ from workflow_platform.runtime_service import WorkflowRuntimeService
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = "2026-07-27T13:00:00Z"
+AGENT_ACTOR = {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False}
+FAKE_CLI = FIXTURES / "fake_cli.py"
+
+
+class FakeProvider:
+    id = "fake"
+
+    def build_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        allowed_tools: list[str],
+    ) -> CliCommand:
+        return CliCommand(
+            executable=sys.executable,
+            args=[str(FAKE_CLI), "complete"],
+            cwd=cwd,
+        )
+
+    def parse_line(self, line: str) -> dict:
+        return CodexCliProvider(platform="linux").parse_line(line)
 
 
 def copy_harness_project(tmp_path: Path) -> Path:
@@ -494,3 +518,51 @@ def test_runtime_service_reimport_keeps_workflow_version_available(tmp_path) -> 
     assert second["projectId"] == first["projectId"]
     assert second["workflowVersionId"] == first["workflowVersionId"]
     assert run.revision == "1"
+
+
+def test_runtime_service_starts_agent_for_existing_run_node_without_advancing_projection(
+    tmp_path,
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project = service.import_project(copy_harness_project(tmp_path), now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="Agent Run", now=NOW)
+
+    job = service.start_agent_job(
+        run.runId,
+        node_id="plan",
+        provider="fake",
+        prompt="生成实现计划",
+        actor=AGENT_ACTOR,
+        now=NOW,
+    )
+    output = service.list_agent_output(job["id"], after_sequence=0)
+    current = service.get_projection(run.runId)
+
+    assert job["runId"] == run.runId
+    assert job["nodeId"] == "plan"
+    assert job["provider"] == "fake"
+    assert job["status"] == "COMPLETED"
+    assert output[-1]["kind"] == "final"
+    assert output[-1]["payload"]["text"] == "fake-cli: completed"
+    assert current.revision == run.revision
+    assert current.nodeStates == run.nodeStates
+
+
+def test_runtime_service_rejects_agent_for_unknown_node(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project = service.import_project(copy_harness_project(tmp_path), now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="Agent Run", now=NOW)
+
+    with pytest.raises(ValueError, match="AGENT_UNKNOWN_NODE"):
+        service.start_agent_job(
+            run.runId,
+            node_id="missing",
+            provider="fake",
+            prompt="x",
+            actor=AGENT_ACTOR,
+            now=NOW,
+        )
