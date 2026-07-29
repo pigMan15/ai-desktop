@@ -1,5 +1,23 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../features/terminal/TerminalViewport", () => ({
+  TerminalViewport: ({ ariaLabel, output, writable, onInput, onInterrupt }: {
+    ariaLabel: string;
+    output: Array<{ sequence: number; data: string }>;
+    writable?: boolean;
+    onInput?: (data: string) => void | Promise<void>;
+    onInterrupt?: () => void;
+  }) => (
+    <section aria-label={ariaLabel} className="terminal-viewport" data-writable={String(Boolean(writable))}>
+      {output.map((event) => (
+        <pre key={event.sequence}>{event.data}</pre>
+      ))}
+      <button type="button" onClick={() => onInput?.("继续\r")}>在 Agent 终端回复</button>
+      <button type="button" onClick={onInterrupt}>中断 Agent 终端</button>
+    </section>
+  ),
+}));
 
 import { App } from "./App";
 import { routes } from "./routes";
@@ -10,6 +28,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   delete (window as { workflowRuntime?: unknown }).workflowRuntime;
+  delete (window as { workflowTerminal?: unknown }).workflowTerminal;
   delete (window as { workflowGit?: unknown }).workflowGit;
   window.location.hash = "";
   window.localStorage.clear();
@@ -277,6 +296,41 @@ describe("App", () => {
       configurable: true,
       value: originalRevokeObjectUrl,
     });
+  });
+
+  it("connects the project workspace when the managed desktop Runtime becomes ready", async () => {
+    window.location.hash = "#/projects";
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: {
+        status: vi.fn(async () => ({
+          mode: "managed",
+          state: "ready",
+          url: "http://127.0.0.1:8879",
+          port: 8879,
+          pid: 54321,
+          lastError: null,
+        })),
+        logs: vi.fn(async () => []),
+        restart: vi.fn(),
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.origin === "http://127.0.0.1:8879" && url.pathname === "/health") {
+          return jsonResponse({ status: "ok" });
+        }
+        throw new Error(`Unexpected Runtime request: ${url.href}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("Runtime 已连接")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("项目路径"), { target: { value: "G:\\Project\\demo" } });
+    expect(screen.getByRole("button", { name: "导入项目" })).toBeEnabled();
   });
 
   it("loads published knowledge and requests its Runtime replay", async () => {
@@ -839,6 +893,138 @@ describe("App", () => {
     expect(screen.getByLabelText("Agent 任务").textContent).toContain("COMPLETED");
   });
 
+  it("在桌面环境用交互式 PTY 启动 Agent，并从 Agent 终端直接回复", async () => {
+    const calls: Array<{ path: string; body?: unknown }> = [];
+    let agentStarted = false;
+    Object.defineProperty(window, "workflowTerminal", {
+      configurable: true,
+      value: {
+        create: vi.fn(async () => ({
+          id: "terminal-1",
+          kind: "codex",
+          cwd: "G:\\Project\\demo",
+          pid: 4321,
+          columns: 100,
+          rows: 30,
+        })),
+        read: vi.fn(async () => [{ sequence: 1, data: "Agent 需要回复\r\n" }]),
+        writeInput: vi.fn(async () => undefined),
+        interrupt: vi.fn(async () => undefined),
+        stop: vi.fn(async () => undefined),
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ path: url.pathname + url.search, body });
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/runs/run-demo/projection") return jsonResponse(projection("run-demo", "1", "IN_PROGRESS"));
+        if (url.pathname === "/runs/run-demo/timeline") return jsonResponse([]);
+        if (url.pathname === "/runs/run-demo/artifacts") return jsonResponse([]);
+        if (url.pathname === "/runs/run-demo/approvals") return jsonResponse([]);
+        if (url.pathname === "/runs/run-demo/gates") return jsonResponse([]);
+        if (url.pathname === "/agents/providers") {
+          return jsonResponse([{ id: "codex", executable: "codex.cmd", available: true, path: "C:\\Tools\\codex.cmd", version: "1.0.0", message: "已检测到 Codex CLI。" }]);
+        }
+        if (url.pathname === "/runs/run-demo/agents" && init?.method === "GET") {
+          return jsonResponse(
+            agentStarted
+              ? [{
+                  id: "job-1",
+                  runId: "run-demo",
+                  nodeId: "plan",
+                  provider: "codex",
+                  mode: "interactive",
+                  status: "RUNNING",
+                  command: ["codex.cmd"],
+                  cwd: "G:\\Project\\demo",
+                  pid: 4321,
+                  sessionId: "agent-session-1",
+                  summary: null,
+                  error: null,
+                  createdAt: "2026-07-29T00:00:00Z",
+                  updatedAt: "2026-07-29T00:00:00Z",
+                }]
+              : [],
+          );
+        }
+        if (url.pathname === "/runs/run-demo/agents") {
+          agentStarted = true;
+          return jsonResponse({
+            id: "job-1",
+            runId: "run-demo",
+            nodeId: "plan",
+            provider: "codex",
+            mode: "interactive",
+            status: "RUNNING",
+            command: ["codex.cmd"],
+            cwd: "G:\\Project\\demo",
+            sessionId: "agent-session-1",
+            summary: null,
+            error: null,
+            createdAt: "2026-07-29T00:00:00Z",
+            updatedAt: "2026-07-29T00:00:00Z",
+          });
+        }
+        if (url.pathname === "/runs/run-demo/agents/job-1/interactive-session/start") {
+          return jsonResponse({ id: "agent-session-1", status: "RUNNING" });
+        }
+        if (url.pathname === "/runs/run-demo/agents/job-1/interactive-session/output") {
+          return jsonResponse([{ id: "out-1", jobId: "job-1", sequence: 1, kind: "terminal_raw", payload: { text: "Agent 需要回复\r\n" }, createdAt: "2026-07-29T00:00:01Z" }]);
+        }
+        if (url.pathname === "/runs/run-demo/agents/job-1/interactive-session/input") {
+          return jsonResponse({ id: "input-1", content: body?.content });
+        }
+        if (url.pathname === "/runs/run-demo/agents/job-1/output") return jsonResponse([]);
+        return jsonResponse([]);
+      }),
+    );
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      workflowVersionId: "workflow-version-demo",
+      projectName: "demo",
+      workflowName: "Demo Workflow",
+      runId: "run-demo",
+    });
+
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("Agent 提示词"), { target: { value: "请继续实现剩余内容" } });
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
+    expect(await screen.findByText("交互式 Agent 已启动：job-1")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Agent 交互终端").textContent).toContain("Agent 需要回复"));
+    fireEvent.click(screen.getByRole("button", { name: "在 Agent 终端回复" }));
+
+    const terminal = (window as unknown as {
+      workflowTerminal: { create: ReturnType<typeof vi.fn>; writeInput: ReturnType<typeof vi.fn> };
+    }).workflowTerminal;
+    expect(terminal.create).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "codex",
+      initialPrompt: "请继续实现剩余内容",
+    }));
+    expect(terminal.writeInput).toHaveBeenCalledWith("terminal-1", "继续\r");
+    expect(calls).toContainEqual(expect.objectContaining({
+      path: "/runs/run-demo/agents",
+      body: expect.objectContaining({ mode: "interactive" }),
+    }));
+    expect(calls).toContainEqual(expect.objectContaining({
+      path: "/runs/run-demo/agents/job-1/interactive-session/start",
+      body: expect.objectContaining({ desktopSessionId: "terminal-1", pid: 4321 }),
+    }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.path === "/runs/run-demo/agents/job-1/interactive-session/input" &&
+            isRecord(call.body) &&
+            call.body.content === "继续",
+        ),
+      ).toBe(true),
+    );
+  });
+
   it("renders the MVP workbench navigation", () => {
     render(<App />);
 
@@ -901,4 +1087,8 @@ function projection(runId: string, revision: string, status: "CREATED" | "IN_PRO
 
 function jsonResponse(payload: unknown) {
   return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

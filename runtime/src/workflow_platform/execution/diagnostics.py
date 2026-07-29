@@ -5,6 +5,8 @@ import subprocess
 import sys
 from typing import Callable
 
+from workflow_platform.execution.cli import decode_cli_output
+
 
 FindExecutable = Callable[[str], str | None]
 RunCommand = Callable[[list[str]], tuple[int, str, str]]
@@ -65,14 +67,15 @@ def _run_version(command: list[str]) -> tuple[int, str, str]:
         command,
         stdin=subprocess.DEVNULL,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=5,
         shell=False,
         startupinfo=_hidden_startupinfo(),
     )
-    return completed.returncode, completed.stdout, completed.stderr
+    return (
+        completed.returncode,
+        decode_cli_output(completed.stdout),
+        decode_cli_output(completed.stderr),
+    )
 
 
 def _hidden_startupinfo() -> subprocess.STARTUPINFO | None:

@@ -20,7 +20,8 @@
 - 工作流版本导出：可从工作流页下载稳定的 Canonical JSON 或可由 Generic YAML Adapter 再导入的 Generic YAML；导出不会改写项目目录。
 - Agent/CLI 执行、运行输出持久化、节点状态回写、失败诊断、Checkpoint、恢复、取消、超时和重试记录。
 - Codex CLI、Claude Code CLI 和 fake CLI 的发现、受控调用、实时输出采集及中文错误诊断边界。
-- Shell/Codex 终端、Run/Node 会话绑定、历史输出回放、从旧会话重建新终端、遗留会话清理、搜索、复制粘贴、Resize、Ctrl+C、停止和 Evidence 导出。
+- Shell/Codex/Claude 终端、Run/Node 会话绑定、历史输出回放、从旧会话重建新终端、遗留会话清理、搜索、复制粘贴、Resize、Ctrl+C、停止和 Evidence 导出。
+- Run 模块交互式 Agent 会话：启动 Codex/Claude Code Agent 时默认创建受控 PTY，在页面底部 `Agent 交互终端` 中实时显示输出，并允许用户直接在 xterm 内输入回复后回车发送；输入、输出、取消、继续和结束状态会写回 Runtime。
 - 终端危险命令审批：高风险命令必须经桌面审批对话框确认；用户取消不会写入 PTY，并由可信人工 Actor 将拒绝结果写入 Runtime 审计链。
 - Gate、自动 Gate、Waiver、BLOCKED 处理入口、审批、可信 Actor、审计链、Artifact/Evidence 预览、差异比较、Run 报告和 Evidence Package。
 - 本地项目 Git 工作区状态、分支、工作树、冲突、提交、受控推送和知识文档发布记录。
@@ -29,7 +30,7 @@
 - 恢复诊断、支持包导出、共享 SQLite 读取串行化和跨终端/日志/Evidence 的敏感信息脱敏。
 - 独立路由、中文业务界面、Runtime 随 Electron 受管启动、Windows Runtime EXE 构建和完整 Windows 打包脚本。
 
-近期修复：`apps/renderer/src/app/styles.css` 中错误的重复 `.terminal-readout` 规则曾将终端、部署、产物和知识实时输出隐藏为 1px；该规则已移除。知识合成区也已从嵌套卡片改为候选卡片内的普通分区。
+近期修复：`apps/renderer/src/app/styles.css` 中错误的重复 `.terminal-readout` 规则曾将终端、部署、产物和知识实时输出隐藏为 1px；该规则已移除。知识合成区也已从嵌套卡片改为候选卡片内的普通分区。Run Agent、部署输出和终端模块已统一使用有边界高度的 xterm 风格输出区，避免长日志无限撑高页面；CLI 输出按 UTF-8、GB18030 顺序解码，降低 Windows 中文环境乱码风险。
 
 ## 3. P0：必须在真实环境完成的验收
 
@@ -77,7 +78,7 @@
 
 **当前状态**
 
-本轮已重新生成 Runtime EXE、免安装 ZIP 和 NSIS 安装器，并通过免安装 EXE 与最新安装版 EXE 的 Playwright 验证：应用可从 `file:` 资源加载，Runtime 可被 Electron 受管启动，独立路由可用。最新发布目录为 `release-full-20260729-063614`，但验证日期为 2026 年 7 月 28 日；目录标签处于未来日期，反映构建主机时钟不一致，不应被当作可信发布时间。
+本轮已重新生成 Runtime EXE、免安装 ZIP 和 NSIS 安装器，并通过免安装 EXE 与最新安装版 EXE 的 Playwright 验证：应用可从 `file:` 资源加载，Runtime 可被 Electron 受管启动，独立路由可用。最新免安装与安装版发布目录为 `release-full-20260729-141801`。
 
 **已取得的打包版闭环证据**
 
@@ -109,12 +110,12 @@
 
 ## 5. 已有自动化证据
 
-截至 2026 年 7 月 28 日，本工作区最近一次完整验证结果为：
+截至 2026 年 7 月 29 日，本工作区最近一次完整验证结果为：
 
 - `python -m pytest runtime/tests -q`：`227 passed`，仅有 1 个 FastAPI/TestClient 上游弃用 warning；其中包含项目归档、工作流导出、恢复诊断与其他 Run 读取并发访问的 SQLite 串行化回归。
 - `npm.cmd run test`：Contracts、Renderer（20 个文件、80 项）和 Desktop 全量测试通过。
 - `npm.cmd run build`：Contracts、Renderer（TypeScript 与 Vite）和 Desktop 生产构建通过。
-- `npm.cmd run package:win:full`：Runtime EXE、免安装 ZIP 和 NSIS 安装器重新生成通过，最新目录为 `release-full-20260729-063614`；目录日期晚于验证日期，属于构建机时钟偏差。
+- `npm.cmd run package:win:full`：Runtime EXE、免安装 ZIP 和 NSIS 安装器重新生成通过，最新目录为 `release-full-20260729-141801`。
 - `npm.cmd run test:package-script`：打包脚本的安装器发现、镜像配置和产物结构检查通过。
 - `npm.cmd run test:e2e`：浏览器工作流、源码 Electron 和最新免安装 EXE 共 `10 passed, 5 skipped`；跳过项仅为未在该命令中传入安装版 EXE 路径的安装版套件，已由下一条独立验收补齐。
 - `npm.cmd run test:e2e:packaged`：刚生成的免安装 EXE 启动受管 Runtime 和独立路由通过；危险终端命令取消后 Runtime 审计成功写入；并已完成受控 Deploy Runner 与 fake Codex CLI 知识合成的真实实时输出闭环。
@@ -122,6 +123,9 @@
 - `npm.cmd run test:e2e:p1`：项目页唯一工作区面板在宽屏下覆盖整个三列网格；Playwright 实测面板与网格宽度比例为 `1.0`，并已在 `390 × 844` 移动视口确认无横向溢出。
 - Runtime 真实 CLI 验收：已登录 Codex CLI 与 Claude Code CLI 分别完成无文件读写任务，实时输出事件与 `COMPLETED` 状态均被 Runtime 持久化；未输出或记录明文凭据。
 - 知识合成实时输出的 Runtime API、客户端请求、页面渲染和 App 集成均有回归测试。
+- 交互式 Agent 与终端直接输入回归：`npm.cmd --workspace @workflow-platform/renderer run test` 已通过 `21` 个测试文件、`88` 个用例；覆盖 Run 默认交互式 Agent、xterm 内直接回复、Terminal Shell/Codex/Claude 直接输入、历史会话只读回放、Runtime client 交互式 API、App 层桌面 PTY 绑定，以及终端先以只读状态渲染、创建会话后切换为可输入状态的回归。
+- Runtime CLI 编码回归：`python -m pytest runtime/tests/test_execution_cli.py -q` 已通过 `15 passed`；覆盖 UTF-8 与 GB18030 输出解码，以及受控 CLI 执行、实时输出、cwd 边界、输出上限、超时和取消。
+- Renderer 生产构建回归：`npm.cmd --workspace @workflow-platform/renderer run build` 已通过，TypeScript 与 Vite 生产资源构建均完成。
 - Deploy Runner 覆盖可信人工启动、受限命令配置、输出持久化、日志 Artifact、完成/失败状态和取消入口。
 - Run 的任务目标与 JSON 参数已写入 `runs.context_json` 和 `RUN_CREATED` 事件；多 Run 可创建、切换，并保持独立上下文。自动 Gate 可依据必需 Artifact 类型由可信系统 Actor 生成证据和结果。
 - 项目归档 API、旧 SQLite 数据库的 `archived_at` 增量迁移、项目页归档入口，以及 Canonical JSON/Generic YAML 工作流导出已由 Runtime 和 Renderer 专项测试覆盖。

@@ -1,29 +1,22 @@
-import type { Terminal as XtermTerminal } from "@xterm/xterm";
-import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useRef, useState } from "react";
 
 import type { TerminalOutputEvent, TerminalSessionSummary } from "../../app/runtimeClient";
+import { TerminalViewport, type TerminalViewportOutput } from "./TerminalViewport";
+
+type TerminalKind = "shell" | "codex" | "claude";
 
 type TerminalSession = {
   id: string;
   runtimeSessionId?: string;
-  kind: "shell" | "codex";
+  kind: TerminalKind;
   cwd: string;
   pid: number;
   columns: number;
   rows: number;
 };
 
-type TerminalOutput = {
-  sequence: number;
-  data: string;
-};
-
 type TerminalCommandDecision =
-  | {
-      status: "executed";
-      commandSummary: string;
-    }
+  | { status: "executed"; commandSummary: string }
   | {
       status: "pending_approval";
       approval: {
@@ -33,24 +26,24 @@ type TerminalCommandDecision =
         impact: string;
       };
     }
-  | {
-      status: "blocked";
-      reason: string;
-    };
+  | { status: "blocked"; reason: string };
 
 type TerminalBridge = {
   create(request: {
-    kind: "shell" | "codex";
+    kind: TerminalKind;
     cwd: string;
     projectRoot: string;
     columns: number;
     rows: number;
+    initialPrompt?: string;
   }): Promise<TerminalSession>;
   bindRuntimeSession(sessionId: string, runId: string, runtimeSessionId: string): Promise<void>;
-  requestCommand(sessionId: string, command: string): Promise<TerminalCommandDecision>;
+  requestCommand?(sessionId: string, command: string): Promise<TerminalCommandDecision>;
+  submitShellLine?(sessionId: string, command: string): Promise<TerminalCommandDecision>;
+  writeInput(sessionId: string, data: string): Promise<void>;
   approveCommand(sessionId: string, approvalId: string): Promise<TerminalCommandDecision>;
   rejectCommand(sessionId: string, approvalId: string): Promise<TerminalCommandDecision>;
-  read(sessionId: string, afterSequence: number): Promise<TerminalOutput[]>;
+  read(sessionId: string, afterSequence: number): Promise<TerminalViewportOutput[]>;
   resize(sessionId: string, columns: number, rows: number): Promise<TerminalSession>;
   interrupt(sessionId: string): Promise<void>;
   stop(sessionId: string): Promise<void>;
@@ -63,7 +56,7 @@ type TerminalPageProps = {
   onRegisterSession?: (session: {
     runId: string;
     nodeId: string;
-    kind: TerminalSession["kind"];
+    kind: TerminalKind;
     cwd: string;
     pid: number;
   }) => Promise<{ id: string }>;
@@ -93,12 +86,10 @@ export function TerminalPage({
   const bridge = getTerminalBridge();
   const [projectRoot, setProjectRoot] = useState(projectPath);
   const [nodeId, setNodeId] = useState(initialNodeId);
-  const [kind, setKind] = useState<"shell" | "codex">("shell");
+  const [kind, setKind] = useState<TerminalKind>("shell");
+  const [initialPrompt, setInitialPrompt] = useState("");
   const [session, setSession] = useState<TerminalSession | null>(null);
-  const [input, setInput] = useState("");
-  const [output, setOutput] = useState<TerminalOutput[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+  const [output, setOutput] = useState<TerminalViewportOutput[]>([]);
   const [pendingApproval, setPendingApproval] = useState<
     Extract<TerminalCommandDecision, { status: "pending_approval" }>["approval"] | null
   >(null);
@@ -106,15 +97,8 @@ export function TerminalPage({
   const [rows, setRows] = useState(30);
   const [historySessionId, setHistorySessionId] = useState("");
   const [message, setMessage] = useState(bridge ? "等待创建终端" : "桌面终端不可用");
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<XtermTerminal | null>(null);
-  const searchAddonRef = useRef<SearchAddon | null>(null);
-  const renderedSequenceRef = useRef(0);
+  const shellLineRef = useRef("");
   const latestSequence = output.reduce((latest, event) => Math.max(latest, event.sequence), 0);
-  const outputText = output.map((event) => event.data).join("");
-  const searchMatches = findMatches(outputText, searchQuery);
-  const safeActiveSearchIndex =
-    searchMatches.length === 0 ? 0 : activeSearchIndex % searchMatches.length;
   const selectedHistorySession =
     historySessions.find((candidate) => candidate.id === historySessionId) ?? null;
 
@@ -161,64 +145,6 @@ export function TerminalPage({
     };
   }, [bridge, onAppendOutput, runId, session?.id, latestSequence]);
 
-  useEffect(() => {
-    if (!session || !viewportRef.current || isTestEnvironment()) {
-      return;
-    }
-    let disposed = false;
-    let terminal: XtermTerminal | null = null;
-    void Promise.all([import("@xterm/xterm"), import("@xterm/addon-search")]).then(
-      ([{ Terminal }, { SearchAddon }]) => {
-      if (disposed || !viewportRef.current) {
-        return;
-      }
-      terminal = new Terminal({
-        cols: session.columns,
-        rows: session.rows,
-        convertEol: true,
-        cursorBlink: true,
-        disableStdin: true,
-        scrollback: 2_000,
-        fontFamily: '"Cascadia Code", Consolas, monospace',
-        fontSize: 13,
-        theme: {
-          background: "#111827",
-          foreground: "#d1fadf",
-          cursor: "#fef3c7",
-        },
-      });
-      const searchAddon = new SearchAddon();
-      terminal.loadAddon(searchAddon);
-      terminal.open(viewportRef.current);
-      for (const event of output) {
-        terminal.write(event.data);
-        renderedSequenceRef.current = event.sequence;
-      }
-      terminalRef.current = terminal;
-      searchAddonRef.current = searchAddon;
-    });
-    return () => {
-      disposed = true;
-      terminal?.dispose();
-      if (terminalRef.current === terminal) {
-        terminalRef.current = null;
-      }
-      searchAddonRef.current = null;
-    };
-  }, [bridge, session?.id]);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) {
-      return;
-    }
-    const newOutput = output.filter((event) => event.sequence > renderedSequenceRef.current);
-    for (const event of newOutput) {
-      terminal.write(event.data);
-      renderedSequenceRef.current = event.sequence;
-    }
-  }, [output]);
-
   async function createTerminal() {
     if (!bridge || !runId || !nodeId.trim() || !projectRoot.trim() || !onRegisterSession) {
       return;
@@ -230,6 +156,7 @@ export function TerminalPage({
         projectRoot: projectRoot.trim(),
         columns,
         rows,
+        initialPrompt: initialPrompt.trim() || undefined,
       });
       try {
         const registeredSession = await onRegisterSession({
@@ -249,10 +176,8 @@ export function TerminalPage({
       setColumns(nextSession.columns);
       setRows(nextSession.rows);
       setOutput([]);
-      setSearchQuery("");
-      setActiveSearchIndex(0);
+      shellLineRef.current = "";
       setPendingApproval(null);
-      renderedSequenceRef.current = 0;
       setMessage("运行中");
     } catch (error) {
       setMessage(`创建终端失败：${errorMessage(error)}`);
@@ -267,7 +192,7 @@ export function TerminalPage({
     }
     setProjectRoot(historicalSession.cwd);
     setNodeId(historicalSession.nodeId);
-    setKind(historicalSession.kind);
+    setKind(historicalSession.kind as TerminalKind);
     setMessage(`已选择历史会话：${historicalSession.id}`);
   }
 
@@ -279,24 +204,56 @@ export function TerminalPage({
       const historyOutput = await onLoadHistoryOutput(selectedHistorySession.id);
       setSession(null);
       setOutput(historyOutput.map(({ sequence, data }) => ({ sequence, data })));
-      setSearchQuery("");
-      setActiveSearchIndex(0);
-      renderedSequenceRef.current = 0;
+      shellLineRef.current = "";
       setMessage(`已加载历史会话：${selectedHistorySession.id}（只读）`);
     } catch (error) {
       setMessage(`加载历史会话失败：${errorMessage(error)}`);
     }
   }
 
-  async function sendInput() {
-    if (!bridge || !session || !input.trim()) {
+  async function handleTerminalInput(data: string) {
+    if (!bridge || !session) {
+      return;
+    }
+    if (session.kind !== "shell") {
+      try {
+        await bridge.writeInput(session.id, data);
+      } catch (error) {
+        setMessage(`发送输入失败：${errorMessage(error)}`);
+      }
+      return;
+    }
+    if (data === "\r") {
+      const line = shellLineRef.current;
+      shellLineRef.current = "";
+      await submitShellLine(line);
+      return;
+    }
+    if (data === "\u0003") {
+      await interruptTerminal();
+      return;
+    }
+    if (data === "\u007f") {
+      shellLineRef.current = shellLineRef.current.slice(0, -1);
+      return;
+    }
+    if (!/[\r\n\u0000-\u001f\u007f]/.test(data)) {
+      shellLineRef.current += data;
+    }
+  }
+
+  async function submitShellLine(command: string) {
+    if (!bridge || !session || session.kind !== "shell" || !command.trim()) {
       return;
     }
     try {
-      const decision = await bridge.requestCommand(session.id, input);
+      const submit = bridge.submitShellLine ?? bridge.requestCommand;
+      if (!submit) {
+        throw new Error("当前终端桥接不支持 Shell 输入");
+      }
+      const decision = await submit(session.id, command);
       if (decision.status === "pending_approval") {
         setPendingApproval(decision.approval);
-        setInput("");
         setMessage("等待确认危险命令");
         return;
       }
@@ -304,7 +261,6 @@ export function TerminalPage({
         setMessage(decision.reason);
         return;
       }
-      setInput("");
       setMessage(`已发送命令：${decision.commandSummary}`);
     } catch (error) {
       setMessage(`发送命令失败：${errorMessage(error)}`);
@@ -365,6 +321,7 @@ export function TerminalPage({
         await onStopSession({ runId, sessionId: session.runtimeSessionId });
       }
       setSession(null);
+      shellLineRef.current = "";
       setMessage("已停止");
     } catch (error) {
       setMessage(`停止终端失败：${errorMessage(error)}`);
@@ -377,12 +334,8 @@ export function TerminalPage({
     }
     try {
       const nextSession = await bridge.resize(session.id, columns, rows);
-      setSession({
-        ...nextSession,
-        runtimeSessionId: session.runtimeSessionId,
-      });
-      terminalRef.current?.resize(nextSession.columns, nextSession.rows);
-      setMessage(`已调整为 ${nextSession.columns} × ${nextSession.rows}`);
+      setSession({ ...nextSession, runtimeSessionId: session.runtimeSessionId });
+      setMessage(`已调整为 ${nextSession.columns} x ${nextSession.rows}`);
     } catch (error) {
       setMessage(`调整终端尺寸失败：${errorMessage(error)}`);
     }
@@ -408,60 +361,6 @@ export function TerminalPage({
     }
   }
 
-  function updateSearchQuery(value: string) {
-    setSearchQuery(value);
-    setActiveSearchIndex(0);
-    if (value.trim()) {
-      searchAddonRef.current?.findNext(value, { caseSensitive: false });
-    } else {
-      searchAddonRef.current?.clearDecorations();
-    }
-  }
-
-  function moveSearchMatch(direction: -1 | 1) {
-    if (searchMatches.length === 0) {
-      return;
-    }
-    setActiveSearchIndex(
-      (current) => (current + direction + searchMatches.length) % searchMatches.length,
-    );
-    if (direction === -1) {
-      searchAddonRef.current?.findPrevious(searchQuery, { caseSensitive: false });
-    } else {
-      searchAddonRef.current?.findNext(searchQuery, { caseSensitive: false });
-    }
-  }
-
-  async function copyOutput() {
-    if (!outputText) {
-      return;
-    }
-    try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error("系统剪贴板不可用");
-      }
-      await navigator.clipboard.writeText(outputText);
-      setMessage("已复制终端输出");
-    } catch (error) {
-      setMessage(`复制终端输出失败：${errorMessage(error)}`);
-    }
-  }
-
-  async function pasteToInput() {
-    if (!session) {
-      return;
-    }
-    try {
-      if (!navigator.clipboard?.readText) {
-        throw new Error("系统剪贴板不可用");
-      }
-      setInput(await navigator.clipboard.readText());
-      setMessage("已粘贴到终端输入框");
-    } catch (error) {
-      setMessage(`粘贴终端输入失败：${errorMessage(error)}`);
-    }
-  }
-
   return (
     <section id="terminal" className="panel" aria-labelledby="terminal-title">
       <div className="panel-heading">
@@ -482,7 +381,7 @@ export function TerminalPage({
             <option value="">选择已持久化的会话</option>
             {historySessions.map((candidate) => (
               <option key={candidate.id} value={candidate.id}>
-                {candidate.nodeId} · {candidate.kind} · {candidate.status} · {candidate.createdAt}
+                {candidate.nodeId} / {candidate.kind} / {candidate.status} / {candidate.createdAt}
               </option>
             ))}
           </select>
@@ -492,7 +391,7 @@ export function TerminalPage({
           <input
             value={projectRoot}
             onChange={(event) => setProjectRoot(event.target.value)}
-            placeholder="例如 G:\Project\demo"
+            placeholder="例如 G:\\Project\\demo"
           />
         </label>
         <label>
@@ -506,10 +405,19 @@ export function TerminalPage({
         </label>
         <label>
           终端类型
-          <select value={kind} onChange={(event) => setKind(event.target.value as "shell" | "codex")}>
+          <select value={kind} onChange={(event) => setKind(event.target.value as TerminalKind)}>
             <option value="shell">系统 Shell</option>
             <option value="codex">Codex CLI</option>
+            <option value="claude">Claude Code CLI</option>
           </select>
+        </label>
+        <label>
+          启动提示
+          <input
+            value={initialPrompt}
+            onChange={(event) => setInitialPrompt(event.target.value)}
+            disabled={Boolean(session) || kind === "shell"}
+          />
         </label>
         <label>
           终端列数
@@ -571,65 +479,12 @@ export function TerminalPage({
           转为 Evidence
         </button>
       </div>
-      <label>
-        终端输入
-        <input
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          disabled={!session}
-        />
-      </label>
-      <div className="button-row">
-        <button className="quiet-button" disabled={!session || !input.trim()} onClick={sendInput}>
-          发送输入
-        </button>
-        <button className="quiet-button" disabled={!session} onClick={interruptTerminal}>
-          发送 Ctrl+C
-        </button>
-        <button className="quiet-button" disabled={!session} onClick={pasteToInput}>
-          粘贴到输入
-        </button>
-        <button className="quiet-button" disabled={output.length === 0} onClick={copyOutput}>
-          复制输出
-        </button>
-        <button className="quiet-button" disabled={output.length === 0} onClick={() => setOutput([])}>
-          清空输出
-        </button>
-      </div>
-      <div className="terminal-search-row">
-        <label>
-          搜索终端输出
-          <input
-            value={searchQuery}
-            onChange={(event) => updateSearchQuery(event.target.value)}
-            disabled={output.length === 0}
-          />
-        </label>
-        <span aria-live="polite">
-          搜索结果：{searchMatches.length === 0 ? 0 : safeActiveSearchIndex + 1} / {searchMatches.length}
-        </span>
-        <button
-          className="quiet-button"
-          disabled={searchMatches.length === 0}
-          onClick={() => moveSearchMatch(-1)}
-        >
-          上一个命中
-        </button>
-        <button
-          className="quiet-button"
-          disabled={searchMatches.length === 0}
-          onClick={() => moveSearchMatch(1)}
-        >
-          下一个命中
-        </button>
-      </div>
-      <pre className="terminal-readout" aria-label="终端输出">
-        {outputText.trimEnd()}
-      </pre>
-      <div
-        ref={viewportRef}
-        className="terminal-viewport"
-        aria-label="ANSI 终端"
+      <TerminalViewport
+        ariaLabel="ANSI 终端"
+        output={output}
+        writable={Boolean(session)}
+        onInput={handleTerminalInput}
+        onInterrupt={interruptTerminal}
       />
       {pendingApproval ? (
         <div className="dialog-backdrop" role="presentation">
@@ -653,33 +508,10 @@ export function TerminalPage({
   );
 }
 
-function isTestEnvironment(): boolean {
-  return typeof navigator !== "undefined" && navigator.userAgent.includes("jsdom");
-}
-
 function getTerminalBridge(): TerminalBridge | null {
   return (window as Window & { workflowTerminal?: TerminalBridge }).workflowTerminal ?? null;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function findMatches(text: string, query: string): number[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) {
-    return [];
-  }
-  const normalizedText = text.toLocaleLowerCase();
-  const matches: number[] = [];
-  let startIndex = 0;
-  while (startIndex < normalizedText.length) {
-    const index = normalizedText.indexOf(normalizedQuery, startIndex);
-    if (index < 0) {
-      return matches;
-    }
-    matches.push(index);
-    startIndex = index + normalizedQuery.length;
-  }
-  return matches;
 }

@@ -9,6 +9,7 @@ import type {
   RunConfiguration,
   RuntimeWorkbenchState,
 } from "../../app/runtimeClient";
+import { TerminalViewport, type TerminalViewportOutput } from "../terminal/TerminalViewport";
 
 type Props = {
   state: RuntimeWorkbenchState | null;
@@ -28,8 +29,10 @@ type Props = {
     nodeId: string,
     provider: AgentJobSummary["provider"],
     prompt: string,
+    mode: "interactive" | "automatic",
   ) => void;
   onCancelAgent?: (jobId: string) => void;
+  onAgentTerminalInput?: (jobId: string, data: string) => void;
   deployments?: DeploymentSummary[];
   deploymentOutput?: DeploymentOutputEvent[];
   onStartDeployment?: (nodeId: string) => void;
@@ -54,6 +57,7 @@ export function RunDashboard({
   onArchiveRun,
   onStartAgent,
   onCancelAgent,
+  onAgentTerminalInput,
   deployments = [],
   deploymentOutput = [],
   onStartDeployment,
@@ -69,11 +73,22 @@ export function RunDashboard({
   const [artifactPath, setArtifactPath] = useState("");
   const [waiverReason, setWaiverReason] = useState("");
   const [agentProvider, setAgentProvider] = useState<AgentJobSummary["provider"]>("codex");
+  const [agentMode, setAgentMode] = useState<"interactive" | "automatic">("interactive");
   const [agentPrompt, setAgentPrompt] = useState("");
   const projection = state?.projection;
   const workspaceReady = state?.workspaceStatus === "ready";
   const agentJobs = Array.isArray(state?.agentJobs) ? state.agentJobs : [];
   const agentOutput = Array.isArray(state?.agentOutput) ? state.agentOutput : [];
+  const activeInteractiveAgent = [...agentJobs]
+    .reverse()
+    .find((job) => job.mode === "interactive" && (job.status === "QUEUED" || job.status === "RUNNING"));
+  const latestAgentJob = activeInteractiveAgent ?? [...agentJobs].reverse()[0] ?? null;
+  const agentTerminalOutput = latestAgentJob
+    ? agentOutput
+        .filter((event) => event.jobId === latestAgentJob.id)
+        .sort((left, right) => left.sequence - right.sequence)
+        .map((event): TerminalViewportOutput => ({ sequence: event.sequence, data: formatAgentPayload(event.payload) }))
+    : [];
   const selectedProviderDiagnostic = providerDiagnostics?.find(
     (diagnostic) => diagnostic.id === agentProvider,
   );
@@ -401,13 +416,14 @@ export function RunDashboard({
         <p className="body-copy">当前 Run 尚无部署会话。</p>
       )}
       {deploymentOutput.length > 0 ? (
-        <pre className="terminal-readout" aria-label="部署实时输出">
-          {deploymentOutput
+        <TerminalViewport
+          ariaLabel="部署实时输出"
+          className="live-log-viewer"
+          output={deploymentOutput
             .slice()
             .sort((left, right) => left.sequence - right.sequence)
-            .map((event) => event.data)
-            .join("")}
-        </pre>
+            .map((event) => ({ sequence: event.sequence, data: event.data }))}
+        />
       ) : null}
       <div className="panel-heading">
         <div>
@@ -435,6 +451,16 @@ export function RunDashboard({
             ))}
           </select>
         </label>
+        <label>
+          Agent 模式
+          <select
+            value={agentMode}
+            onChange={(event) => setAgentMode(event.target.value as "interactive" | "automatic")}
+          >
+            <option value="interactive">交互式终端</option>
+            <option value="automatic">自动执行</option>
+          </select>
+        </label>
         <label className="form-wide">
           Agent 提示词
           <textarea
@@ -458,7 +484,7 @@ export function RunDashboard({
         <button
           className="quiet-button"
           disabled={!hasRun || !nodeId.trim() || !agentPrompt.trim() || !providerAvailable}
-          onClick={() => onStartAgent?.(nodeId.trim(), agentProvider, agentPrompt.trim())}
+          onClick={() => onStartAgent?.(nodeId.trim(), agentProvider, agentPrompt.trim(), agentMode)}
         >
           启动 Agent
         </button>
@@ -482,11 +508,21 @@ export function RunDashboard({
           </li>
         ))}
       </ul>
-      <ul className="compact-list" aria-label="Agent 输出">
-        {agentOutput.map((event) => (
-          <li key={event.id}>{formatAgentPayload(event.payload)}</li>
-        ))}
-      </ul>
+      <TerminalViewport
+        ariaLabel="Agent 交互终端"
+        output={agentTerminalOutput}
+        writable={Boolean(activeInteractiveAgent && onAgentTerminalInput)}
+        onInput={(data) => {
+          if (activeInteractiveAgent) {
+            onAgentTerminalInput?.(activeInteractiveAgent.id, data);
+          }
+        }}
+        onInterrupt={() => {
+          if (activeInteractiveAgent) {
+            onAgentTerminalInput?.(activeInteractiveAgent.id, "\u0003");
+          }
+        }}
+      />
     </section>
   );
 }

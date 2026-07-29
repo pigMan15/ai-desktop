@@ -3,6 +3,22 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RunDashboard } from "./RunDashboard";
 
+vi.mock("../terminal/TerminalViewport", () => ({
+  TerminalViewport: ({ ariaLabel, output, writable, onInput, onInterrupt }: {
+    ariaLabel: string;
+    output: Array<{ sequence: number; data: string }>;
+    writable?: boolean;
+    onInput?: (data: string) => void | Promise<void>;
+    onInterrupt?: () => void;
+  }) => (
+    <section aria-label={ariaLabel} className="terminal-viewport" data-writable={String(Boolean(writable))}>
+      <pre>{output.map((event) => event.data).join("")}</pre>
+      <button type="button" onClick={() => onInput?.("继续\r")}>在 Agent 终端回复</button>
+      <button type="button" onClick={onInterrupt}>中断 Agent 终端</button>
+    </section>
+  ),
+}));
+
 afterEach(cleanup);
 
 describe("RunDashboard", () => {
@@ -391,5 +407,73 @@ describe("RunDashboard", () => {
     expect(onStartDeployment).toHaveBeenCalledWith("deploy");
     expect(onCancelDeployment).toHaveBeenCalledWith("deployment-1");
     expect(screen.getByLabelText("部署实时输出").textContent).toContain("部署日志：正在发布");
+  });
+
+  it("默认以交互模式启动 Agent，并在 xterm 中直接回复运行中的 Agent", () => {
+    const onStartAgent = vi.fn();
+    const onAgentTerminalInput = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-07-29T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [
+            {
+              id: "job-1",
+              runId: "run-1",
+              nodeId: "plan",
+              provider: "codex",
+              mode: "interactive",
+              status: "RUNNING",
+              command: ["codex.cmd"],
+              cwd: "G:\\Project\\demo",
+              pid: 1234,
+              sessionId: "agent-session-1",
+              summary: null,
+              error: null,
+              createdAt: "2026-07-29T00:00:00Z",
+              updatedAt: "2026-07-29T00:00:00Z",
+            },
+          ],
+          agentOutput: [
+            {
+              id: "out-1",
+              jobId: "job-1",
+              sequence: 1,
+              kind: "terminal_raw",
+              payload: { text: "需要你回复 yes/no\r\n" },
+              createdAt: "2026-07-29T00:00:01Z",
+            },
+          ],
+        }}
+        onStartAgent={onStartAgent}
+        onAgentTerminalInput={onAgentTerminalInput}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Agent 提示词"), { target: { value: "继续开发" } });
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
+    expect(onStartAgent).toHaveBeenCalledWith("plan", "codex", "继续开发", "interactive");
+
+    expect(screen.getByLabelText("Agent 交互终端")).toHaveAttribute("data-writable", "true");
+    expect(screen.getByLabelText("Agent 交互终端").textContent).toContain("需要你回复 yes/no");
+    fireEvent.click(screen.getByRole("button", { name: "在 Agent 终端回复" }));
+    expect(onAgentTerminalInput).toHaveBeenCalledWith("job-1", "继续\r");
   });
 });

@@ -390,6 +390,10 @@ h2 {
   height: clamp(26rem, 58vh, 38rem);
 }
 
+.terminal-surface.live-log-viewer {
+  height: clamp(15rem, 34vh, 24rem);
+}
+
 .terminal-toolbar {
   display: flex;
   align-items: end;

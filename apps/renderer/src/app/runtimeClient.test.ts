@@ -380,6 +380,56 @@ describe("runtimeClient", () => {
     });
   });
 
+  it("starts an interactive Agent and records its terminal session, input, output, and finish state", async () => {
+    const calls: Array<{ path: string; body?: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        calls.push({
+          path: url.pathname + url.search,
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        if (url.pathname.endsWith("/interactive-session/output")) {
+          return jsonResponse([{ id: "out-1", jobId: "job-1", sequence: 1, kind: "terminal_raw", payload: { text: "需要确认\r\n" }, createdAt: "2026-07-29T00:00:00Z" }]);
+        }
+        return jsonResponse({ id: "job-1", status: "RUNNING" });
+      }),
+    );
+
+    const client = createRuntimeClient("http://127.0.0.1:8765");
+    await client.startAgentJob("run-1", "plan", "codex", "继续开发", "2026-07-29T00:00:00Z", "interactive");
+    await client.startInteractiveAgentSession("run-1", "job-1", "terminal-1", 1234, "2026-07-29T00:00:01Z");
+    await client.recordInteractiveAgentInput("run-1", "job-1", "继续", "2026-07-29T00:00:02Z");
+    await client.appendInteractiveAgentOutput("run-1", "job-1", [{ data: "需要确认\r\n" }], "2026-07-29T00:00:03Z");
+    await client.finishInteractiveAgentSession("run-1", "job-1", "COMPLETED", "完成", null, "2026-07-29T00:00:04Z");
+    await client.getInteractiveAgentSession("run-1", "job-1");
+    await client.continueInteractiveAgent("run-1", "job-1", "2026-07-29T00:00:05Z");
+
+    expect(calls.map((call) => call.path)).toEqual([
+      "/runs/run-1/agents",
+      "/runs/run-1/agents/job-1/interactive-session/start",
+      "/runs/run-1/agents/job-1/interactive-session/input",
+      "/runs/run-1/agents/job-1/interactive-session/output",
+      "/runs/run-1/agents/job-1/interactive-session/ended",
+      "/runs/run-1/agents/job-1/interactive-session",
+      "/runs/run-1/agents/job-1/interactive-session/continue",
+    ]);
+    expect(calls[0]?.body).toMatchObject({
+      mode: "interactive",
+      actor: { id: "renderer-human", type: "human", trusted: true },
+    });
+    expect(calls[1]?.body).toMatchObject({
+      desktopSessionId: "terminal-1",
+      pid: 1234,
+      actor: { id: "renderer-human", trusted: true },
+    });
+    expect(calls[2]?.body).toMatchObject({ content: "继续" });
+    expect(calls[3]?.body).toMatchObject({ events: [{ data: "需要确认\r\n" }] });
+    expect(calls[4]?.body).toMatchObject({ status: "COMPLETED", summary: "完成", error: null });
+    expect(calls[6]?.body).toMatchObject({ actor: { id: "renderer-human", trusted: true } });
+  });
+
   it("restores a saved Run by reading its current Runtime state", async () => {
     const calls: string[] = [];
     vi.stubGlobal(

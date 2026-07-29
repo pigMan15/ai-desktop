@@ -1,4 +1,5 @@
 import { _electron as electron, expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,21 @@ const packagedDeployCommand = path.join(
   "System32",
   "hostname.exe",
 );
+
+async function waitForManagedRuntime(window: Page, port: number) {
+  await expect
+    .poll(() =>
+      window.evaluate(() => typeof window.workflowRuntime?.status === "function"),
+    )
+    .toBe(true);
+  await expect
+    .poll(() => window.evaluate(() => window.workflowRuntime?.status()))
+    .toMatchObject({ mode: "managed", state: "ready", port });
+}
+
+function packagedLaunchArgs(userDataDirectory: string): string[] {
+  return [`--user-data-dir=${userDataDirectory}`];
+}
 
 function latestPackagedExecutable(): string {
   const root = path.resolve(".");
@@ -27,8 +43,10 @@ function latestPackagedExecutable(): string {
 }
 
 test("已打包桌面 EXE 加载应用资源、启动受管 Runtime 并保持独立路由", async () => {
+  const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "workflow-packaged-startup-"));
   const app = await electron.launch({
     executablePath: latestPackagedExecutable(),
+    args: packagedLaunchArgs(path.join(temporaryRoot, "user-data")),
     env: {
       ...process.env,
       WORKFLOW_PLATFORM_RUNTIME_URL: "",
@@ -41,14 +59,7 @@ test("已打包桌面 EXE 加载应用资源、启动受管 Runtime 并保持独
     const window = await app.firstWindow();
     await expect(window.getByRole("heading", { name: "项目工作区" })).toBeVisible();
     await expect(window).toHaveURL(/^file:/);
-    await expect
-      .poll(() =>
-        window.evaluate(() => typeof window.workflowRuntime?.status === "function"),
-      )
-      .toBe(true);
-    await expect
-      .poll(() => window.evaluate(() => window.workflowRuntime?.status()))
-      .toMatchObject({ mode: "managed", state: "ready", port: packagedRuntimePort });
+    await waitForManagedRuntime(window, packagedRuntimePort);
     await expect
       .poll(() =>
         window.evaluate(() => typeof window.workflowGit?.publishKnowledgeDocument === "function"),
@@ -60,6 +71,7 @@ test("已打包桌面 EXE 加载应用资源、启动受管 Runtime 并保持独
     await expect(window.getByRole("heading", { name: "运行时设置" })).toBeVisible();
   } finally {
     await app.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 
@@ -68,6 +80,7 @@ test("已打包桌面 EXE 拒绝危险终端命令并写入 Runtime 审计", asy
   const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "workflow-packaged-terminal-approval-"));
   const app = await electron.launch({
     executablePath: latestPackagedExecutable(),
+    args: packagedLaunchArgs(path.join(temporaryRoot, "user-data")),
     env: {
       ...process.env,
       WORKFLOW_PLATFORM_RUNTIME_URL: "",
@@ -78,6 +91,7 @@ test("已打包桌面 EXE 拒绝危险终端命令并写入 Runtime 审计", asy
 
   try {
     const window = await app.firstWindow();
+    await waitForManagedRuntime(window, packagedRuntimePort + 1);
     await window.getByLabel("项目路径").fill(fixtureProjectPath);
     await window.getByRole("button", { name: "导入项目" }).click();
     await window.getByRole("link", { name: "运行" }).click();
@@ -87,12 +101,13 @@ test("已打包桌面 EXE 拒绝危险终端命令并写入 Runtime 审计", asy
     await window.getByRole("link", { name: "终端" }).click();
     await window.getByLabel("项目根目录").fill(fixtureProjectPath);
     await window.getByRole("button", { name: "创建终端" }).click();
-    await window.getByLabel("终端输入").fill("del .\\build");
-    await window.getByRole("button", { name: "发送输入" }).click();
+    await window.getByLabel("ANSI 终端", { exact: true }).click();
+    await window.keyboard.type("del .\\build");
+    await window.keyboard.press("Enter");
     await expect(window.getByRole("dialog", { name: "确认危险命令" })).toBeVisible();
     await window.getByRole("button", { name: "取消危险命令" }).click();
     await expect(window.getByText("危险命令已被用户拒绝。")).toBeVisible();
-    await expect(window.getByLabel("终端输出", { exact: true })).not.toContainText("del .\\build");
+    await expect(window.getByLabel("ANSI 终端文本")).not.toContainText("del .\\build");
 
     await window.getByRole("link", { name: "审计" }).click();
     await expect(window.getByText("terminal.command.rejected")).toBeVisible();
@@ -122,6 +137,7 @@ test("已打包桌面 EXE 在受控命令边界内展示部署和知识合成实
 
   const app = await electron.launch({
     executablePath: latestPackagedExecutable(),
+    args: packagedLaunchArgs(path.join(temporaryRoot, "user-data")),
     env: {
       ...process.env,
       PATH: `${fakeCliDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -134,21 +150,16 @@ test("已打包桌面 EXE 在受控命令边界内展示部署和知识合成实
   try {
     const window = await app.firstWindow();
     await expect(window.getByRole("heading", { name: "项目工作区" })).toBeVisible();
-    await expect
-      .poll(() =>
-        window.evaluate(() => typeof window.workflowRuntime?.status === "function"),
-      )
-      .toBe(true);
-    await expect
-      .poll(() => window.evaluate(() => window.workflowRuntime?.status()))
-      .toMatchObject({ mode: "managed", state: "ready", port: packagedWorkflowRuntimePort });
+    await waitForManagedRuntime(window, packagedWorkflowRuntimePort);
 
     await window.getByLabel("项目路径").fill(projectPath);
     await window.getByRole("button", { name: "导入项目" }).click();
     await expect(window.getByRole("cell", { name: "project" })).toBeVisible();
 
     await window.getByRole("link", { name: "工作流" }).click();
-    const definition = JSON.parse(await window.getByLabel("工作流定义 JSON").inputValue());
+    const workflowInput = window.getByLabel("工作流定义 JSON");
+    const definition = JSON.parse(await workflowInput.inputValue());
+    const previousVersion = definition.version;
     definition.nodes = [
       {
         id: "deploy",
@@ -164,9 +175,9 @@ test("已打包桌面 EXE 在受控命令边界内展示部署和知识合成实
     ];
     definition.edges = [];
     definition.gates = [];
-    await window.getByLabel("工作流定义 JSON").fill(JSON.stringify(definition, null, 2));
+    await workflowInput.fill(JSON.stringify(definition, null, 2));
     await window.getByRole("button", { name: "保存新版本" }).click();
-    await expect(window.getByLabel("比较版本").locator("option")).toHaveCount(3);
+    await expect.poll(async () => JSON.parse(await workflowInput.inputValue()).version).not.toBe(previousVersion);
 
     await window.getByRole("link", { name: "运行" }).click();
     await window.getByLabel("Run 名称").fill("打包版部署验收");
@@ -183,7 +194,7 @@ test("已打包桌面 EXE 在受控命令边界内展示部署和知识合成实
     }
     await window.getByLabel("节点 ID").fill("deploy");
     await window.getByRole("button", { name: "启动部署" }).click();
-    await expect(window.getByLabel("部署实时输出")).toHaveText(/\S/);
+    await expect(window.getByLabel("部署实时输出文本")).toHaveText(/\S/);
     await expect(window.getByLabel("部署会话")).toContainText("COMPLETED");
 
     await window.getByRole("link", { name: "知识库" }).click();

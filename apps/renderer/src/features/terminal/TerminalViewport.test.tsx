@@ -9,6 +9,7 @@ const findNext = vi.fn();
 const findPrevious = vi.fn();
 const clearDecorations = vi.fn();
 const fit = vi.fn();
+const focus = vi.fn();
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class FakeTerminal {
@@ -20,7 +21,7 @@ vi.mock("@xterm/xterm", () => ({
     clear() {
       terminalWrites.length = 0;
     }
-    focus() {}
+    focus = focus;
     dispose() {}
     onData(handler: (data: string) => void) {
       terminalDataHandler = handler;
@@ -68,6 +69,33 @@ describe("TerminalViewport", () => {
     expect(onInput).toHaveBeenCalledWith("继续执行\r");
     expect(screen.getByLabelText("Agent 交互终端")).toHaveClass("terminal-viewport");
     expect(screen.getByText("第一行")).toBeInTheDocument();
+  });
+
+  it("focuses xterm before interactive viewport click handlers run", async () => {
+    render(<TerminalViewport ariaLabel="ANSI 终端" output={[]} writable />);
+
+    await waitFor(() => expect(fit).toHaveBeenCalled());
+    fireEvent.mouseDown(screen.getByLabelText("ANSI 终端", { exact: true }));
+
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("enables direct input when a previously read-only viewport becomes writable", async () => {
+    const initialInput = vi.fn();
+    const interactiveInput = vi.fn();
+    const { rerender } = render(
+      <TerminalViewport ariaLabel="ANSI 终端" output={[]} onInput={initialInput} />,
+    );
+
+    await waitFor(() => expect(fit).toHaveBeenCalled());
+    rerender(
+      <TerminalViewport ariaLabel="ANSI 终端" output={[]} writable onInput={interactiveInput} />,
+    );
+    await waitFor(() => expect(fit).toHaveBeenCalledTimes(2));
+    terminalDataHandler?.("del .\\build\r");
+
+    expect(interactiveInput).toHaveBeenCalledWith("del .\\build\r");
+    expect(initialInput).not.toHaveBeenCalled();
   });
 
   it("pauses follow mode after user scrolls up and shows unread output", async () => {

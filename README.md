@@ -1,6 +1,17 @@
 # AI Workflow Platform
 
-本项目是一个本地桌面 AI 工程工作流平台 MVP，用于验证项目导入、工作流规范化、运行状态推进、治理边界、Runtime API 和桌面工作台的最小闭环。
+AI Workflow Platform 是一个本地桌面 AI 工程工作流软件，面向“导入项目 -> 规范化工作流 -> 创建 Run -> 推进节点 -> 调用 Codex/Claude Code CLI -> 审批/Gate/证据归档 -> 打包交付”的完整闭环。
+
+当前版本已经接入 Runtime API、Electron 桌面运行时、独立页面路由、受控终端、交互式 Agent 会话、实时日志、Windows EXE 打包脚本和中文工作台。
+
+## 环境要求
+
+- Windows 10/11。
+- Node.js 与 npm，可在 PowerShell 中运行 `node -v`、`npm.cmd -v`。
+- Python 3.11+，用于 Runtime 服务和打包 Runtime EXE。
+- 可选：Codex CLI，确保 `codex.cmd` 在 `PATH` 中可用且已登录。
+- 可选：Claude Code CLI，确保 `claude.cmd` 在 `PATH` 中可用且已登录。
+- 可选：PyInstaller，完整打包 Runtime EXE 时需要；缺失时执行 `python -m pip install pyinstaller`。
 
 ## 开发命令
 
@@ -18,43 +29,196 @@ Windows PowerShell 也可以直接运行统一验证脚本：
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
+## 启动桌面应用
+
+开发模式：
+
+```powershell
+npm.cmd run dev:desktop
+```
+
+桌面应用启动后会通过 Electron 管理 Runtime。进入设置或初始化页面后，配置 Runtime endpoint、项目路径和工作流信息；已经保存过工作区会话时，应用会自动恢复上次的项目、工作流版本和 Run。
+
+## Run 模块怎么使用
+
+1. 打开“运行”页面。
+2. 选择或创建一个 Run。
+3. 在节点卡片中选择目标节点，例如 `plan`、`verify`、`deploy`。
+4. 需要推进普通节点时，点击对应动作按钮。
+5. 需要 AI 参与时，在“Agent 提示词”中输入中文或英文任务说明。
+6. 选择 Agent Provider：`Codex`、`Claude Code` 或测试用 `Fake`。
+7. 选择 Agent 模式。
+8. 点击“启动 Agent”。
+
+Agent 模式说明：
+
+- `交互式终端`：默认模式。应用会在桌面端创建受控 PTY，真正启动 `codex.cmd` 或 `claude.cmd`，并把输出显示在 Run 页面底部的 `Agent 交互终端` 中。
+- `自动执行`：适合无人工追问的短任务。Runtime 直接执行 provider 命令，输出写入 Agent 日志。
+
+## Agent 启动后怎么回复
+
+在 `交互式终端` 模式下，Agent 如果输出“需要你回复”“是否继续”“选择方案”等内容，直接在底部的 `Agent 交互终端` 里输入回复并按回车即可。不要再取消旧 Agent 再新建一个 Agent。
+
+常用操作：
+
+- 回复普通文本：直接输入，例如 `继续`，然后按 Enter。
+- 选择 CLI 提示项：输入 CLI 要求的序号或文字，然后按 Enter。
+- 中断当前 CLI：点击终端工具栏的中断按钮或发送 Ctrl+C。
+- 取消 Agent：点击 Run 页面中的取消按钮，应用会停止绑定的桌面终端并把取消状态写回 Runtime。
+- 继续历史交互：对已经结束的交互式 Agent 使用继续入口，Runtime 会带上历史输入输出创建新的交互式会话。
+
+交互式输入会先写入真实 CLI，再由应用把完整的回车行记录到 Runtime 审计链；输出会按序列号增量转录，刷新页面后仍可看到已持久化的输出。
+
+## 终端模块怎么使用
+
+终端页面支持三类会话：
+
+- `Shell`：打开受控系统 Shell，适合执行项目命令。
+- `Codex`：打开 Codex CLI 交互终端。
+- `Claude`：打开 Claude Code CLI 交互终端。
+
+使用方式：
+
+1. 打开“终端”页面。
+2. 选择终端类型、工作目录和尺寸。
+3. 点击“创建终端”。
+4. 直接在 xterm 终端区域输入命令或回复，按 Enter 发送。
+
+Shell 终端会对高风险命令弹出中文确认；取消后不会写入 PTY，并会通过可信人工 Actor 写入 Runtime 审计。Codex/Claude 终端按 CLI 原始交互方式写入输入，适合直接处理 CLI 的追问、确认和继续执行。
+
+终端工具栏支持：
+
+- 搜索输出。
+- 复制选中内容。
+- 粘贴剪贴板内容。
+- 清屏。
+- 跳到最新输出。
+- 调整终端尺寸。
+- Ctrl+C 中断。
+- 停止会话。
+- 导出 Evidence。
+- 查看历史输出。
+- 基于历史会话新建终端。
+
+## 实时日志和布局
+
+Run 页面、部署输出、Agent 输出和终端页面都使用有边界高度的 xterm 风格日志区域，不会因为长日志无限撑高页面。
+
+日志区域支持 ANSI 输出、中文文本、增量追加和滚动。Codex/Claude/Shell 的子进程输出会按 UTF-8、GB18030 顺序解码，避免 Windows 中文环境中常见的乱码。
+
+## Codex CLI / Claude Code CLI 对接
+
+对接条件：
+
+```powershell
+where.exe codex
+where.exe claude
+codex --version
+claude --version
+```
+
+如果命令不可用，请把对应 CLI 的 `.cmd` 入口加入用户或系统 `PATH`，然后重启桌面应用。Runtime 诊断会优先检查 `codex.cmd` 和 `claude.cmd`，不会依赖 PowerShell `.ps1` shim。
+
+登录状态由 CLI 自己管理。本软件不会保存 Codex 或 Claude Code 的明文凭据，也不会把登录 token 写入应用数据库、日志、审计记录或 Evidence 包。
+
+## 打包成 Windows EXE
+
+完整打包命令：
+
+```powershell
+npm.cmd run package:win:full
+```
+
+该命令会执行：
+
+- 构建 contracts、renderer 和 desktop。
+- 使用 PyInstaller 打包 Python Runtime EXE。
+- 生成免安装 ZIP。
+- 生成 NSIS 安装器。
+
+只打包 Runtime：
+
+```powershell
+npm.cmd run build:runtime:exe
+```
+
+只生成安装器路径：
+
+```powershell
+npm.cmd run package:win:installer
+```
+
+打包脚本的结构校验：
+
+```powershell
+npm.cmd run test:package-script
+```
+
+打包后建议验证：
+
+```powershell
+npm.cmd run test:e2e:packaged
+npm.cmd run test:e2e:installed
+```
+
+如果 EXE 打开空白，优先检查：
+
+- 是否执行过 `npm.cmd run build`。
+- `apps/renderer/dist/index.html` 是否存在。
+- Electron 是否加载 `file:` 资源而不是开发服务器地址。
+- Runtime EXE 是否在打包产物目录中。
+- Windows 安全软件是否阻止 Runtime 或 Electron 子进程启动。
+
 ## 验证说明
 
-`npm.cmd run verify` 默认运行 TypeScript 单元/类型测试和 Python runtime 测试，不启动浏览器 E2E。浏览器端到端验证需要单独运行：
+默认完整验证：
+
+```powershell
+npm.cmd run verify
+```
+
+`verify` 会运行 contracts、renderer、desktop 和 Runtime 测试，但不启动浏览器 E2E。浏览器端到端验证需要单独运行：
 
 ```powershell
 npm.cmd run test:e2e
 ```
 
-## MVP 范围
+本轮交互式 Agent/终端增强至少需要通过：
 
-当前仓库覆盖的是 MVP 基础实现和验证路径，主要包括：
+```powershell
+npm.cmd --workspace @workflow-platform/renderer run test
+npm.cmd --workspace @workflow-platform/renderer run build
+python -m pytest runtime/tests/test_execution_cli.py -q
+```
 
-- Project import
-- Adapter detection
-- Harness / Markdown Checklist / Generic YAML Adapter import
-- Canonical Workflow storage
-- Event-sourced Run state
-- Transactional run event append 与 projection upsert
-- Runtime-backed Harness import -> create run -> transition path
-- Runtime-backed Project / Workflow / Run API
-- Kernel transition
-- Artifact / Approval / Gate 持久化记录与 kernel/service 层基础约束
-- Terminal boundary
-- AgentExecutor boundary
-- P2 CLI Agent Runtime：Codex / Claude Code provider 命令构造、受控子进程执行、fake CLI 集成测试、agent job/output 持久化和 Run-bound API
-- P3 中文交互工作台：项目导入、创建 Run、节点推进、Artifact、审批、Gate 和 Agent job/log 操作均经由 Runtime API
-- P4 Electron Runtime 管理：受控 Python Runtime 启动、健康状态、重启和诊断日志 IPC
-- P5 受控终端会话：受限 cwd、stdin 写入、scrollback、尺寸、停止和重启的 Runtime session manager
-- P6 本地治理与 Knowledge：追加式审计记录、候选知识人工审核、发布和本地检索
-- Runtime Timeline 和 Projection rebuild
-- Renderer Runtime-backed workbench（配置 Runtime endpoint 和项目路径后从 API 拉取 P1 状态；未配置时显示不可用 fallback）
-- TypeScript contracts 与 Python Pydantic models 对齐
-- FastAPI runtime health/import/run/transition/artifact endpoints
-- Electron main/preload 基础边界与 renderer URL 安全校验
-- Playwright renderer smoke E2E
-- P1 Playwright Runtime-backed product loop path
+## 当前能力范围
 
-## 当前定位
+当前版本覆盖：
 
-这是面向本地桌面工作流平台的本地可验证实现。真实 `node-pty`/ConPTY 适配、LangGraph provider、跨进程终端持久化、安装包签名和高级 Knowledge 索引仍可在后续版本继续增强。
+- Project import。
+- Adapter detection。
+- Harness / Markdown Checklist / Generic YAML Adapter import。
+- Canonical Workflow storage。
+- Event-sourced Run state。
+- Runtime-backed Project / Workflow / Run API。
+- 独立页面路由。
+- Run 创建、切换、暂停、恢复、归档和事件重建。
+- Artifact / Approval / Gate / Evidence。
+- Codex CLI、Claude Code CLI 和 fake CLI provider。
+- 自动执行 Agent。
+- 交互式 Agent 终端。
+- Shell/Codex/Claude 受控终端。
+- 危险 Shell 命令确认和审计。
+- 部署实时输出。
+- Runtime 诊断和恢复。
+- Windows Runtime EXE、免安装 ZIP 和 NSIS 安装器打包。
+- 中文界面、中文文档和中文错误提示。
+
+需要真实环境继续验收的内容：
+
+- 已登录 Codex CLI 和 Claude Code CLI 的真实长任务、登录失效、超时、取消和非零退出抽查。
+- Git 远程 push 的成功、失败、凭据拒绝和冲突场景。
+- 长时间运行终端、系统重启、异常退出后的恢复抽查。
+- 目标 Windows 机器上的安装包签名、杀毒软件拦截和企业权限策略验证。
+
+详细验收清单见 `docs/remaining-work-and-acceptance.zh-CN.md`。

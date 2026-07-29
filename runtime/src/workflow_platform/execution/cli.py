@@ -43,7 +43,7 @@ class CliAgentExecutor:
         self._on_output = on_output
         self._on_started = on_started
         self._extra_environment = extra_environment or {}
-        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._cancelled: set[str] = set()
         self._lock = RLock()
 
@@ -70,9 +70,6 @@ class CliAgentExecutor:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             shell=False,
             env=self._allowed_environment(),
             startupinfo=_hidden_startupinfo(),
@@ -96,12 +93,13 @@ class CliAgentExecutor:
                 nonlocal output_bytes, output_limit_reached
                 if process.stdout is None:
                     return
-                for line in process.stdout:
+                for raw_line in process.stdout:
+                    line = decode_cli_output(raw_line)
                     if not line:
                         continue
                     with output_lock:
                         output.append(line)
-                        output_bytes += len(line.encode("utf-8"))
+                        output_bytes += len(raw_line)
                         if output_bytes > max_output_bytes:
                             output_limit_reached = True
                             _terminate_process(process)
@@ -193,7 +191,16 @@ def _resolve_safe_cwd(cwd: Path, project_root: Path) -> Path:
     return resolved_cwd
 
 
-def _terminate_process(process: subprocess.Popen[str]) -> None:
+def decode_cli_output(data: bytes) -> str:
+    for encoding in ("utf-8", "gb18030"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
     process.terminate()

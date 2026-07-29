@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from workflow_platform.execution.cli import CliAgentExecutor
+from workflow_platform.execution.cli import CliAgentExecutor, decode_cli_output
 from workflow_platform.execution.providers import (
     CliCommand,
     ClaudeCliProvider,
@@ -115,6 +115,11 @@ def test_executor_preserves_windows_system_root_for_cli_processes(monkeypatch) -
         (value for key, value in environment.items() if key.upper() == "SYSTEMROOT"),
         None,
     ) == r"C:\Windows"
+
+
+def test_decode_cli_output_accepts_utf8_and_gb18030_bytes() -> None:
+    assert decode_cli_output("部署完成".encode("utf-8")) == "部署完成"
+    assert decode_cli_output("部署完成".encode("gb18030")) == "部署完成"
 
 
 def test_claude_provider_normalizes_stream_json_text_message() -> None:

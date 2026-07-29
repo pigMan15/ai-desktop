@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApprovalInbox } from "../features/approvals/ApprovalInbox";
 import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
@@ -102,11 +102,15 @@ export function App() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [deployments, setDeployments] = useState<DeploymentSummary[]>([]);
   const [deploymentOutput, setDeploymentOutput] = useState<DeploymentOutputEvent[]>([]);
+  const [interactiveAgentTerminals, setInteractiveAgentTerminals] = useState<
+    Record<string, InteractiveAgentTerminalBinding>
+  >({});
+  const agentInputBuffersRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     let isMounted = true;
 
-    const initialLoad = savedSession.runId
+    const initialLoad = savedSession.runId && apiBaseUrl === savedSession.apiBaseUrl
       ? restoreWorkbenchState({ ...savedSession, runId: savedSession.runId })
       : loadWorkbenchState(apiBaseUrl);
 
@@ -125,7 +129,7 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [apiBaseUrl, savedSession]);
 
   useEffect(() => {
     void refreshManagedRuntimeDiagnostics();
@@ -220,6 +224,9 @@ export function App() {
     .map((job) => `${job.id}:${job.status}`)
     .join("|");
   const deploymentSignature = deployments.map((deployment) => `${deployment.id}:${deployment.status}`).join("|");
+  const interactiveAgentTerminalSignature = Object.entries(interactiveAgentTerminals)
+    .map(([jobId, binding]) => `${jobId}:${binding.desktopSessionId}:${binding.afterSequence}`)
+    .join("|");
 
   useEffect(() => {
     if (!activeRunId || state?.connection !== "connected") {
@@ -324,6 +331,90 @@ export function App() {
       }
     };
   }, [activeRunId, agentJobSignature, apiBaseUrl]);
+
+  useEffect(() => {
+    if (!activeRunId || state?.connection !== "connected") {
+      return;
+    }
+    const terminalBridge = getDesktopTerminalBridge();
+    if (!terminalBridge) {
+      return;
+    }
+    const runningInteractiveJobs = (state?.agentJobs ?? []).filter(
+      (job) =>
+        job.mode === "interactive" &&
+        (job.status === "QUEUED" || job.status === "RUNNING") &&
+        interactiveAgentTerminals[job.id],
+    );
+    if (runningInteractiveJobs.length === 0) {
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | undefined;
+
+    const pollInteractiveAgentTerminals = async () => {
+      try {
+        const runtimeClient = createRuntimeClient(apiBaseUrl);
+        for (const job of runningInteractiveJobs) {
+          const binding = interactiveAgentTerminals[job.id];
+          if (!binding) {
+            continue;
+          }
+          const terminalEvents = await terminalBridge.read(binding.desktopSessionId, binding.afterSequence);
+          if (disposed) {
+            return;
+          }
+          if (terminalEvents.length === 0) {
+            continue;
+          }
+          const recordedOutput = await runtimeClient.appendInteractiveAgentOutput(
+            activeRunId,
+            job.id,
+            terminalEvents.map((event) => ({ data: event.data })),
+            now(),
+          );
+          if (disposed) {
+            return;
+          }
+          const nextSequence = terminalEvents.reduce(
+            (latest, event) => Math.max(latest, event.sequence),
+            binding.afterSequence,
+          );
+          setInteractiveAgentTerminals((current) => ({
+            ...current,
+            [job.id]: { ...binding, afterSequence: nextSequence },
+          }));
+          setState((current) => {
+            if (current?.projection?.runId !== activeRunId) {
+              return current;
+            }
+            return {
+              ...current,
+              agentOutput: mergeAgentOutput(current.agentOutput, recordedOutput),
+            };
+          });
+        }
+        timer = window.setTimeout(() => void pollInteractiveAgentTerminals(), 500);
+      } catch (error) {
+        setOperationMessage(`Agent 终端同步失败：${errorMessage(error)}`);
+      }
+    };
+
+    void pollInteractiveAgentTerminals();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [
+    activeRunId,
+    apiBaseUrl,
+    interactiveAgentTerminalSignature,
+    agentJobSignature,
+    state?.connection,
+  ]);
 
   useEffect(() => {
     if (!activeRunId || state?.connection !== "connected") {
@@ -580,6 +671,9 @@ export function App() {
       ]);
       setManagedRuntime(status);
       setRuntimeLogs(logs);
+      if (status.state === "ready" && status.url && status.url !== apiBaseUrl) {
+        setApiBaseUrl(status.url);
+      }
     } catch {
       // IPC 诊断不可用时保留浏览器/外部 Runtime 的使用方式。
     }
@@ -702,19 +796,66 @@ export function App() {
     selectedNodeId: string,
     provider: AgentJobSummary["provider"],
     prompt: string,
+    mode: "interactive" | "automatic" = "interactive",
   ) {
     const projection = state?.projection;
     if (!projection) {
       return;
     }
     try {
+      const terminalBridge = getDesktopTerminalBridge();
+      const canUseInteractiveTerminal =
+        mode === "interactive" && terminalBridge && (provider === "codex" || provider === "claude");
+      const agentMode = canUseInteractiveTerminal ? "interactive" : "automatic";
       const job = await client.startAgentJob(
         projection.runId,
         selectedNodeId,
         provider,
         prompt,
         now(),
+        agentMode,
       );
+      if (canUseInteractiveTerminal) {
+        let terminalSession: Awaited<ReturnType<DesktopTerminalBridge["create"]>> | null = null;
+        try {
+          terminalSession = await terminalBridge.create({
+            kind: provider,
+            cwd: projectPath,
+            projectRoot: projectPath,
+            columns: 100,
+            rows: 30,
+            initialPrompt: prompt,
+          });
+          await client.startInteractiveAgentSession(
+            projection.runId,
+            job.id,
+            terminalSession.id,
+            terminalSession.pid,
+            now(),
+          );
+          setInteractiveAgentTerminals((current) => ({
+            ...current,
+            [job.id]: {
+              desktopSessionId: terminalSession!.id,
+              pid: terminalSession!.pid,
+              afterSequence: 0,
+            },
+          }));
+        } catch (error) {
+          if (terminalSession) {
+            await terminalBridge.stop(terminalSession.id).catch(() => undefined);
+          }
+          await client.finishInteractiveAgentSession(
+            projection.runId,
+            job.id,
+            "RECOVERABLE",
+            null,
+            `桌面交互终端启动失败：${errorMessage(error)}`,
+            now(),
+          ).catch(() => undefined);
+          throw error;
+        }
+      }
       const output = await client.listAgentOutput(projection.runId, job.id, 0).catch(() => []);
       setState((current) =>
         current
@@ -725,9 +866,38 @@ export function App() {
             }
           : current,
       );
-      setOperationMessage(`Agent 已启动：${job.id}`);
+      setOperationMessage(
+        agentMode === "interactive"
+          ? `交互式 Agent 已启动：${job.id}`
+          : `Agent 已启动：${job.id}`,
+      );
     } catch (error) {
       setOperationMessage(`Agent 启动失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleAgentTerminalInput(jobId: string, data: string) {
+    const runId = state?.projection?.runId;
+    const binding = interactiveAgentTerminals[jobId];
+    const terminalBridge = getDesktopTerminalBridge();
+    if (!runId || !binding || !terminalBridge) {
+      setOperationMessage("Agent 交互终端尚未就绪。");
+      return;
+    }
+    try {
+      if (data === "\u0003") {
+        await terminalBridge.interrupt(binding.desktopSessionId);
+        await client.recordInteractiveAgentInput(runId, jobId, "Ctrl+C", now());
+        setOperationMessage(`已中断 Agent：${jobId}`);
+        return;
+      }
+      await terminalBridge.writeInput(binding.desktopSessionId, data);
+      const completedInputs = collectCompletedTerminalInputs(jobId, data, agentInputBuffersRef.current);
+      for (const content of completedInputs) {
+        await client.recordInteractiveAgentInput(runId, jobId, content, now());
+      }
+    } catch (error) {
+      setOperationMessage(`发送 Agent 输入失败：${errorMessage(error)}`);
     }
   }
 
@@ -737,7 +907,18 @@ export function App() {
       return;
     }
     try {
-      const job = await client.cancelAgentJob(runId, jobId);
+      const terminalBridge = getDesktopTerminalBridge();
+      const binding = interactiveAgentTerminals[jobId];
+      if (terminalBridge && binding) {
+        await terminalBridge.stop(binding.desktopSessionId).catch(() => undefined);
+      }
+      const job = await client.cancelAgentJob(runId, jobId, now());
+      setInteractiveAgentTerminals((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
+      delete agentInputBuffersRef.current[jobId];
       setState((current) =>
         current
           ? {
@@ -1367,6 +1548,7 @@ export function App() {
             }
             onStartAgent={handleStartAgent}
             onCancelAgent={handleCancelAgent}
+            onAgentTerminalInput={handleAgentTerminalInput}
             deployments={deployments}
             deploymentOutput={deploymentOutput}
             onStartDeployment={handleStartDeployment}
@@ -1563,13 +1745,74 @@ function downloadTextFile(fileName: string, content: string, mediaType: string) 
   URL.revokeObjectURL(downloadUrl);
 }
 
+function collectCompletedTerminalInputs(
+  jobId: string,
+  data: string,
+  buffers: Record<string, string>,
+): string[] {
+  const completed: string[] = [];
+  let current = buffers[jobId] ?? "";
+  for (const character of data) {
+    if (character === "\r" || character === "\n") {
+      const trimmed = current.trim();
+      if (trimmed) {
+        completed.push(trimmed);
+      }
+      current = "";
+      continue;
+    }
+    if (character === "\u007f") {
+      current = current.slice(0, -1);
+      continue;
+    }
+    if (!/[\u0000-\u001f\u007f]/.test(character)) {
+      current += character;
+    }
+  }
+  buffers[jobId] = current;
+  return completed;
+}
+
 type DesktopRuntimeBridge = {
   status(): Promise<ManagedRuntimeStatus>;
   restart(): Promise<ManagedRuntimeStatus>;
   logs(): Promise<RuntimeLogEntry[]>;
 };
 
+type DesktopTerminalBridge = {
+  create(request: {
+    kind: "shell" | "codex" | "claude";
+    cwd: string;
+    projectRoot: string;
+    columns: number;
+    rows: number;
+    initialPrompt?: string;
+  }): Promise<{
+    id: string;
+    kind: "shell" | "codex" | "claude";
+    cwd: string;
+    pid: number;
+    columns: number;
+    rows: number;
+  }>;
+  read(sessionId: string, afterSequence: number): Promise<Array<{ sequence: number; data: string }>>;
+  writeInput(sessionId: string, data: string): Promise<void>;
+  interrupt(sessionId: string): Promise<void>;
+  stop(sessionId: string): Promise<void>;
+};
+
+type InteractiveAgentTerminalBinding = {
+  desktopSessionId: string;
+  pid: number;
+  afterSequence: number;
+};
+
 function getDesktopRuntimeBridge(): DesktopRuntimeBridge | null {
   const candidate = (window as Window & { workflowRuntime?: DesktopRuntimeBridge }).workflowRuntime;
+  return candidate ?? null;
+}
+
+function getDesktopTerminalBridge(): DesktopTerminalBridge | null {
+  const candidate = (window as Window & { workflowTerminal?: DesktopTerminalBridge }).workflowTerminal;
   return candidate ?? null;
 }

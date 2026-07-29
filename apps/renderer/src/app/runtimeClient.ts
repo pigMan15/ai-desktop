@@ -37,13 +37,36 @@ export type AgentJobSummary = {
   nodeId: string;
   provider: "codex" | "claude" | "fake";
   status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  mode?: "automatic" | "interactive";
   command: string[];
   cwd: string;
   pid?: number | null;
+  sessionId?: string | null;
+  parentJobId?: string | null;
   summary?: string | null;
   error?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type AgentSessionSummary = {
+  id: string;
+  runId: string;
+  jobId: string;
+  provider: AgentJobSummary["provider"];
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | "RECOVERABLE";
+  desktopSessionId?: string | null;
+  pid?: number | null;
+  cwd: string;
+  maxOutputBytes: number;
+  recoveryReason?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  endedAt?: string | null;
+};
+
+export type InteractiveAgentOutputInput = {
+  data: string;
 };
 
 export type AgentOutputSummary = {
@@ -183,7 +206,7 @@ export type TerminalSessionSummary = {
   id: string;
   runId: string;
   nodeId: string;
-  kind: "shell" | "codex";
+  kind: "shell" | "codex" | "claude";
   status: "running" | "stopped";
   cwd: string;
   pid: number | null;
@@ -660,7 +683,7 @@ export function createRuntimeClient(apiBaseUrl: string) {
     registerTerminalSession: (
       runId: string,
       nodeId: string,
-      kind: "shell" | "codex",
+      kind: TerminalSessionSummary["kind"],
       cwd: string,
       pid: number,
       now: string,
@@ -740,17 +763,69 @@ export function createRuntimeClient(apiBaseUrl: string) {
       provider: AgentJobSummary["provider"],
       prompt: string,
       now: string,
+      mode: "automatic" | "interactive" = "automatic",
     ) =>
       request<AgentJobSummary>(apiBaseUrl, `/runs/${runId}/agents`, {
         nodeId,
         provider,
         prompt,
-        actor: AGENT_ACTOR,
+        actor: mode === "interactive" ? HUMAN_ACTOR : AGENT_ACTOR,
         allowedTools: [],
         timeoutSeconds: 300,
         maxOutputBytes: 1_000_000,
+        mode,
         now,
       }),
+    startInteractiveAgentSession: (
+      runId: string,
+      jobId: string,
+      desktopSessionId: string,
+      pid: number,
+      now: string,
+    ) =>
+      request<AgentSessionSummary>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/interactive-session/start`,
+        { desktopSessionId, pid, actor: HUMAN_ACTOR, now },
+      ),
+    recordInteractiveAgentInput: (runId: string, jobId: string, content: string, now: string) =>
+      request<{ id: string; sessionId: string; sequence: number; kind: string; content: string; createdAt: string }>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/interactive-session/input`,
+        { content, actor: HUMAN_ACTOR, now },
+      ),
+    appendInteractiveAgentOutput: (
+      runId: string,
+      jobId: string,
+      events: InteractiveAgentOutputInput[],
+      now: string,
+    ) =>
+      request<AgentOutputSummary[]>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/interactive-session/output`,
+        { events, now },
+      ),
+    finishInteractiveAgentSession: (
+      runId: string,
+      jobId: string,
+      status: AgentSessionSummary["status"],
+      summary: string | null,
+      error: string | null,
+      now: string,
+    ) =>
+      request<AgentSessionSummary>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/interactive-session/ended`,
+        { status, summary, error, actor: HUMAN_ACTOR, now },
+      ),
+    getInteractiveAgentSession: (runId: string, jobId: string) =>
+      request<AgentSessionSummary>(apiBaseUrl, `/runs/${runId}/agents/${jobId}/interactive-session`),
+    continueInteractiveAgent: (runId: string, jobId: string, now: string) =>
+      request<AgentJobSummary>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/interactive-session/continue`,
+        { actor: HUMAN_ACTOR, now },
+      ),
     listAgentJobs: (runId: string) =>
       request<AgentJobSummary[]>(apiBaseUrl, `/runs/${runId}/agents`),
     listAgentOutput: (runId: string, jobId: string, afterSequence: number) =>
@@ -758,8 +833,12 @@ export function createRuntimeClient(apiBaseUrl: string) {
         apiBaseUrl,
         `/runs/${runId}/agents/${jobId}/output?afterSequence=${afterSequence}`,
       ),
-    cancelAgentJob: (runId: string, jobId: string) =>
-      request<AgentJobSummary>(apiBaseUrl, `/runs/${runId}/agents/${jobId}/cancel`, {}),
+    cancelAgentJob: (runId: string, jobId: string, now?: string) =>
+      request<AgentJobSummary>(
+        apiBaseUrl,
+        `/runs/${runId}/agents/${jobId}/cancel`,
+        now ? { actor: HUMAN_ACTOR, now } : {},
+      ),
   };
 }
 

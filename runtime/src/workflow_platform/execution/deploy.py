@@ -8,7 +8,7 @@ import subprocess
 from threading import RLock, Thread
 from typing import Callable
 
-from workflow_platform.execution.cli import ALLOWED_ENVIRONMENT_KEYS
+from workflow_platform.execution.cli import ALLOWED_ENVIRONMENT_KEYS, decode_cli_output
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class DeployExecutor:
     ) -> None:
         self._on_output = on_output
         self._on_started = on_started
-        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._cancelled: set[str] = set()
         self._lock = RLock()
 
@@ -47,9 +47,6 @@ class DeployExecutor:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             shell=False,
             env={
                 key: value
@@ -75,12 +72,13 @@ class DeployExecutor:
             nonlocal output_bytes, output_limit_reached
             if process.stdout is None:
                 return
-            for line in process.stdout:
+            for raw_line in process.stdout:
+                line = decode_cli_output(raw_line)
                 if not line:
                     continue
                 with output_lock:
                     output.append(line)
-                    output_bytes += len(line.encode("utf-8"))
+                    output_bytes += len(raw_line)
                     if output_bytes > max_output_bytes:
                         output_limit_reached = True
                         _terminate_process(process)
@@ -163,7 +161,7 @@ def _summarize_output(output: str) -> str:
     return next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "部署命令已完成。")
 
 
-def _terminate_process(process: subprocess.Popen[str]) -> None:
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
     process.terminate()

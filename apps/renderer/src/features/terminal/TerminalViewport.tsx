@@ -29,6 +29,7 @@ export function TerminalViewport({
   const terminalRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
+  const onInputRef = useRef(onInput);
   const renderedSequenceRef = useRef(0);
   const newestSeenSequenceRef = useRef(0);
   const [followOutput, setFollowOutput] = useState(true);
@@ -37,6 +38,10 @@ export function TerminalViewport({
   const [terminalReady, setTerminalReady] = useState(false);
   const [visibleOutput, setVisibleOutput] = useState(output);
   const outputText = useMemo(() => visibleOutput.map((event) => event.data).join(""), [visibleOutput]);
+
+  useEffect(() => {
+    onInputRef.current = onInput;
+  }, [onInput]);
 
   useEffect(() => {
     let disposed = false;
@@ -70,7 +75,7 @@ export function TerminalViewport({
       fitAddon.fit();
       inputDisposable = terminal.onData((data) => {
         if (writable) {
-          void onInput?.(data);
+          void onInputRef.current?.(data);
         }
       });
       terminalRef.current = terminal;
@@ -95,7 +100,7 @@ export function TerminalViewport({
       newestSeenSequenceRef.current = 0;
       setTerminalReady(false);
     };
-  }, []);
+  }, [writable]);
 
   useEffect(() => {
     if (!terminalReady) {
@@ -218,6 +223,8 @@ export function TerminalViewport({
           className="terminal-viewport"
           aria-label={ariaLabel}
           tabIndex={0}
+          onMouseDownCapture={() => terminalRef.current?.focus()}
+          onClick={() => terminalRef.current?.focus()}
           onScroll={handleScroll}
         />
         {unreadCount > 0 ? (
@@ -226,7 +233,7 @@ export function TerminalViewport({
           </button>
         ) : null}
       </div>
-      <pre className="terminal-screen-reader-output" aria-hidden="false">
+      <pre className="terminal-screen-reader-output" aria-label={`${ariaLabel}文本`} aria-hidden="false">
         {outputText}
       </pre>
     </section>
