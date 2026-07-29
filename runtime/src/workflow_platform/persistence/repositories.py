@@ -768,6 +768,9 @@ class AgentJobRepository:
         command: list[str],
         cwd: str,
         created_at: str,
+        mode: str = "automatic",
+        session_id: str | None = None,
+        parent_job_id: str | None = None,
     ) -> None:
         self._db.execute(
             """
@@ -779,10 +782,13 @@ class AgentJobRepository:
                 status,
                 command_json,
                 cwd,
+                mode,
+                session_id,
+                parent_job_id,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 id,
@@ -792,6 +798,9 @@ class AgentJobRepository:
                 status,
                 json.dumps(command, separators=(",", ":"), sort_keys=True),
                 cwd,
+                mode,
+                session_id,
+                parent_job_id,
                 created_at,
                 created_at,
             ),
@@ -902,9 +911,12 @@ class AgentJobRepository:
             "nodeId": row["node_id"],
             "provider": row["provider"],
             "status": row["status"],
+            "mode": row["mode"],
             "command": json.loads(row["command_json"]),
             "cwd": row["cwd"],
             "pid": row["pid"],
+            "sessionId": row["session_id"],
+            "parentJobId": row["parent_job_id"],
             "summary": row["summary"],
             "error": row["error"],
             "createdAt": row["created_at"],
@@ -919,6 +931,150 @@ class AgentJobRepository:
             "sequence": row["sequence"],
             "kind": row["kind"],
             "payload": json.loads(row["payload_json"]),
+            "createdAt": row["created_at"],
+        }
+
+
+class AgentSessionRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def create(
+        self,
+        *,
+        id: str,
+        run_id: str,
+        job_id: str,
+        provider: str,
+        cwd: str,
+        created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO agent_sessions (
+                id,
+                run_id,
+                job_id,
+                provider,
+                status,
+                cwd,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (id, run_id, job_id, provider, "QUEUED", cwd, created_at, created_at),
+        )
+
+    def mark_running(
+        self,
+        *,
+        id: str,
+        desktop_session_id: str,
+        pid: int,
+        updated_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            UPDATE agent_sessions
+            SET status = ?, desktop_session_id = ?, pid = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            ("RUNNING", desktop_session_id, pid, updated_at, id),
+        )
+
+    def finish(
+        self,
+        *,
+        id: str,
+        status: str,
+        recovery_reason: str | None,
+        ended_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            UPDATE agent_sessions
+            SET status = ?, recovery_reason = ?, updated_at = ?, ended_at = ?
+            WHERE id = ?
+            """,
+            (status, recovery_reason, ended_at, ended_at, id),
+        )
+
+    def get_for_job(self, job_id: str) -> dict | None:
+        row = self._db.execute(
+            """
+            SELECT *
+            FROM agent_sessions
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._session_row_to_dict(row)
+
+    def append_input(
+        self,
+        *,
+        id: str,
+        session_id: str,
+        sequence: int,
+        kind: str,
+        content: str,
+        created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO agent_input_events (
+                id,
+                session_id,
+                sequence,
+                kind,
+                content,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (id, session_id, sequence, kind, content, created_at),
+        )
+
+    def list_input(self, session_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT *
+            FROM agent_input_events
+            WHERE session_id = ?
+            ORDER BY sequence
+            """,
+            (session_id,),
+        ).fetchall()
+        return [self._input_row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _session_row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "runId": row["run_id"],
+            "jobId": row["job_id"],
+            "provider": row["provider"],
+            "status": row["status"],
+            "desktopSessionId": row["desktop_session_id"],
+            "pid": row["pid"],
+            "cwd": row["cwd"],
+            "recoveryReason": row["recovery_reason"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "endedAt": row["ended_at"],
+        }
+
+    @staticmethod
+    def _input_row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "sessionId": row["session_id"],
+            "sequence": row["sequence"],
+            "kind": row["kind"],
+            "content": row["content"],
             "createdAt": row["created_at"],
         }
 

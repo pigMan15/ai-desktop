@@ -1063,3 +1063,222 @@ def test_runtime_service_rejects_agent_for_unknown_node(tmp_path) -> None:
             actor=AGENT_ACTOR,
             now=NOW,
         )
+
+
+def _create_interactive_agent_job(
+    tmp_path: Path,
+) -> tuple[WorkflowRuntimeService, RunProjection, dict]:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project = service.import_project(copy_harness_project(tmp_path), now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="Interactive Agent Run", now=NOW)
+    job = service.start_agent_job(
+        run.runId,
+        node_id="plan",
+        provider="fake",
+        prompt="请先询问目标分支",
+        mode="interactive",
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+    return service, run, job
+
+
+def test_runtime_service_creates_interactive_agent_and_audits_user_input(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+
+    session = service.start_interactive_agent_session(
+        run.runId,
+        job["id"],
+        desktop_session_id="pty-1",
+        pid=1234,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+    recorded = service.record_interactive_agent_input(
+        run.runId,
+        job["id"],
+        content="目标分支是 release",
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    assert job["mode"] == "interactive"
+    assert session["status"] == "RUNNING"
+    assert service.list_agent_input(session["id"]) == [
+        {
+            "id": f"{session['id']}:input:1",
+            "sessionId": session["id"],
+            "sequence": 1,
+            "kind": "initial_prompt",
+            "content": "请先询问目标分支",
+            "createdAt": NOW,
+        },
+        recorded,
+    ]
+    assert any(
+        item["action"] == "agent.interactive.input.recorded"
+        for item in service.list_audit_records()
+    )
+
+
+def test_runtime_service_rejects_interactive_input_from_untrusted_actor(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+
+    with pytest.raises(ValueError, match="ACTOR_NOT_TRUSTED"):
+        service.record_interactive_agent_input(
+            run.runId,
+            job["id"],
+            content="继续",
+            actor=AGENT_ACTOR,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize("content", ["", "   ", "回答\x00无效"])
+def test_runtime_service_rejects_empty_or_nul_interactive_input(tmp_path, content: str) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+
+    with pytest.raises(ValueError, match="AGENT_INTERACTIVE_INPUT_INVALID"):
+        service.record_interactive_agent_input(
+            run.runId,
+            job["id"],
+            content=content,
+            actor=trusted_human().model_dump(),
+            now=NOW,
+        )
+
+
+def test_runtime_service_appends_output_and_finishes_interactive_agent_session(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+    service.start_interactive_agent_session(
+        run.runId,
+        job["id"],
+        desktop_session_id="pty-1",
+        pid=1234,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    output = service.append_interactive_agent_output(
+        run.runId,
+        job["id"],
+        events=[{"data": "已收到 token=secret-value\r\n"}],
+        now=NOW,
+    )
+    finished = service.finish_interactive_agent_session(
+        run.runId,
+        job["id"],
+        status="COMPLETED",
+        summary="任务完成",
+        error=None,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    assert output[0]["kind"] == "terminal_raw"
+    assert output[0]["payload"]["text"] == "已收到 token=[REDACTED]\r\n"
+    assert finished["status"] == "COMPLETED"
+    assert service.get_agent_job(run.runId, job["id"])["status"] == "COMPLETED"
+
+
+def test_runtime_service_continues_interactive_agent_with_history(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+    session = service.start_interactive_agent_session(
+        run.runId,
+        job["id"],
+        desktop_session_id="pty-1",
+        pid=1234,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+    service.record_interactive_agent_input(
+        run.runId,
+        job["id"],
+        content="目标分支是 release",
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+    service.finish_interactive_agent_session(
+        run.runId,
+        job["id"],
+        status="RECOVERABLE",
+        summary=None,
+        error="应用重启",
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    continued = service.continue_interactive_agent(
+        run.runId,
+        job["id"],
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+    continued_session = service._agent_sessions.get_for_job(continued["id"])
+
+    assert continued["mode"] == "interactive"
+    assert continued["parentJobId"] == job["id"]
+    assert continued_session is not None
+    assert service.list_agent_input(continued_session["id"])[0]["content"].startswith(
+        "历史交互记录："
+    )
+    assert session["id"] != continued_session["id"]
+
+
+def test_runtime_service_rejects_invalid_agent_mode(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project = service.import_project(copy_harness_project(tmp_path), now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="Invalid Agent Mode", now=NOW)
+
+    with pytest.raises(ValueError, match="AGENT_MODE_INVALID"):
+        service.start_agent_job(
+            run.runId,
+            node_id="plan",
+            provider="fake",
+            prompt="x",
+            mode="batch",
+            actor=trusted_human().model_dump(),
+            now=NOW,
+        )
+
+
+def test_runtime_service_marks_unbound_interactive_session_recoverable(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+    service.start_interactive_agent_session(
+        run.runId,
+        job["id"],
+        desktop_session_id="pty-1",
+        pid=12,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    diagnostic = service.get_recovery_diagnostics(run.runId)
+
+    assert job["id"] in diagnostic["orphanAgentJobIds"]
+
+
+def test_runtime_service_recovers_orphaned_interactive_session(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+    session = service.start_interactive_agent_session(
+        run.runId,
+        job["id"],
+        desktop_session_id="pty-1",
+        pid=12,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    cleaned = service.cleanup_orphan_agent_jobs(run.runId, now=NOW)
+
+    assert cleaned["cleanedJobIds"] == [job["id"]]
+    assert service._agent_sessions.get_for_job(job["id"]) == {
+        **session,
+        "status": "RECOVERABLE",
+        "recoveryReason": "RECOVERY_ORPHANED: interactive desktop session is unavailable",
+        "endedAt": NOW,
+    }

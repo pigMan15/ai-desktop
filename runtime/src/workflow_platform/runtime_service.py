@@ -25,6 +25,7 @@ from workflow_platform.terminals.redaction import redact_terminal_output
 from workflow_platform.persistence.repositories import (
     AgentCheckpointRepository,
     AgentJobRepository,
+    AgentSessionRepository,
     ApprovalRepository,
     ArtifactRepository,
     DeploymentRepository,
@@ -58,6 +59,7 @@ class WorkflowRuntimeService:
         self._gate_results = GateResultRepository(db)
         self._terminals = TerminalSessionRepository(db)
         self._agent_jobs = AgentJobRepository(db)
+        self._agent_sessions = AgentSessionRepository(db)
         self._agent_checkpoints = AgentCheckpointRepository(db)
         self._deployments = DeploymentRepository(db)
         self._knowledge_syntheses = KnowledgeSynthesisRepository(db)
@@ -1249,8 +1251,12 @@ class WorkflowRuntimeService:
         timeout_seconds: float = 300,
         max_output_bytes: int = 1_000_000,
         resumed_from_checkpoint_id: str | None = None,
+        mode: str = "automatic",
+        parent_job_id: str | None = None,
     ) -> dict:
         Actor.model_validate(actor)
+        if mode not in {"automatic", "interactive"}:
+            raise ValueError(f"AGENT_MODE_INVALID: unsupported mode {mode}")
         workflow = self._runs.workflow_for_run(run_id)
         if node_id not in {node.id for node in workflow.nodes}:
             raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
@@ -1264,7 +1270,8 @@ class WorkflowRuntimeService:
             allowed_tools=safe_allowed_tools,
         )
         job_id = f"agent-job-{uuid4()}"
-        checkpoint_id = f"agent-checkpoint-{uuid4()}"
+        checkpoint_id = f"agent-checkpoint-{uuid4()}" if mode == "automatic" else None
+        session_id = f"agent-session-{uuid4()}" if mode == "interactive" else None
         output_sequence = 0
 
         def append_output(event: dict[str, Any]) -> None:
@@ -1291,34 +1298,78 @@ class WorkflowRuntimeService:
                 command=[command.executable, *command.args],
                 cwd=str(project_root),
                 created_at=now,
+                mode=mode,
+                session_id=session_id,
+                parent_job_id=parent_job_id,
             )
-            self._agent_checkpoints.create(
-                id=checkpoint_id,
-                run_id=run_id,
-                job_id=job_id,
-                parent_checkpoint_id=resumed_from_checkpoint_id,
-                node_id=node_id,
-                provider=provider,
-                prompt=prompt,
-                allowed_tools=safe_allowed_tools,
-                timeout_seconds=timeout_seconds,
-                max_output_bytes=max_output_bytes,
-                status="running",
-                created_at=now,
-            )
-            self._audit.record(
-                actor={
-                    "id": "runtime-agent",
-                    "type": "system",
-                    "source": "runtime",
-                    "trusted": True,
-                },
-                action="agent.checkpoint.created",
-                resource=f"agent-checkpoint:{checkpoint_id}",
-                detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
-                created_at=now,
-            )
+            if mode == "interactive":
+                if session_id is None:
+                    raise AssertionError("Interactive agent sessions require an id")
+                self._agent_sessions.create(
+                    id=session_id,
+                    run_id=run_id,
+                    job_id=job_id,
+                    provider=provider,
+                    cwd=str(project_root),
+                    created_at=now,
+                )
+                self._agent_sessions.append_input(
+                    id=f"{session_id}:input:1",
+                    session_id=session_id,
+                    sequence=1,
+                    kind="initial_prompt",
+                    content=redact_terminal_output(prompt.strip()),
+                    created_at=now,
+                )
+                self._audit.record(
+                    actor={
+                        "id": "runtime-agent",
+                        "type": "system",
+                        "source": "runtime",
+                        "trusted": True,
+                    },
+                    action="agent.interactive.created",
+                    resource=f"agent-session:{session_id}",
+                    detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
+                    created_at=now,
+                )
+            else:
+                if checkpoint_id is None:
+                    raise AssertionError("Automatic agent checkpoints require an id")
+                self._agent_checkpoints.create(
+                    id=checkpoint_id,
+                    run_id=run_id,
+                    job_id=job_id,
+                    parent_checkpoint_id=resumed_from_checkpoint_id,
+                    node_id=node_id,
+                    provider=provider,
+                    prompt=prompt,
+                    allowed_tools=safe_allowed_tools,
+                    timeout_seconds=timeout_seconds,
+                    max_output_bytes=max_output_bytes,
+                    status="running",
+                    created_at=now,
+                )
+                self._audit.record(
+                    actor={
+                        "id": "runtime-agent",
+                        "type": "system",
+                        "source": "runtime",
+                        "trusted": True,
+                    },
+                    action="agent.checkpoint.created",
+                    resource=f"agent-checkpoint:{checkpoint_id}",
+                    detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
+                    created_at=now,
+                )
             self._db.commit()
+
+        if mode == "interactive":
+            with self._lock:
+                job = self._agent_jobs.get(job_id)
+            if job is None:
+                raise KeyError(f"Agent job not found: {job_id}")
+            return job
 
         def mark_running(pid: int) -> None:
             with self._lock:
@@ -1389,6 +1440,207 @@ class WorkflowRuntimeService:
         if job is None:
             raise KeyError(f"Agent job not found: {job_id}")
         return job
+
+    def start_interactive_agent_session(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        desktop_session_id: str,
+        pid: int,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="启动交互式 Agent 会话")
+        if not desktop_session_id.strip() or pid <= 0:
+            raise ValueError("AGENT_INTERACTIVE_SESSION_INVALID: desktop session and pid are required")
+        with self._lock:
+            job, session = self._interactive_job_and_session(run_id, job_id)
+            if session["status"] != "QUEUED":
+                raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is already active")
+            self._agent_sessions.mark_running(
+                id=session["id"],
+                desktop_session_id=desktop_session_id,
+                pid=pid,
+                updated_at=now,
+            )
+            self._agent_jobs.set_running(id=job["id"], pid=pid, updated_at=now)
+            self._audit.record(
+                actor=human_actor,
+                action="agent.interactive.session.started",
+                resource=f"agent-session:{session['id']}",
+                detail={"runId": run_id, "jobId": job_id, "desktopSessionId": desktop_session_id},
+                created_at=now,
+            )
+            self._db.commit()
+            started = self._agent_sessions.get_for_job(job_id)
+        if started is None:
+            raise KeyError(f"Interactive agent session not found: {job_id}")
+        return started
+
+    def record_interactive_agent_input(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        content: str,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="记录交互式 Agent 输入")
+        if "\x00" in content or not content.strip():
+            raise ValueError("AGENT_INTERACTIVE_INPUT_INVALID: input cannot be blank or contain NUL")
+        redacted_content = redact_terminal_output(content.strip())
+        with self._lock:
+            _job, session = self._interactive_job_and_session(run_id, job_id)
+            if session["status"] != "RUNNING":
+                raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not running")
+            sequence = len(self._agent_sessions.list_input(session["id"])) + 1
+            recorded = {
+                "id": f"{session['id']}:input:{sequence}",
+                "sessionId": session["id"],
+                "sequence": sequence,
+                "kind": "human_input",
+                "content": redacted_content,
+                "createdAt": now,
+            }
+            self._agent_sessions.append_input(
+                id=recorded["id"],
+                session_id=session["id"],
+                sequence=sequence,
+                kind=recorded["kind"],
+                content=recorded["content"],
+                created_at=now,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action="agent.interactive.input.recorded",
+                resource=f"agent-session:{session['id']}",
+                detail={"runId": run_id, "jobId": job_id, "sequence": sequence},
+                created_at=now,
+            )
+            self._db.commit()
+        return recorded
+
+    def list_agent_input(self, session_id: str) -> list[dict]:
+        return self._agent_sessions.list_input(session_id)
+
+    def append_interactive_agent_output(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        events: list[dict[str, str]],
+        now: str,
+    ) -> list[dict]:
+        with self._lock:
+            _job, session = self._interactive_job_and_session(run_id, job_id)
+            if session["status"] != "RUNNING":
+                raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not running")
+            current_output = self._agent_jobs.list_output(job_id)
+            next_sequence = current_output[-1]["sequence"] + 1 if current_output else 1
+            recorded: list[dict] = []
+            for event in events:
+                data = event.get("data")
+                if not isinstance(data, str) or not data:
+                    raise ValueError(
+                        "AGENT_INTERACTIVE_OUTPUT_INVALID: event data must be a non-empty string"
+                    )
+                item = {
+                    "id": f"{job_id}:output:{next_sequence}",
+                    "jobId": job_id,
+                    "sequence": next_sequence,
+                    "kind": "terminal_raw",
+                    "payload": {"text": redact_terminal_output(data)},
+                    "createdAt": now,
+                }
+                self._agent_jobs.append_output(
+                    id=item["id"],
+                    job_id=job_id,
+                    sequence=next_sequence,
+                    kind=item["kind"],
+                    payload=item["payload"],
+                    created_at=now,
+                )
+                recorded.append(item)
+                next_sequence += 1
+            self._db.commit()
+        return recorded
+
+    def finish_interactive_agent_session(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        status: str,
+        summary: str | None,
+        error: str | None,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="结束交互式 Agent 会话")
+        if status not in {"COMPLETED", "FAILED", "CANCELLED", "RECOVERABLE"}:
+            raise ValueError(f"AGENT_INTERACTIVE_SESSION_STATUS_INVALID: unsupported status {status}")
+        with self._lock:
+            job, session = self._interactive_job_and_session(run_id, job_id)
+            if session["status"] not in {"QUEUED", "RUNNING"}:
+                raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is already finished")
+            redacted_summary = redact_terminal_output(summary) if summary else None
+            redacted_error = redact_terminal_output(error) if error else None
+            self._agent_sessions.finish(
+                id=session["id"],
+                status=status,
+                recovery_reason=redacted_error if status == "RECOVERABLE" else None,
+                ended_at=now,
+            )
+            self._agent_jobs.finish(
+                id=job["id"],
+                status="CANCELLED" if status == "RECOVERABLE" else status,
+                summary=redacted_summary,
+                error=redacted_error,
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action="agent.interactive.session.finished",
+                resource=f"agent-session:{session['id']}",
+                detail={"runId": run_id, "jobId": job_id, "status": status},
+                created_at=now,
+            )
+            self._db.commit()
+            finished = self._agent_sessions.get_for_job(job_id)
+        if finished is None:
+            raise KeyError(f"Interactive agent session not found: {job_id}")
+        return finished
+
+    def continue_interactive_agent(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        require_trusted_human(actor, operation="继续交互式 Agent 会话")
+        with self._lock:
+            job, session = self._interactive_job_and_session(run_id, job_id)
+            if session["status"] not in {"FAILED", "CANCELLED", "RECOVERABLE"}:
+                raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not continuable")
+            history = self._agent_sessions.list_input(session["id"])
+        history_lines = [
+            f"{'用户' if item['kind'] == 'human_input' else '提示'}：{item['content']}"
+            for item in history
+        ]
+        return self.start_agent_job(
+            run_id,
+            node_id=job["nodeId"],
+            provider=job["provider"],
+            prompt="历史交互记录：\n" + "\n".join(history_lines),
+            actor=actor,
+            now=now,
+            mode="interactive",
+            parent_job_id=job_id,
+        )
 
     def list_agent_jobs(self, run_id: str) -> list[dict]:
         with self._lock:
@@ -1780,6 +2032,7 @@ class WorkflowRuntimeService:
                     and job["id"] not in self._agent_executors
                 ]
                 for job_id in orphan_job_ids:
+                    job = self._agent_jobs.get(job_id)
                     self._agent_jobs.finish(
                         id=job_id,
                         status="CANCELLED",
@@ -1793,6 +2046,17 @@ class WorkflowRuntimeService:
                         recovery_reason="RECOVERY_ORPHANED: Runtime 执行器已不可用",
                         updated_at=now,
                     )
+                    if job is not None and job["mode"] == "interactive":
+                        session = self._agent_sessions.get_for_job(job_id)
+                        if session is not None and session["status"] in {"QUEUED", "RUNNING"}:
+                            self._agent_sessions.finish(
+                                id=session["id"],
+                                status="RECOVERABLE",
+                                recovery_reason=(
+                                    "RECOVERY_ORPHANED: interactive desktop session is unavailable"
+                                ),
+                                ended_at=now,
+                            )
                 if orphan_job_ids:
                     self._audit.record(
                         actor={
@@ -1965,6 +2229,15 @@ class WorkflowRuntimeService:
             if projection is None:
                 raise KeyError(f"Projection not found: {run_id}")
             return projection
+
+    def _interactive_job_and_session(self, run_id: str, job_id: str) -> tuple[dict, dict]:
+        job = self.get_agent_job(run_id, job_id)
+        if job["mode"] != "interactive":
+            raise ValueError("AGENT_INTERACTIVE_SESSION_REQUIRED: job is not interactive")
+        session = self._agent_sessions.get_for_job(job_id)
+        if session is None:
+            raise ValueError("AGENT_INTERACTIVE_SESSION_REQUIRED: session is missing")
+        return job, session
 
     def _terminal_session_for_run(self, run_id: str, session_id: str) -> dict:
         self.get_projection(run_id)
