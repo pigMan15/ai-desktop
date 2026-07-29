@@ -18,14 +18,17 @@ declare global {
     };
     workflowTerminal: {
       create(request: {
-        kind: "shell" | "codex";
+        kind: "shell" | "codex" | "claude";
         cwd: string;
         projectRoot: string;
         columns: number;
         rows: number;
+        initialPrompt?: string;
       }): Promise<TerminalSession>;
       bindRuntimeSession(sessionId: string, runId: string, runtimeSessionId: string): Promise<void>;
       requestCommand(sessionId: string, command: string): Promise<TerminalCommandDecision>;
+      submitShellLine(sessionId: string, command: string): Promise<TerminalCommandDecision>;
+      writeInput(sessionId: string, data: string): Promise<void>;
       approveCommand(sessionId: string, approvalId: string): Promise<TerminalCommandDecision>;
       rejectCommand(sessionId: string, approvalId: string): Promise<TerminalCommandDecision>;
       read(sessionId: string, afterSequence: number): Promise<TerminalOutput[]>;

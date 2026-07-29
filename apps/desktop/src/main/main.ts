@@ -147,6 +147,18 @@ export function registerTerminalHandlers(
       requireString(command, "Terminal command"),
     ),
   );
+  ipcMainLike.handle("terminal:submit-shell-line", (_event, sessionId: unknown, command: unknown) =>
+    terminalManager.submitShellLine(
+      requireString(sessionId, "Terminal session ID"),
+      requireString(command, "Terminal command"),
+    ),
+  );
+  ipcMainLike.handle("terminal:write-input", (_event, sessionId: unknown, data: unknown) => {
+    terminalManager.writeInput(
+      requireString(sessionId, "Terminal session ID"),
+      requireString(data, "Terminal input"),
+    );
+  });
   ipcMainLike.handle("terminal:approve-command", (_event, sessionId: unknown, approvalId: unknown) =>
     terminalManager.approveCommand(
       requireString(sessionId, "Terminal session ID"),
@@ -330,27 +342,39 @@ export function bootstrap(options: {
 }
 
 function parseTerminalCreateRequest(request: unknown): {
-  kind: "shell" | "codex";
+  kind: "shell" | "codex" | "claude";
   cwd: string;
   projectRoot: string;
   columns: number;
   rows: number;
+  initialPrompt?: string;
 } {
   if (!request || typeof request !== "object") {
     throw new Error("Invalid terminal create request");
   }
   const payload = request as Record<string, unknown>;
   const kind = payload.kind;
-  if (kind !== "shell" && kind !== "codex") {
+  if (kind !== "shell" && kind !== "codex" && kind !== "claude") {
     throw new Error("Unsupported terminal kind");
   }
-  return {
+  const parsed: {
+    kind: "shell" | "codex" | "claude";
+    cwd: string;
+    projectRoot: string;
+    columns: number;
+    rows: number;
+    initialPrompt?: string;
+  } = {
     kind,
     cwd: requireString(payload.cwd, "Terminal cwd"),
     projectRoot: requireString(payload.projectRoot, "Terminal project root"),
     columns: requirePositiveInteger(payload.columns ?? 80, "Terminal columns"),
     rows: requirePositiveInteger(payload.rows ?? 24, "Terminal rows"),
   };
+  if (payload.initialPrompt !== undefined) {
+    parsed.initialPrompt = requireString(payload.initialPrompt, "Terminal initial prompt");
+  }
+  return parsed;
 }
 
 function requireString(value: unknown, label: string): string {

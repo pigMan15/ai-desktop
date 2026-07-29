@@ -298,8 +298,9 @@ const fakePty = {
 const terminalManager = new TerminalManager({
   spawnPty: (command: string, args: string[], options: TerminalSpawnOptions) => {
     assert.equal(command, "cmd.exe");
-    assert.deepEqual(args, []);
+    assert.deepEqual(args, ["/d", "/k", "chcp 65001>nul"]);
     assert.equal(options.cwd, "G:\\Project\\demo");
+    assert.equal(options.env.PYTHONIOENCODING, "utf-8");
     return fakePty;
   },
 });
@@ -324,6 +325,66 @@ assert.deepEqual(terminalManager.read(terminal.id, 0), [{ sequence: 1, data: "�
 assert.deepEqual(terminalWrites, ["dir\r", "\u0003"]);
 assert.deepEqual(terminalResizes, [{ columns: 100, rows: 30 }]);
 
+const providerSpawnCalls: Array<{
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}> = [];
+const providerWrites: string[] = [];
+const providerManager = new TerminalManager({
+  spawnPty: (command: string, args: string[], options: TerminalSpawnOptions) => {
+    providerSpawnCalls.push({ command, args, cwd: options.cwd, env: options.env });
+    return {
+      pid: 7777,
+      write(data: string) {
+        providerWrites.push(data);
+      },
+      resize() {},
+      kill() {},
+      onData() {
+        return { dispose() {} };
+      },
+    };
+  },
+});
+const claudeSession = providerManager.create({
+  kind: "claude",
+  cwd: "G:\\Project\\demo",
+  projectRoot: "G:\\Project\\demo",
+  columns: 120,
+  rows: 36,
+  initialPrompt: "请等待用户回复。",
+});
+assert.equal(claudeSession.kind, "claude");
+assert.deepEqual(providerSpawnCalls[0], {
+  command: "claude.cmd",
+  args: ["--ax-screen-reader", "--permission-mode", "acceptEdits", "请等待用户回复。"],
+  cwd: "G:\\Project\\demo",
+  env: providerSpawnCalls[0]?.env,
+});
+assert.equal(providerSpawnCalls[0]?.env.PYTHONIOENCODING, "utf-8");
+const codexSession = providerManager.create({
+  kind: "codex",
+  cwd: "G:\\Project\\demo",
+  projectRoot: "G:\\Project\\demo",
+  initialPrompt: "继续实现交互式终端",
+});
+assert.deepEqual(providerSpawnCalls[1]?.args, [
+  "--sandbox",
+  "workspace-write",
+  "--ask-for-approval",
+  "on-request",
+  "--no-alt-screen",
+  "--cd",
+  "G:\\Project\\demo",
+  "继续实现交互式终端",
+]);
+providerManager.writeInput(claudeSession.id, "继续\r");
+providerManager.writeInput(codexSession.id, "\u0003");
+assert.deepEqual(providerWrites, ["继续\r", "\u0003"]);
+assert.throws(() => terminalManager.writeInput(terminal.id, "echo no\r"), /Provider terminal/);
+
 const commandManager = terminalManager as TerminalManager & {
   requestCommand(
     sessionId: string,
@@ -339,6 +400,10 @@ const deletionRequest = commandManager.requestCommand(terminal.id, "del .\\build
 assert.equal(deletionRequest.status, "pending_approval");
 assert.equal(deletionRequest.approval?.riskLevel, "high");
 assert.match(deletionRequest.approval?.commandSummary ?? "", /del/i);
+assert.deepEqual(terminalWrites, ["dir\r", "\u0003"]);
+
+const submitLineDecision = terminalManager.submitShellLine(terminal.id, "del .\\build");
+assert.equal(submitLineDecision.status, "pending_approval");
 assert.deepEqual(terminalWrites, ["dir\r", "\u0003"]);
 
 const chainedCommand = commandManager.requestCommand(terminal.id, "echo safe & del .\\build");
@@ -427,6 +492,8 @@ assert.deepEqual(terminalChannels, [
   "terminal:create",
   "terminal:bind-runtime-session",
   "terminal:command",
+  "terminal:submit-shell-line",
+  "terminal:write-input",
   "terminal:approve-command",
   "terminal:reject-command",
   "terminal:read",
@@ -452,6 +519,14 @@ const commandDecision = terminalHandlers.get("terminal:command")?.(
   status: "pending_approval";
   approval: { id: string };
 };
+const shellDecisionFromIpc = terminalHandlers.get("terminal:submit-shell-line")?.(
+  undefined,
+  terminalFromIpc.id,
+  "del .\\build",
+) as {
+  status: "pending_approval";
+};
+assert.equal(shellDecisionFromIpc.status, "pending_approval");
 terminalHandlers.get("terminal:bind-runtime-session")?.(
   undefined,
   terminalFromIpc.id,

@@ -1,7 +1,7 @@
 import * as pty from "node-pty";
 import path from "node:path";
 
-export type TerminalKind = "shell" | "codex";
+export type TerminalKind = "shell" | "codex" | "claude";
 
 export type TerminalSession = {
   id: string;
@@ -49,6 +49,7 @@ export type TerminalSpawnOptions = {
   cwd: string;
   cols: number;
   rows: number;
+  env: NodeJS.ProcessEnv;
 };
 
 type PtyProcess = {
@@ -111,15 +112,17 @@ export class TerminalManager {
     projectRoot: string;
     columns?: number;
     rows?: number;
+    initialPrompt?: string;
   }): TerminalSession {
     const columns = options.columns ?? 80;
     const rows = options.rows ?? 24;
     const cwd = resolveProjectCwd(options.cwd, options.projectRoot);
-    const [command, args] = commandFor(options.kind);
+    const [command, args] = commandFor(options.kind, cwd, options.initialPrompt);
     const process = this.spawnPty(command, args, {
       cwd,
       cols: columns,
       rows,
+      env: terminalEnvironment(),
     });
     const session: TerminalSession = {
       id: `terminal-${crypto.randomUUID()}`,
@@ -181,6 +184,25 @@ export class TerminalManager {
       status: "executed",
       commandSummary: analysis.commandSummary,
     };
+  }
+
+  submitShellLine(sessionId: string, command: string): TerminalCommandDecision {
+    const managed = this.get(sessionId);
+    if (managed.session.kind !== "shell") {
+      return {
+        status: "blocked",
+        reason: "Shell line submission is only available for shell terminals",
+      };
+    }
+    return this.requestCommand(sessionId, command);
+  }
+
+  writeInput(sessionId: string, data: string): void {
+    const managed = this.get(sessionId);
+    if (managed.session.kind === "shell") {
+      throw new Error("Provider terminal input is only available for Codex and Claude sessions");
+    }
+    managed.process.write(data);
   }
 
   bindRuntimeSession(sessionId: string, runId: string, runtimeSessionId: string): void {
@@ -281,11 +303,43 @@ export class TerminalManager {
   }
 }
 
-function commandFor(kind: TerminalKind): [string, string[]] {
+function commandFor(kind: TerminalKind, cwd: string, initialPrompt?: string): [string, string[]] {
   if (kind === "codex") {
-    return [process.platform === "win32" ? "codex.cmd" : "codex", []];
+    return [
+      process.platform === "win32" ? "codex.cmd" : "codex",
+      [
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "on-request",
+        "--no-alt-screen",
+        "--cd",
+        cwd,
+        initialPrompt ?? "",
+      ].filter(Boolean),
+    ];
   }
-  return [process.platform === "win32" ? "cmd.exe" : "/bin/sh", []];
+  if (kind === "claude") {
+    return [
+      process.platform === "win32" ? "claude.cmd" : "claude",
+      ["--ax-screen-reader", "--permission-mode", "acceptEdits", initialPrompt ?? ""].filter(
+        Boolean,
+      ),
+    ];
+  }
+  return [
+    process.platform === "win32" ? "cmd.exe" : "/bin/sh",
+    process.platform === "win32" ? ["/d", "/k", "chcp 65001>nul"] : [],
+  ];
+}
+
+function terminalEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    LANG: "en_US.UTF-8",
+    LC_ALL: "en_US.UTF-8",
+    PYTHONIOENCODING: "utf-8",
+  };
 }
 
 function resolveProjectCwd(cwd: string, projectRoot: string): string {

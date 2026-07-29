@@ -25,17 +25,22 @@ contextBridge.exposeInMainWorld("workflowRuntime", {
 
 contextBridge.exposeInMainWorld("workflowTerminal", {
   create: (request: {
-    kind: "shell" | "codex";
+    kind: "shell" | "codex" | "claude";
     cwd: string;
     projectRoot: string;
     columns: number;
     rows: number;
+    initialPrompt?: string;
   }): Promise<TerminalSession> =>
     ipcRenderer.invoke("terminal:create", request) as Promise<TerminalSession>,
   bindRuntimeSession: (sessionId: string, runId: string, runtimeSessionId: string): Promise<void> =>
     ipcRenderer.invoke("terminal:bind-runtime-session", sessionId, runId, runtimeSessionId) as Promise<void>,
   requestCommand: (sessionId: string, command: string): Promise<TerminalCommandDecision> =>
     ipcRenderer.invoke("terminal:command", sessionId, command) as Promise<TerminalCommandDecision>,
+  submitShellLine: (sessionId: string, command: string): Promise<TerminalCommandDecision> =>
+    ipcRenderer.invoke("terminal:submit-shell-line", sessionId, command) as Promise<TerminalCommandDecision>,
+  writeInput: (sessionId: string, data: string): Promise<void> =>
+    ipcRenderer.invoke("terminal:write-input", sessionId, data) as Promise<void>,
   approveCommand: (sessionId: string, approvalId: string): Promise<TerminalCommandDecision> =>
     ipcRenderer.invoke("terminal:approve-command", sessionId, approvalId) as Promise<TerminalCommandDecision>,
   rejectCommand: (sessionId: string, approvalId: string): Promise<TerminalCommandDecision> =>
