@@ -82,7 +82,7 @@
 
 **已取得的打包版闭环证据**
 
-- `npm.cmd run test:e2e:packaged` 已于 2026 年 7 月 28 日通过（`3 passed`），覆盖刚生成的免安装 EXE：以 `file:` 资源加载、Electron 受管 Runtime、独立路由，以及危险终端命令取消后 Runtime 审计记录。
+- `npm.cmd run test:e2e:packaged` 已于 2026 年 7 月 29 日通过（`3 passed`），覆盖刚生成的免安装 EXE：以 `file:` 资源加载、Electron 受管 Runtime、独立路由，以及危险终端命令取消后 Runtime 审计记录。
 - 同一测试在临时用户数据与临时 Runtime 数据库中导入项目、创建 Run、保存仅含 `deploy` 节点的工作流版本，并从页面启动受控部署；部署命令为非 Shell 的 `C:\Windows\System32\hostname.exe`，部署会话到达 `COMPLETED` 且实时输出在页面可见。
 - 同一测试将临时 fake `codex.cmd` 前置到 `PATH`，由打包 EXE 发现并以真实 Runtime CLI 执行链路启动知识合成；知识候选绑定刚创建的真实 Run ID，页面断言收到 `packaged-knowledge-final` 实时输出。
 
