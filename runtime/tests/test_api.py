@@ -1538,6 +1538,124 @@ def test_runtime_api_runs_agent_job_and_returns_output_without_advancing_run(tmp
     assert current.json()["revision"] == run["revision"]
 
 
+def test_runtime_api_persists_interactive_agent_input_and_output(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(
+        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
+    )
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    started = client.post(
+        f"/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "fake",
+            "prompt": "请询问用户",
+            "mode": "interactive",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    job = started.json()
+    session_started = client.post(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/start",
+        json={
+            "desktopSessionId": "pty-1",
+            "pid": 1234,
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    accepted = client.post(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/input",
+        json={"content": "选择 A", "actor": HUMAN_ACTOR, "now": NOW},
+    )
+    output = client.post(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/output",
+        json={"events": [{"data": "已收到选择 A\r\n"}], "now": NOW},
+    )
+    fetched_session = client.get(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session"
+    )
+    fetched_output = client.get(f"/runs/{run['runId']}/agents/{job['id']}/output")
+
+    assert started.status_code == 200
+    assert job["mode"] == "interactive"
+    assert job["status"] == "QUEUED"
+    assert session_started.status_code == 200
+    assert session_started.json()["status"] == "RUNNING"
+    assert accepted.status_code == 200
+    assert accepted.json()["kind"] == "human_input"
+    assert output.status_code == 200
+    assert output.json()[0]["kind"] == "terminal_raw"
+    assert fetched_session.status_code == 200
+    assert fetched_session.json()["desktopSessionId"] == "pty-1"
+    assert fetched_output.json()[-1]["payload"]["text"] == "已收到选择 A\r\n"
+
+
+def test_runtime_api_finishes_continues_and_cancels_interactive_agent(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(
+        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
+    )
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    job = client.post(
+        f"/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "fake",
+            "prompt": "请确认目标分支",
+            "mode": "interactive",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    ).json()
+    client.post(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/start",
+        json={
+            "desktopSessionId": "pty-1",
+            "pid": 1234,
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    finished = client.post(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/ended",
+        json={
+            "status": "FAILED",
+            "summary": None,
+            "error": "用户准备继续",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    continued = client.post(
+        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/continue",
+        json={"actor": HUMAN_ACTOR, "now": NOW},
+    )
+    cancel_without_actor = client.post(
+        f"/runs/{run['runId']}/agents/{continued.json()['id']}/cancel",
+        json={"now": NOW},
+    )
+    cancelled = client.post(
+        f"/runs/{run['runId']}/agents/{continued.json()['id']}/cancel",
+        json={"actor": HUMAN_ACTOR, "now": NOW},
+    )
+
+    assert finished.status_code == 200
+    assert finished.json()["status"] == "FAILED"
+    assert continued.status_code == 200
+    assert continued.json()["mode"] == "interactive"
+    assert continued.json()["parentJobId"] == job["id"]
+    assert cancel_without_actor.status_code == 400
+    assert "ACTOR_INVALID" in cancel_without_actor.json()["detail"]
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "CANCELLED"
+
+
 def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)

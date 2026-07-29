@@ -1799,6 +1799,11 @@ class WorkflowRuntimeService:
             raise KeyError(f"Agent job not found: {job_id}")
         return self._agent_jobs.list_output(job_id, after_sequence=after_sequence)
 
+    def get_interactive_agent_session(self, run_id: str, job_id: str) -> dict:
+        with self._lock:
+            _job, session = self._interactive_job_and_session(run_id, job_id)
+            return session
+
     def cancel_agent_job(
         self,
         run_id: str,

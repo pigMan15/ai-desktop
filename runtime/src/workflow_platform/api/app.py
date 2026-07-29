@@ -8,7 +8,7 @@ import sqlite3
 from typing import Any, Callable
 from secrets import compare_digest
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -134,10 +134,47 @@ class StartAgentJobRequest(BaseModel):
     provider: str
     prompt: str
     actor: dict[str, Any]
+    mode: str = "automatic"
     allowedTools: list[str] = Field(default_factory=list)
     timeoutSeconds: float = 300
     maxOutputBytes: int = 1_000_000
     now: str
+
+
+class StartInteractiveAgentSessionRequest(BaseModel):
+    desktopSessionId: str
+    pid: int
+    actor: dict[str, Any]
+    now: str
+
+
+class InteractiveAgentInputRequest(BaseModel):
+    content: str
+    actor: dict[str, Any]
+    now: str
+
+
+class InteractiveAgentOutputRequest(BaseModel):
+    events: list[dict[str, str]]
+    now: str
+
+
+class FinishInteractiveAgentSessionRequest(BaseModel):
+    status: str
+    summary: str | None = None
+    error: str | None = None
+    actor: dict[str, Any]
+    now: str
+
+
+class ContinueInteractiveAgentSessionRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
+class CancelAgentJobRequest(BaseModel):
+    actor: dict[str, Any] | None = None
+    now: str | None = None
 
 
 class StartDeploymentRequest(BaseModel):
@@ -927,6 +964,7 @@ def create_app(
                 allowed_tools=request.allowedTools,
                 timeout_seconds=request.timeoutSeconds,
                 max_output_bytes=request.maxOutputBytes,
+                mode=request.mode,
                 now=request.now,
             )
         except KeyError as error:
@@ -1078,13 +1116,135 @@ def create_app(
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
-    @application.post("/runs/{run_id}/agents/{job_id}/cancel")
-    def cancel_agent_job(run_id: str, job_id: str) -> dict[str, Any]:
+    @application.get("/runs/{run_id}/agents/{job_id}/interactive-session")
+    def get_interactive_agent_session(run_id: str, job_id: str) -> dict[str, Any]:
         service = _require_service(runtime_service)
         try:
-            return service.cancel_agent_job(run_id, job_id)
+            return service.get_interactive_agent_session(run_id, job_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/start")
+    def start_interactive_agent_session(
+        run_id: str,
+        job_id: str,
+        request: StartInteractiveAgentSessionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.start_interactive_agent_session(
+                run_id,
+                job_id,
+                desktop_session_id=request.desktopSessionId,
+                pid=request.pid,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/input")
+    def record_interactive_agent_input(
+        run_id: str,
+        job_id: str,
+        request: InteractiveAgentInputRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.record_interactive_agent_input(
+                run_id,
+                job_id,
+                content=request.content,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/output")
+    def append_interactive_agent_output(
+        run_id: str,
+        job_id: str,
+        request: InteractiveAgentOutputRequest,
+    ) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.append_interactive_agent_output(
+                run_id,
+                job_id,
+                events=request.events,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/ended")
+    def finish_interactive_agent_session(
+        run_id: str,
+        job_id: str,
+        request: FinishInteractiveAgentSessionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.finish_interactive_agent_session(
+                run_id,
+                job_id,
+                status=request.status,
+                summary=request.summary,
+                error=request.error,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/continue")
+    def continue_interactive_agent_session(
+        run_id: str,
+        job_id: str,
+        request: ContinueInteractiveAgentSessionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.continue_interactive_agent(
+                run_id,
+                job_id,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agents/{job_id}/cancel")
+    def cancel_agent_job(
+        run_id: str,
+        job_id: str,
+        request: CancelAgentJobRequest | None = Body(default=None),
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.cancel_agent_job(
+                run_id,
+                job_id,
+                actor=request.actor if request is not None else None,
+                now=request.now if request is not None else None,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
 
     @application.get("/runs/{run_id}/projection")
     def get_projection(run_id: str) -> dict[str, Any]:
@@ -1133,6 +1293,13 @@ def _http_error_from_value_error(error: ValueError) -> HTTPException:
         "AGENT_UNKNOWN_NODE": 400,
         "AGENT_PROVIDER_UNAVAILABLE": 400,
         "AGENT_UNSAFE_CWD": 400,
+        "AGENT_MODE_INVALID": 400,
+        "AGENT_INTERACTIVE_SESSION_REQUIRED": 400,
+        "AGENT_INTERACTIVE_SESSION_INVALID": 400,
+        "AGENT_INTERACTIVE_INPUT_INVALID": 400,
+        "AGENT_INTERACTIVE_OUTPUT_INVALID": 400,
+        "AGENT_INTERACTIVE_SESSION_STATUS_INVALID": 400,
+        "AGENT_INTERACTIVE_SESSION_STATE_INVALID": 409,
         "AGENT_TIMEOUT": 408,
         "AGENT_OUTPUT_LIMIT": 413,
         "KNOWLEDGE_INPUT_INVALID": 400,
