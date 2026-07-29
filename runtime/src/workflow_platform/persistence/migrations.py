@@ -343,4 +343,54 @@ def migrate(db: sqlite3.Connection) -> None:
     }
     if "archived_at" not in project_columns:
         db.execute("ALTER TABLE projects ADD COLUMN archived_at TEXT")
+
+    agent_job_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)").fetchall()
+    }
+    if "mode" not in agent_job_columns:
+        db.execute(
+            "ALTER TABLE agent_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'automatic'"
+        )
+    if "session_id" not in agent_job_columns:
+        db.execute("ALTER TABLE agent_jobs ADD COLUMN session_id TEXT")
+    if "parent_job_id" not in agent_job_columns:
+        db.execute("ALTER TABLE agent_jobs ADD COLUMN parent_job_id TEXT")
+
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            job_id TEXT NOT NULL UNIQUE,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL,
+            desktop_session_id TEXT,
+            pid INTEGER,
+            cwd TEXT NOT NULL,
+            recovery_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            ended_at TEXT,
+            FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_input_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
+            UNIQUE(session_id, sequence)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_sessions_run_status
+            ON agent_sessions(run_id, status, created_at, id);
+
+        CREATE INDEX IF NOT EXISTS idx_agent_input_events_session_sequence
+            ON agent_input_events(session_id, sequence);
+        """
+    )
     db.commit()

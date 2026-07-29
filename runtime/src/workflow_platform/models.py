@@ -79,7 +79,16 @@ RunStatus = Literal[
     "ARCHIVED",
 ]
 AgentProvider = Literal["codex", "claude", "fake"]
+AgentMode = Literal["interactive", "automatic"]
 AgentJobStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
+AgentSessionStatus = Literal[
+    "QUEUED",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "RECOVERABLE",
+]
 NodeState = Literal[
     "PENDING",
     "READY",
@@ -203,13 +212,31 @@ class AgentJob(CanonicalModel):
     nodeId: str
     provider: AgentProvider
     status: AgentJobStatus
+    mode: AgentMode = "automatic"
     command: list[str]
     cwd: str
     pid: int | None = None
+    sessionId: str | None = None
+    parentJobId: str | None = None
     summary: str | None = None
     error: str | None = None
     createdAt: str
     updatedAt: str
+
+
+class AgentSession(CanonicalModel):
+    id: str
+    runId: str
+    jobId: str
+    provider: AgentProvider
+    status: AgentSessionStatus
+    desktopSessionId: str | None = None
+    pid: int | None = None
+    cwd: str
+    recoveryReason: str | None = None
+    createdAt: str
+    updatedAt: str
+    endedAt: str | None = None
 
 
 class AgentOutputEvent(CanonicalModel):

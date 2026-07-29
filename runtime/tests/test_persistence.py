@@ -6,6 +6,7 @@ import pytest
 
 from workflow_platform.models import (
     AgentJob,
+    AgentSession,
     AgentOutputEvent,
     WorkflowDefinition,
     WorkflowEdge,
@@ -32,6 +33,8 @@ CORE_TABLES = {
     "terminal_sessions",
     "agent_jobs",
     "agent_output_events",
+    "agent_sessions",
+    "agent_input_events",
 }
 
 EXPECTED_COLUMNS = {
@@ -141,6 +144,9 @@ EXPECTED_COLUMNS = {
         ("error", "TEXT", False, False),
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
+        ("mode", "TEXT", True, False),
+        ("session_id", "TEXT", False, False),
+        ("parent_job_id", "TEXT", False, False),
     ],
     "agent_output_events": [
         ("id", "TEXT", False, True),
@@ -148,6 +154,28 @@ EXPECTED_COLUMNS = {
         ("sequence", "INTEGER", True, False),
         ("kind", "TEXT", True, False),
         ("payload_json", "TEXT", True, False),
+        ("created_at", "TEXT", True, False),
+    ],
+    "agent_sessions": [
+        ("id", "TEXT", False, True),
+        ("run_id", "TEXT", True, False),
+        ("job_id", "TEXT", True, False),
+        ("provider", "TEXT", True, False),
+        ("status", "TEXT", True, False),
+        ("desktop_session_id", "TEXT", False, False),
+        ("pid", "INTEGER", False, False),
+        ("cwd", "TEXT", True, False),
+        ("recovery_reason", "TEXT", False, False),
+        ("created_at", "TEXT", True, False),
+        ("updated_at", "TEXT", True, False),
+        ("ended_at", "TEXT", False, False),
+    ],
+    "agent_input_events": [
+        ("id", "TEXT", False, True),
+        ("session_id", "TEXT", True, False),
+        ("sequence", "INTEGER", True, False),
+        ("kind", "TEXT", True, False),
+        ("content", "TEXT", True, False),
         ("created_at", "TEXT", True, False),
     ],
 }
@@ -169,6 +197,11 @@ EXPECTED_FOREIGN_KEYS = {
     ],
     "agent_jobs": [("run_id", "runs", "id")],
     "agent_output_events": [("job_id", "agent_jobs", "id")],
+    "agent_sessions": [
+        ("run_id", "runs", "id"),
+        ("job_id", "agent_jobs", "id"),
+    ],
+    "agent_input_events": [("session_id", "agent_sessions", "id")],
 }
 
 
@@ -223,6 +256,13 @@ def unique_index_columns(db: sqlite3.Connection, table_name: str) -> list[tuple[
         columns = db.execute(f"PRAGMA index_info({index['name']})").fetchall()
         unique_columns.append(tuple(column["name"] for column in columns))
     return unique_columns
+
+
+def index_names(db: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        row["name"]
+        for row in db.execute(f"PRAGMA index_list({table_name})").fetchall()
+    }
 
 
 def foreign_keys(db: sqlite3.Connection, table_name: str) -> list[tuple[str, str, str]]:
@@ -359,6 +399,53 @@ def test_migrate_adds_project_archive_column_to_existing_database() -> None:
     assert ("archived_at", "TEXT", False, False) in table_columns(db, "projects")
 
 
+def test_migrate_adds_interactive_agent_columns_and_tables_to_existing_database() -> None:
+    db = connect(fresh_db_path("interactive_agent_migration"))
+    db.execute(
+        """
+        CREATE TABLE agent_jobs (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL,
+            command_json TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            pid INTEGER,
+            summary TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.commit()
+
+    migrate(db)
+    migrate(db)
+
+    assert {"mode", "session_id", "parent_job_id"} <= {
+        row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)").fetchall()
+    }
+    assert {"id", "run_id", "job_id", "provider", "status", "cwd"} <= {
+        row["name"] for row in db.execute("PRAGMA table_info(agent_sessions)").fetchall()
+    }
+    assert {"id", "session_id", "sequence", "kind", "content"} <= {
+        row["name"] for row in db.execute("PRAGMA table_info(agent_input_events)").fetchall()
+    }
+    assert db.execute(
+        """
+        SELECT dflt_value
+        FROM pragma_table_info('agent_jobs')
+        WHERE name = 'mode'
+        """
+    ).fetchone()["dflt_value"] == "'automatic'"
+    assert "idx_agent_sessions_run_status" in index_names(db, "agent_sessions")
+    assert "idx_agent_input_events_session_sequence" in index_names(
+        db, "agent_input_events"
+    )
+
+
 def test_run_events_has_unique_run_sequence_index() -> None:
     db = connect(fresh_db_path("run_events_unique"))
 
@@ -373,6 +460,16 @@ def test_agent_output_events_has_unique_job_sequence_index() -> None:
     migrate(db)
 
     assert ("job_id", "sequence") in unique_index_columns(db, "agent_output_events")
+
+
+def test_agent_input_events_has_unique_session_sequence_index() -> None:
+    db = connect(fresh_db_path("agent_input_unique"))
+
+    migrate(db)
+
+    assert ("session_id", "sequence") in unique_index_columns(
+        db, "agent_input_events"
+    )
 
 
 def test_migrate_adds_foreign_keys_for_relationship_columns() -> None:
@@ -553,6 +650,9 @@ def test_agent_job_models_accept_camel_case_alias_payloads() -> None:
             "pid": None,
             "summary": None,
             "error": None,
+            "mode": "interactive",
+            "sessionId": "agent-session-1",
+            "parentJobId": "agent-job-0",
             "createdAt": "2026-07-27T13:00:00Z",
             "updatedAt": "2026-07-27T13:00:00Z",
         }
@@ -570,7 +670,32 @@ def test_agent_job_models_accept_camel_case_alias_payloads() -> None:
 
     assert job.model_dump(by_alias=True)["runId"] == "run-1"
     assert job.provider == "fake"
+    assert job.model_dump(by_alias=True)["mode"] == "interactive"
+    assert job.model_dump(by_alias=True)["sessionId"] == "agent-session-1"
+    assert job.model_dump(by_alias=True)["parentJobId"] == "agent-job-0"
     assert event.model_dump(by_alias=True)["jobId"] == "agent-job-1"
+
+
+def test_agent_session_model_accepts_camel_case_alias_payloads() -> None:
+    session = AgentSession.model_validate(
+        {
+            "id": "agent-session-1",
+            "runId": "run-1",
+            "jobId": "agent-job-1",
+            "provider": "codex",
+            "status": "RUNNING",
+            "desktopSessionId": "pty-1",
+            "pid": 1234,
+            "cwd": "C:/project",
+            "recoveryReason": None,
+            "createdAt": "2026-07-29T13:00:00Z",
+            "updatedAt": "2026-07-29T13:00:00Z",
+            "endedAt": None,
+        }
+    )
+
+    assert session.model_dump(by_alias=True)["desktopSessionId"] == "pty-1"
+    assert session.status == "RUNNING"
 
 
 def test_agent_job_repository_round_trips_job_and_output() -> None:
