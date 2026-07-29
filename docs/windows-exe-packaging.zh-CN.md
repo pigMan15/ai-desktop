@@ -32,19 +32,10 @@ release-full/
 产物包括：
 
 - `release-full/win-unpacked/AI Workflow Platform.exe`
+- `release-full/AI Workflow Platform Setup <版本号>.exe`
 - `release-full/AI Workflow Platform 0.1.0-win-unpacked.zip`
 
-这个命令不依赖 NSIS 下载，适合当前 GitHub 连接不稳定的环境。
-
-## NSIS 安装器
-
-如果网络可以访问 GitHub 的 `electron-builder-binaries`，可以尝试生成安装器：
-
-```powershell
-npm.cmd run package:win:installer
-```
-
-安装器会额外下载 NSIS 资源。当前环境如果出现 `nsis-3.0.4.1.7z` 下载失败，请使用上面的离线完整打包命令。
+打包脚本会检查主程序、内置 Runtime 和 NSIS 安装器是否都已生成；任一项缺失会直接失败，不会把不完整产物当作发布包。
 
 ## 运行方式
 
@@ -66,3 +57,4 @@ npm.cmd run dev:desktop
 - 当前未做代码签名，Windows 可能显示未知发布者。
 - Codex/Claude Code CLI 仍依赖用户机器已有 CLI、登录态和权限。
 - 如果 `npm.cmd run package:win:full` 提示缺少 PyInstaller，请先执行 `python -m pip install pyinstaller`。
+- 首次生成 NSIS 安装器时，`electron-builder` 可能需要下载 NSIS 资源；网络受限时请配置可访问的镜像或在可联网构建机上执行打包。

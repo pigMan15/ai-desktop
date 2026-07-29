@@ -18,6 +18,9 @@
     "test:runtime": "cd runtime && python -m pytest",
     "test:e2e": "playwright test",
     "test:e2e:p1": "playwright test tests/e2e/workflow-p1.spec.ts",
+    "test:e2e:packaged": "set PLAYWRIGHT_SKIP_WEB_SERVER=1&& playwright test tests/e2e/desktop-packaged.spec.ts",
+    "test:e2e:installed": "set PLAYWRIGHT_SKIP_WEB_SERVER=1&& playwright test tests/e2e/desktop-installed.spec.ts",
+    "test:package-script": "powershell -ExecutionPolicy Bypass -File scripts/test-package-windows-full.ps1",
     "verify": "npm run test && npm run test:runtime",
     "verify:ps": "powershell -ExecutionPolicy Bypass -File scripts/verify.ps1"
   },

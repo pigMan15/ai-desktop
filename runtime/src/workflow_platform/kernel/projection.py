@@ -32,14 +32,31 @@ def rebuild_projection(
 
     status = "CREATED"
     updated_at = ordered_events[-1].createdAt if ordered_events else ""
+    has_started_node = False
 
     for run_event in ordered_events:
         if run_event.type == "NODE_STARTED" and run_event.nodeId:
+            has_started_node = True
             node_states[run_event.nodeId] = "RUNNING"
             status = "IN_PROGRESS"
         elif run_event.type == "ARTIFACT_SUBMITTED" and run_event.nodeId:
             node_states[run_event.nodeId] = "AWAITING_APPROVAL"
             status = "REVIEWING"
+        elif run_event.type == "NODE_COMPLETED" and run_event.nodeId:
+            if _node_requires_approval(workflow, run_event.nodeId):
+                node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+                status = "REVIEWING"
+            elif _node_requires_gate(workflow, run_event.nodeId):
+                node_states[run_event.nodeId] = "AWAITING_GATE"
+                status = "REVIEWING"
+            else:
+                node_states[run_event.nodeId] = "PASSED"
+                next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
+                if next_node_id is None:
+                    status = "DONE"
+                else:
+                    node_states[next_node_id] = "READY"
+                    status = "IN_PROGRESS"
         elif run_event.type == "HUMAN_APPROVED" and run_event.nodeId:
             if _node_requires_gate(workflow, run_event.nodeId):
                 node_states[run_event.nodeId] = "AWAITING_GATE"
@@ -52,7 +69,10 @@ def rebuild_projection(
                 else:
                     node_states[next_node_id] = "READY"
                     status = "IN_PROGRESS"
-        elif run_event.type == "GATE_PASSED" and run_event.nodeId:
+        elif run_event.type == "HUMAN_DEFERRED" and run_event.nodeId:
+            node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+            status = "REVIEWING"
+        elif run_event.type in {"GATE_PASSED", "GATE_WAIVED"} and run_event.nodeId:
             node_states[run_event.nodeId] = "PASSED"
             next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
             if next_node_id is None:
@@ -60,25 +80,34 @@ def rebuild_projection(
             else:
                 node_states[next_node_id] = "READY"
                 status = "IN_PROGRESS"
-        elif run_event.type in {"HUMAN_REJECTED", "GATE_FAILED"} and run_event.nodeId:
+        elif run_event.type in {"HUMAN_REJECTED", "GATE_FAILED", "NODE_FAILED"} and run_event.nodeId:
             node_states[run_event.nodeId] = "BLOCKED"
             status = "BLOCKED"
+        elif run_event.type == "NODE_RETRIED" and run_event.nodeId:
+            node_states[run_event.nodeId] = "AWAITING_GATE"
+            status = "REVIEWING"
         elif run_event.type == "GATE_STARTED" and run_event.nodeId:
             node_states[run_event.nodeId] = "AWAITING_GATE"
             status = "REVIEWING"
         elif run_event.type == "RUN_BLOCKED":
             status = "BLOCKED"
+        elif run_event.type == "RUN_PAUSED":
+            status = "PAUSED"
+        elif run_event.type == "RUN_RESUMED":
+            status = _status_from_nodes(node_states, has_started_node)
         elif run_event.type == "RUN_COMPLETED":
             status = "DONE"
+        elif run_event.type == "RUN_ARCHIVED":
+            status = "ARCHIVED"
 
-    if status == "DONE":
+    if status in {"DONE", "ARCHIVED"}:
         current_node_ids: list[str] = []
     else:
         current_node_ids = [
             node.id for node in workflow.nodes if node_states[node.id] in ACTIVE_NODE_STATES
         ]
 
-    allowed_actions = _allowed_actions(node_states, current_node_ids)
+    allowed_actions = _allowed_actions(status, node_states, current_node_ids)
     blocking_reasons = _blocking_reasons(node_states, current_node_ids)
 
     return RunProjection(
@@ -108,10 +137,53 @@ def _node_requires_gate(workflow: WorkflowDefinition, node_id: str) -> bool:
     return False
 
 
+def _node_requires_approval(workflow: WorkflowDefinition, node_id: str) -> bool:
+    for node in workflow.nodes:
+        if node.id != node_id:
+            continue
+        return any(requirement.type == "approval" for requirement in node.requires)
+    return False
+
+
+def _status_from_nodes(node_states: dict[str, NodeState], has_started_node: bool) -> str:
+    states = set(node_states.values())
+    if "BLOCKED" in states:
+        return "BLOCKED"
+    if "AWAITING_APPROVAL" in states or "AWAITING_GATE" in states:
+        return "REVIEWING"
+    if states & {"READY", "RUNNING", "AWAITING_ARTIFACT"}:
+        return "IN_PROGRESS" if has_started_node else "CREATED"
+    return "DONE"
+
+
 def _allowed_actions(
+    status: str,
     node_states: dict[str, NodeState],
     current_node_ids: list[str],
 ) -> list[AllowedAction]:
+    if status == "ARCHIVED":
+        return []
+    if status == "PAUSED":
+        return [
+            AllowedAction(
+                id="run-resume",
+                label="Resume run",
+                eventType="RUN_RESUMED",
+                nodeId=None,
+                risk="medium",
+            )
+        ]
+    if status in {"DONE", "BLOCKED"}:
+        return [
+            AllowedAction(
+                id="run-archive",
+                label="Archive run",
+                eventType="RUN_ARCHIVED",
+                nodeId=None,
+                risk="low",
+            )
+        ]
+
     actions: list[AllowedAction] = []
     for node_id in current_node_ids:
         state = node_states[node_id]
@@ -152,6 +224,13 @@ def _allowed_actions(
                         nodeId=node_id,
                         risk="high",
                     ),
+                    AllowedAction(
+                        id=f"defer:{node_id}",
+                        label="Defer",
+                        eventType="HUMAN_DEFERRED",
+                        nodeId=node_id,
+                        risk="medium",
+                    ),
                 ]
             )
         elif state == "AWAITING_GATE":
@@ -171,8 +250,24 @@ def _allowed_actions(
                         nodeId=node_id,
                         risk="medium",
                     ),
+                    AllowedAction(
+                        id=f"gate-waive:{node_id}",
+                        label="Waive gate",
+                        eventType="GATE_WAIVED",
+                        nodeId=node_id,
+                        risk="high",
+                    ),
                 ]
             )
+    actions.append(
+        AllowedAction(
+            id="run-pause",
+            label="Pause run",
+            eventType="RUN_PAUSED",
+            nodeId=None,
+            risk="medium",
+        )
+    )
     return actions
 
 

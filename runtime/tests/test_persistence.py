@@ -13,7 +13,11 @@ from workflow_platform.models import (
 )
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
-from workflow_platform.persistence.repositories import AgentJobRepository, WorkflowVersionRepository
+from workflow_platform.persistence.repositories import (
+    AgentJobRepository,
+    TerminalSessionRepository,
+    WorkflowVersionRepository,
+)
 
 
 CORE_TABLES = {
@@ -36,6 +40,7 @@ EXPECTED_COLUMNS = {
         ("name", "TEXT", True, False),
         ("root_path", "TEXT", True, False),
         ("active_protocol", "TEXT", False, False),
+        ("archived_at", "TEXT", False, False),
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
     ],
@@ -331,6 +336,27 @@ def test_migrate_creates_plan_columns_for_core_tables() -> None:
 
     for table_name, expected_columns in EXPECTED_COLUMNS.items():
         assert table_columns(db, table_name) == expected_columns
+
+
+def test_migrate_adds_project_archive_column_to_existing_database() -> None:
+    db = connect(fresh_db_path("project_archive_migration"))
+    db.execute(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            active_protocol TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    db.commit()
+
+    migrate(db)
+
+    assert ("archived_at", "TEXT", False, False) in table_columns(db, "projects")
 
 
 def test_run_events_has_unique_run_sequence_index() -> None:
@@ -676,4 +702,86 @@ def test_agent_job_repository_lists_output_after_sequence_cursor() -> None:
     assert sequences == [
         2,
         3,
+    ]
+
+
+def test_terminal_session_repository_persists_run_bound_session_metadata() -> None:
+    db = connect(fresh_db_path("terminal_session_repository"))
+    migrate(db)
+    insert_run(db)
+    repository = TerminalSessionRepository(db)
+
+    repository.save(
+        id="terminal-1",
+        project_id="project-1",
+        run_id="run-1",
+        node_id="implement",
+        kind="codex",
+        status="running",
+        cwd="C:/project",
+        pid=1234,
+        created_at="2026-07-28T01:00:00Z",
+        updated_at="2026-07-28T01:01:00Z",
+    )
+
+    assert repository.list_for_run("run-1") == [
+        {
+            "id": "terminal-1",
+            "projectId": "project-1",
+            "runId": "run-1",
+            "nodeId": "implement",
+            "kind": "codex",
+            "status": "running",
+            "cwd": "C:/project",
+            "pid": 1234,
+            "createdAt": "2026-07-28T01:00:00Z",
+            "updatedAt": "2026-07-28T01:01:00Z",
+        }
+    ]
+
+
+def test_terminal_session_repository_persists_scrollback_with_sequence_cursor() -> None:
+    db = connect(fresh_db_path("terminal_scrollback_repository"))
+    migrate(db)
+    insert_run(db)
+    repository = TerminalSessionRepository(db)
+    repository.save(
+        id="terminal-1",
+        project_id="project-1",
+        run_id="run-1",
+        node_id="implement",
+        kind="shell",
+        status="running",
+        cwd="C:/project",
+        pid=1234,
+        created_at="2026-07-28T01:00:00Z",
+        updated_at="2026-07-28T01:00:00Z",
+    )
+
+    repository.append_output(
+        id="terminal-output-1",
+        session_id="terminal-1",
+        sequence=1,
+        stream="stdout",
+        data="正在执行\n",
+        created_at="2026-07-28T01:00:01Z",
+    )
+    repository.append_output(
+        id="terminal-output-2",
+        session_id="terminal-1",
+        sequence=2,
+        stream="stderr",
+        data="warning\n",
+        created_at="2026-07-28T01:00:02Z",
+    )
+
+    assert repository.list_output("terminal-1", after_sequence=1) == [
+        {
+            "id": "terminal-output-2",
+            "sessionId": "terminal-1",
+            "sequence": 2,
+            "stream": "stderr",
+            "data": "warning\n",
+            "createdAt": "2026-07-28T01:00:02Z",
+        }
     ]

@@ -8,6 +8,11 @@ release-full/
 release-full-*/
 release-installer/
 release-portable/
+installed-e2e/
+.workflow-platform/
+test-results/
+.codex-pytest-temp/
+.pytest-tmp/
 runtime/dist/
 runtime/build/
 runtime/*.spec

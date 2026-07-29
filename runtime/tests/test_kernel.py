@@ -114,7 +114,58 @@ def test_rebuild_projection_without_events_marks_first_node_ready() -> None:
     assert projection.revision == "0"
     assert projection.currentNodeIds == ["draft"]
     assert projection.nodeStates == {"draft": "READY", "review": "PENDING"}
-    assert [action.eventType for action in projection.allowedActions] == ["NODE_STARTED"]
+    assert [action.eventType for action in projection.allowedActions] == ["NODE_STARTED", "RUN_PAUSED"]
+
+
+def test_trusted_human_can_pause_and_resume_an_active_run() -> None:
+    events = [event("event-1", "NODE_STARTED", "draft", agent_actor(), revision="1")]
+    paused = transition(
+        "run-1",
+        linear_workflow(),
+        events,
+        event("event-2", "RUN_PAUSED", actor=human_actor()),
+        expected_revision="1",
+    )
+
+    assert paused["accepted"] is True
+    assert paused["run"].status == "PAUSED"
+    assert [(action.eventType, action.nodeId) for action in paused["allowedActions"]] == [
+        ("RUN_RESUMED", None),
+    ]
+
+    resumed = transition(
+        "run-1",
+        linear_workflow(),
+        [*events, *paused["emittedEvents"]],
+        event("event-3", "RUN_RESUMED", actor=human_actor()),
+        expected_revision=paused["revision"],
+    )
+
+    assert resumed["accepted"] is True
+    assert resumed["run"].status == "IN_PROGRESS"
+    assert resumed["run"].nodeStates["draft"] == "RUNNING"
+
+
+def test_trusted_human_resume_restores_created_status_before_any_node_starts() -> None:
+    created = transition(
+        "run-1",
+        linear_workflow(),
+        [],
+        event("event-1", "RUN_PAUSED", actor=human_actor()),
+        expected_revision="0",
+    )
+
+    resumed = transition(
+        "run-1",
+        linear_workflow(),
+        created["emittedEvents"],
+        event("event-2", "RUN_RESUMED", actor=human_actor()),
+        expected_revision=created["revision"],
+    )
+
+    assert resumed["accepted"] is True
+    assert resumed["run"].status == "CREATED"
+    assert resumed["run"].nodeStates["draft"] == "READY"
 
 
 def test_rebuild_projection_revision_and_updated_at_ignore_other_runs() -> None:
@@ -176,7 +227,10 @@ def test_transition_starts_ready_node_and_advances_revision() -> None:
     assert [emitted.type for emitted in result["emittedEvents"]] == ["NODE_STARTED"]
     assert result["run"].status == "IN_PROGRESS"
     assert result["run"].nodeStates["draft"] == "RUNNING"
-    assert [action.eventType for action in result["allowedActions"]] == ["ARTIFACT_SUBMITTED"]
+    assert [action.eventType for action in result["allowedActions"]] == [
+        "ARTIFACT_SUBMITTED",
+        "RUN_PAUSED",
+    ]
 
 
 def test_transition_expected_revision_uses_only_target_run_events() -> None:
@@ -249,6 +303,8 @@ def test_artifact_submission_waits_for_approval_actions() -> None:
     assert [action.eventType for action in result["allowedActions"]] == [
         "HUMAN_APPROVED",
         "HUMAN_REJECTED",
+        "HUMAN_DEFERRED",
+        "RUN_PAUSED",
     ]
 
 
@@ -327,6 +383,33 @@ def test_human_rejection_blocks_run() -> None:
     assert result["blockingReasons"][0].code == "NODE_BLOCKED"
 
 
+def test_trusted_verifier_can_retry_a_blocked_gate_node() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "deploy", agent_actor(), "1"),
+        artifact_event("event-2", "deploy", agent_actor(), "2"),
+        event("event-3", "HUMAN_APPROVED", "deploy", human_actor(), "3"),
+        event("event-4", "GATE_FAILED", "deploy", verifier_actor(), "4"),
+    ]
+
+    result = transition(
+        "run-1",
+        gated_workflow(),
+        events,
+        event("event-5", "NODE_RETRIED", "deploy", verifier_actor()),
+        expected_revision="4",
+    )
+
+    assert result["accepted"] is True
+    assert result["run"].status == "REVIEWING"
+    assert result["run"].nodeStates["deploy"] == "AWAITING_GATE"
+    assert {action.eventType for action in result["allowedActions"]} == {
+        "GATE_PASSED",
+        "GATE_FAILED",
+        "GATE_WAIVED",
+        "RUN_PAUSED",
+    }
+
+
 def test_gate_pass_is_rejected_while_node_is_awaiting_approval() -> None:
     events = [
         event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
@@ -366,6 +449,8 @@ def test_human_approval_moves_gated_node_to_awaiting_gate() -> None:
     assert [action.eventType for action in result["allowedActions"]] == [
         "GATE_PASSED",
         "GATE_FAILED",
+        "GATE_WAIVED",
+        "RUN_PAUSED",
     ]
 
 

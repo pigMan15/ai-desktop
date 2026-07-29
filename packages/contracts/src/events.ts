@@ -14,6 +14,8 @@ export const RUN_EVENT_TYPES = [
   "NODE_FAILED",
   "NODE_RETRIED",
   "RUN_BLOCKED",
+  "RUN_PAUSED",
+  "RUN_RESUMED",
   "RUN_COMPLETED",
   "RUN_ARCHIVED",
 ] as const;
@@ -65,7 +67,7 @@ export type AllowedAction = {
 
 export type RunProjection = {
   runId: string;
-  status: "CREATED" | "IN_PROGRESS" | "REVIEWING" | "BLOCKED" | "DONE" | "ARCHIVED";
+  status: "CREATED" | "IN_PROGRESS" | "REVIEWING" | "BLOCKED" | "PAUSED" | "DONE" | "ARCHIVED";
   currentNodeIds: string[];
   nodeStates: Record<string, NodeState>;
   allowedActions: AllowedAction[];

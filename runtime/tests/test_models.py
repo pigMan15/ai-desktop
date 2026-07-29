@@ -65,6 +65,8 @@ def test_run_event_types_match_contract_order() -> None:
         "NODE_FAILED",
         "NODE_RETRIED",
         "RUN_BLOCKED",
+        "RUN_PAUSED",
+        "RUN_RESUMED",
         "RUN_COMPLETED",
         "RUN_ARCHIVED",
     )

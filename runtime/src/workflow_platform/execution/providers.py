@@ -49,6 +49,7 @@ class CodexCliProvider:
                 "--json",
                 "--sandbox",
                 "workspace-write",
+                "--skip-git-repo-check",
                 "--cd",
                 str(cwd),
                 prompt,
@@ -97,6 +98,7 @@ class ClaudeCliProvider:
             prompt,
             "--output-format",
             "stream-json",
+            "--verbose",
             "--permission-mode",
             "acceptEdits",
         ]

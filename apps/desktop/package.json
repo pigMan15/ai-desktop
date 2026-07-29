@@ -9,9 +9,12 @@
     "build": "tsc -p tsconfig.json",
     "package:win": "electron-builder --win --config electron-builder.config.cjs",
     "package:win:dir": "electron-builder --dir --config electron-builder.config.cjs",
-    "test": "node -e \"fs.rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node .test-dist/test/main.test.js && node -e \"fs.rmSync('.test-dist',{recursive:true,force:true})\""
+    "test": "node -e \"fs.rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node .test-dist/test/main.test.js && node .test-dist/test/gitWorkspace.test.js && node -e \"fs.rmSync('.test-dist',{recursive:true,force:true})\""
   },
   "devDependencies": {
     "electron": "31.7.7"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
   }
 }

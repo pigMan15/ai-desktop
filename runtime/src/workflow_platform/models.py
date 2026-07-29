@@ -30,6 +30,8 @@ RUN_EVENT_TYPES = (
     "NODE_FAILED",
     "NODE_RETRIED",
     "RUN_BLOCKED",
+    "RUN_PAUSED",
+    "RUN_RESUMED",
     "RUN_COMPLETED",
     "RUN_ARCHIVED",
 )
@@ -60,12 +62,22 @@ RunEventType = Literal[
     "NODE_FAILED",
     "NODE_RETRIED",
     "RUN_BLOCKED",
+    "RUN_PAUSED",
+    "RUN_RESUMED",
     "RUN_COMPLETED",
     "RUN_ARCHIVED",
 ]
 ActorType = Literal["human", "agent", "system", "verifier", "executor", "adapter"]
 ActorSource = Literal["renderer", "runtime", "terminal", "agent", "adapter"]
-RunStatus = Literal["CREATED", "IN_PROGRESS", "REVIEWING", "BLOCKED", "DONE", "ARCHIVED"]
+RunStatus = Literal[
+    "CREATED",
+    "IN_PROGRESS",
+    "REVIEWING",
+    "BLOCKED",
+    "PAUSED",
+    "DONE",
+    "ARCHIVED",
+]
 AgentProvider = Literal["codex", "claude", "fake"]
 AgentJobStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
 NodeState = Literal[
@@ -126,6 +138,7 @@ class Gate(CanonicalModel):
     id: str
     name: str
     description: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowDefinition(CanonicalModel):

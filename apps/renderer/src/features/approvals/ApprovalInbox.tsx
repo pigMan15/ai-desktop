@@ -1,22 +1,41 @@
+import { useState } from "react";
+
 import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
 
-type Props = { state: RuntimeWorkbenchState | null };
+type Props = {
+  state: RuntimeWorkbenchState | null;
+  onDecide?: (
+    nodeId: string,
+    decision: "approved" | "rejected" | "deferred",
+    comment: string,
+  ) => void;
+};
 
 const approvalStatusText: Record<string, string> = {
   pending: "待审批",
   approved: "已批准",
   rejected: "已拒绝",
+  deferred: "已暂缓",
 };
 
-export function ApprovalInbox({ state }: Props) {
+export function ApprovalInbox({ state, onDecide }: Props) {
   const approvals = Array.isArray(state?.approvals) ? state.approvals : [];
+  const [comment, setComment] = useState("");
+  const projection = state?.projection;
+  const nodeId = projection?.currentNodeIds.find(
+    (candidate) => projection.nodeStates[candidate] === "AWAITING_APPROVAL",
+  );
+  const canDecide = (eventType: "HUMAN_APPROVED" | "HUMAN_REJECTED" | "HUMAN_DEFERRED") =>
+    Boolean(nodeId && projection?.allowedActions.some(
+      (action) => action.nodeId === nodeId && action.eventType === eventType,
+    ));
 
   return (
     <section id="approvals" className="panel" aria-labelledby="approvals-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Human Review</p>
-          <h2 id="approvals-title">Approval Inbox</h2>
+          <h2 id="approvals-title">审批中心</h2>
         </div>
         <span className="status-pill status-watch">
           {approvals.length > 0 ? "待处理" : "加载中"}
@@ -34,9 +53,39 @@ export function ApprovalInbox({ state }: Props) {
         ))}
         {approvals.length === 0 ? <li>等待 Runtime 审批队列。</li> : null}
       </ul>
-      <button className="quiet-button" disabled>
-        等待 Runtime allowedActions
-      </button>
+      {nodeId ? (
+        <div className="form-grid">
+          <label>
+            审批评论
+            <textarea value={comment} onChange={(event) => setComment(event.target.value)} rows={3} />
+          </label>
+          <div className="button-row">
+            <button
+              className="quiet-button"
+              disabled={!canDecide("HUMAN_APPROVED")}
+              onClick={() => onDecide?.(nodeId, "approved", comment.trim())}
+            >
+              批准
+            </button>
+            <button
+              className="quiet-button"
+              disabled={!canDecide("HUMAN_REJECTED")}
+              onClick={() => onDecide?.(nodeId, "rejected", comment.trim())}
+            >
+              拒绝
+            </button>
+            <button
+              className="quiet-button"
+              disabled={!canDecide("HUMAN_DEFERRED")}
+              onClick={() => onDecide?.(nodeId, "deferred", comment.trim())}
+            >
+              暂缓审批
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="body-copy">当前没有可由 Runtime 授权处理的审批节点。</p>
+      )}
     </section>
   );
 }

@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import os
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Callable
+from secrets import compare_digest
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from workflow_platform.main import health
+from workflow_platform.execution.diagnostics import diagnose_cli_provider
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
 from workflow_platform.runtime_service import WorkflowRuntimeService
+from workflow_platform.terminals.redaction import redact_terminal_output
 
 
 DEFAULT_RUNTIME_DB_ENV = "WORKFLOW_PLATFORM_RUNTIME_DB"
 DEFAULT_RUNTIME_DB_PATH = ".workflow-platform/runtime.db"
+LOCAL_RUNTIME_TOKEN_ENV = "WORKFLOW_PLATFORM_RUNTIME_TOKEN"
 
 
 class ImportProjectRequest(BaseModel):
@@ -26,9 +32,22 @@ class ImportProjectRequest(BaseModel):
     now: str
 
 
+class ArchiveProjectRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
 class CreateRunRequest(BaseModel):
     workflowVersionId: str
     title: str
+    taskGoal: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    now: str
+
+
+class SaveWorkflowVersionRequest(BaseModel):
+    definition: dict[str, Any]
+    actor: dict[str, Any]
     now: str
 
 
@@ -64,12 +83,49 @@ class GateResultRequest(BaseModel):
     status: str
     evidence: list[str] = Field(default_factory=list)
     waiverReason: str | None = None
+    failureReason: str | None = None
     actor: dict[str, Any]
     expectedRevision: str
     now: str
 
 
 class RebuildProjectionRequest(BaseModel):
+    now: str
+
+
+class CleanupOrphanAgentsRequest(BaseModel):
+    now: str
+
+
+class RegisterTerminalSessionRequest(BaseModel):
+    nodeId: str
+    kind: str
+    cwd: str
+    pid: int | None = None
+    now: str
+
+
+class StopTerminalSessionRequest(BaseModel):
+    now: str
+
+
+class AppendTerminalOutputRequest(BaseModel):
+    stream: str
+    data: str
+    now: str
+
+
+class TerminalCommandDecisionRequest(BaseModel):
+    decision: str
+    riskLevel: str
+    commandSummary: str
+    impact: str
+    actor: dict[str, Any]
+    now: str
+
+
+class ExportTerminalEvidenceRequest(BaseModel):
+    actor: dict[str, Any]
     now: str
 
 
@@ -84,14 +140,93 @@ class StartAgentJobRequest(BaseModel):
     now: str
 
 
-def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI:
+class StartDeploymentRequest(BaseModel):
+    nodeId: str
+    actor: dict[str, Any]
+    expectedRevision: str
+    now: str
+
+
+class CancelDeploymentRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
+class ResumeAgentCheckpointRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
+class CreateKnowledgeCandidateRequest(BaseModel):
+    title: str
+    content: str
+    source: str
+    actor: dict[str, Any]
+    now: str
+
+
+class ReviewKnowledgeCandidateRequest(BaseModel):
+    decision: str
+    actor: dict[str, Any]
+    comment: str | None = None
+    now: str
+
+
+class PublishKnowledgeCandidateRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
+class StartKnowledgeSynthesisRequest(BaseModel):
+    provider: str
+    actor: dict[str, Any]
+    now: str
+
+
+class KnowledgeSynthesisFeedbackRequest(BaseModel):
+    feedback: str
+    actor: dict[str, Any]
+    now: str
+
+
+class RecordKnowledgeGitPublicationRequest(BaseModel):
+    branch: str
+    relativePath: str
+    commitHash: str
+    actor: dict[str, Any]
+    now: str
+
+
+def create_app(
+    runtime_service: WorkflowRuntimeService | None = None,
+    *,
+    cli_diagnostics: Callable[[str], dict[str, str | bool | None]] = diagnose_cli_provider,
+    local_token: str | None = None,
+) -> FastAPI:
     application = FastAPI(title="AI Workflow Platform Runtime")
+    expected_local_token = local_token.strip() if local_token else None
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origin_regex=r"^https?://(?:127\.0\.0\.1|localhost):\d+$",
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.middleware("http")
+    async def require_local_runtime_token(request: Request, call_next: Callable):
+        if (
+            expected_local_token
+            and request.method != "OPTIONS"
+            and request.url.path != "/health"
+        ):
+            supplied_token = request.headers.get("X-Workflow-Platform-Token", "")
+            if not compare_digest(supplied_token, expected_local_token):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "LOCAL_AUTH_REQUIRED: Runtime 本地认证令牌无效或缺失。"},
+                )
+        return await call_next(request)
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(
@@ -104,6 +239,237 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
     def get_health() -> dict[str, str]:
         return health()
 
+    @application.get("/agents/providers")
+    def get_agent_provider_diagnostics() -> list[dict[str, str | bool | None]]:
+        return [cli_diagnostics(provider) for provider in ("codex", "claude")]
+
+    @application.get("/diagnostics/support-bundle")
+    def export_diagnostic_support_bundle() -> dict[str, str]:
+        providers = get_agent_provider_diagnostics()
+        unavailable = [provider["id"] for provider in providers if not provider["available"]]
+        recommendations = [
+            "确认 Runtime 已运行并可通过本机回环地址访问。",
+            "如遇工作流中断，请在恢复页面检查遗留终端和 Agent checkpoint。",
+        ]
+        if "codex" in unavailable:
+            recommendations.append("请安装 Codex CLI 并完成认证。")
+        if "claude" in unavailable:
+            recommendations.append("请安装 Claude Code CLI 并完成认证。")
+        recent_audit_records = (
+            runtime_service.list_audit_records(limit=50)
+            if runtime_service is not None
+            else []
+        )
+        content = {
+            "title": "Runtime 诊断支持包",
+            "schemaVersion": 1,
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "health": health(),
+            "cliProviders": providers,
+            "recentAuditRecords": recent_audit_records,
+            "recoverySuggestions": recommendations,
+        }
+        return {
+            "fileName": "workflow-platform-diagnostics.json",
+            "mediaType": "application/json",
+            "content": redact_terminal_output(
+                json.dumps(content, ensure_ascii=False, indent=2, sort_keys=True)
+            ),
+        }
+
+    @application.post("/knowledge/candidates")
+    def create_knowledge_candidate(request: CreateKnowledgeCandidateRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.create_knowledge_candidate(
+                title=request.title,
+                content=request.content,
+                source=request.source,
+                actor=request.actor,
+                now=request.now,
+            )
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/knowledge/candidates")
+    def list_knowledge_candidates(status: str | None = None) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        return service.list_knowledge_candidates(status=status)
+
+    @application.post("/knowledge/candidates/{candidate_id}/review")
+    def review_knowledge_candidate(
+        candidate_id: str,
+        request: ReviewKnowledgeCandidateRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.review_knowledge_candidate(
+                candidate_id,
+                decision=request.decision,
+                actor=request.actor,
+                comment=request.comment,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/knowledge/candidates/{candidate_id}/publish")
+    def publish_knowledge_candidate(
+        candidate_id: str,
+        request: PublishKnowledgeCandidateRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.publish_knowledge_candidate(
+                candidate_id,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/knowledge/candidates/{candidate_id}/syntheses")
+    def start_knowledge_synthesis(
+        candidate_id: str,
+        request: StartKnowledgeSynthesisRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.start_knowledge_synthesis(
+                candidate_id,
+                provider=request.provider,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/knowledge/syntheses")
+    def list_knowledge_syntheses() -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        return service.list_knowledge_syntheses()
+
+    @application.get("/knowledge/syntheses/{synthesis_id}/output")
+    def list_knowledge_synthesis_output(
+        synthesis_id: str,
+        afterSequence: int = 0,
+    ) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_knowledge_synthesis_output(
+                synthesis_id,
+                after_sequence=afterSequence,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/knowledge/syntheses/{synthesis_id}/feedback")
+    def record_knowledge_synthesis_feedback(
+        synthesis_id: str,
+        request: KnowledgeSynthesisFeedbackRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.record_knowledge_synthesis_feedback(
+                synthesis_id,
+                feedback=request.feedback,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/knowledge/syntheses/{synthesis_id}/publish")
+    def publish_knowledge_synthesis(
+        synthesis_id: str,
+        request: PublishKnowledgeCandidateRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.publish_knowledge_synthesis(
+                synthesis_id,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/knowledge/search")
+    def search_knowledge(query: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        return service.search_knowledge(query)
+
+    @application.get("/knowledge/documents")
+    def list_knowledge_documents() -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        return service.list_knowledge_documents()
+
+    @application.get("/knowledge/documents/{document_id}/replay")
+    def replay_knowledge_document(document_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.replay_knowledge_document(document_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/knowledge/documents/{document_id}/export")
+    def export_knowledge_document(document_id: str) -> dict[str, str]:
+        service = _require_service(runtime_service)
+        try:
+            return service.export_knowledge_document(document_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/knowledge/documents/{document_id}/git-publications")
+    def record_knowledge_git_publication(
+        document_id: str,
+        request: RecordKnowledgeGitPublicationRequest,
+    ) -> dict[str, str]:
+        service = _require_service(runtime_service)
+        try:
+            return service.record_knowledge_git_publication(
+                document_id,
+                branch=request.branch,
+                relative_path=request.relativePath,
+                commit_hash=request.commitHash,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/audit-records")
+    def list_audit_records(
+        actorId: str | None = None,
+        action: str | None = None,
+        resource: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_audit_records(
+                actor_id=actorId,
+                action=action,
+                resource=resource,
+                limit=limit,
+            )
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
     @application.post("/projects/import")
     def import_project(request: ImportProjectRequest) -> dict[str, Any]:
         service = _require_service(runtime_service)
@@ -112,6 +478,98 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @application.post("/projects/{project_id}/archive")
+    def archive_project(
+        project_id: str,
+        request: ArchiveProjectRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.archive_project(project_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/workflow-versions/{workflow_version_id}")
+    def get_workflow_definition(workflow_version_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_workflow_definition(workflow_version_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/workflow-versions/{workflow_version_id}/export")
+    def export_workflow_definition(
+        workflow_version_id: str,
+        format: str,
+    ) -> dict[str, str]:
+        service = _require_service(runtime_service)
+        try:
+            return service.export_workflow_version(workflow_version_id, format=format)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/workflow-versions/{workflow_version_id}/compile")
+    def compile_workflow_definition(workflow_version_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.compile_workflow_version(workflow_version_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/workflow-versions/{workflow_version_id}/simulate")
+    def simulate_workflow_definition(workflow_version_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.simulate_workflow_version(workflow_version_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/workflow-versions/{workflow_version_id}/history")
+    def list_workflow_version_history(workflow_version_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_workflow_version_history(workflow_version_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/workflow-versions/{workflow_version_id}/diff")
+    def diff_workflow_versions(
+        workflow_version_id: str,
+        against: str,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.diff_workflow_versions(
+                workflow_version_id,
+                against_workflow_version_id=against,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/workflow-versions/{workflow_version_id}/save")
+    def save_workflow_definition(
+        workflow_version_id: str,
+        request: SaveWorkflowVersionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.save_workflow_version(
+                workflow_version_id,
+                definition=request.definition,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
     @application.post("/runs")
     def create_run(request: CreateRunRequest) -> dict[str, Any]:
         service = _require_service(runtime_service)
@@ -119,13 +577,25 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
             projection = service.create_run(
                 request.workflowVersionId,
                 title=request.title,
+                task_goal=request.taskGoal,
+                parameters=request.parameters,
                 now=request.now,
             )
             return projection.model_dump()
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
         except sqlite3.IntegrityError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @application.get("/workflow-versions/{workflow_version_id}/runs")
+    def list_runs_for_workflow_version(workflow_version_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_runs_for_workflow_version(workflow_version_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @application.post("/runs/{run_id}/transition")
     def transition_run(run_id: str, request: TransitionRequest) -> dict[str, Any]:
@@ -195,6 +665,32 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
+    @application.get("/runs/{run_id}/artifacts/{artifact_id}/preview")
+    def preview_artifact(run_id: str, artifact_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.preview_artifact(run_id, artifact_id)
+        except (KeyError, FileNotFoundError) as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/runs/{run_id}/evidence-package")
+    def get_evidence_package(run_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_evidence_package(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/report")
+    def get_run_report(run_id: str) -> dict[str, str]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_run_report(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     @application.get("/runs/{run_id}/approvals")
     def get_approvals(run_id: str) -> list[dict[str, Any]]:
         service = _require_service(runtime_service)
@@ -245,11 +741,133 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
                 status=request.status,
                 evidence=request.evidence,
                 waiver_reason=request.waiverReason,
+                failure_reason=request.failureReason,
                 actor=request.actor,
                 expected_revision=request.expectedRevision,
                 now=request.now,
             )
             return projection.model_dump()
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/terminals")
+    def register_terminal_session(
+        run_id: str,
+        request: RegisterTerminalSessionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.register_terminal_session(
+                run_id,
+                node_id=request.nodeId,
+                kind=request.kind,
+                cwd=Path(request.cwd),
+                pid=request.pid,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/runs/{run_id}/terminals")
+    def list_terminal_sessions(run_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_terminal_sessions(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/terminals/{session_id}/stop")
+    def stop_terminal_session(
+        run_id: str,
+        session_id: str,
+        request: StopTerminalSessionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.stop_terminal_session(run_id, session_id, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/terminals/{session_id}/command-decisions")
+    def record_terminal_command_decision(
+        run_id: str,
+        session_id: str,
+        request: TerminalCommandDecisionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.record_terminal_command_decision(
+                run_id,
+                session_id,
+                decision=request.decision,
+                risk_level=request.riskLevel,
+                command_summary=request.commandSummary,
+                impact=request.impact,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/terminals/{session_id}/output")
+    def append_terminal_output(
+        run_id: str,
+        session_id: str,
+        request: AppendTerminalOutputRequest,
+    ) -> dict[str, bool]:
+        service = _require_service(runtime_service)
+        try:
+            service.append_terminal_output(
+                run_id,
+                session_id,
+                stream=request.stream,
+                data=request.data,
+                now=request.now,
+            )
+            return {"accepted": True}
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/runs/{run_id}/terminals/{session_id}/output")
+    def list_terminal_output(
+        run_id: str,
+        session_id: str,
+        afterSequence: int = 0,
+    ) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_terminal_output(
+                run_id,
+                session_id,
+                after_sequence=afterSequence,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/terminals/{session_id}/evidence")
+    def export_terminal_output_as_evidence(
+        run_id: str,
+        session_id: str,
+        request: ExportTerminalEvidenceRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.export_terminal_output_as_evidence(
+                run_id,
+                session_id,
+                actor=request.actor,
+                now=request.now,
+            )
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
@@ -263,6 +881,36 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
         service = _require_service(runtime_service)
         try:
             return service.rebuild_projection(run_id, now=request.now).model_dump()
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/recovery-diagnostics")
+    def get_recovery_diagnostics(run_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_recovery_diagnostics(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/recovery/cleanup-orphan-agents")
+    def cleanup_orphan_agents(
+        run_id: str,
+        request: CleanupOrphanAgentsRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.cleanup_orphan_agent_jobs(run_id, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/recovery/cleanup-orphan-terminals")
+    def cleanup_orphan_terminals(
+        run_id: str,
+        request: CleanupOrphanAgentsRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.cleanup_orphan_terminal_sessions(run_id, now=request.now)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -286,6 +934,75 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
         except ValueError as error:
             raise _http_error_from_value_error(error) from error
 
+    @application.post("/runs/{run_id}/deployments")
+    def start_deployment(run_id: str, request: StartDeploymentRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.start_deployment(
+                run_id,
+                node_id=request.nodeId,
+                actor=request.actor,
+                expected_revision=request.expectedRevision,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/runs/{run_id}/deployments")
+    def list_deployments(run_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_deployments(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/deployments/{deployment_id}")
+    def get_deployment(run_id: str, deployment_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_deployment(run_id, deployment_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/deployments/{deployment_id}/output")
+    def list_deployment_output(
+        run_id: str,
+        deployment_id: str,
+        afterSequence: int = 0,
+    ) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_deployment_output(
+                run_id,
+                deployment_id,
+                after_sequence=afterSequence,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/deployments/{deployment_id}/cancel")
+    def cancel_deployment(
+        run_id: str,
+        deployment_id: str,
+        request: CancelDeploymentRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.cancel_deployment(
+                run_id,
+                deployment_id,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
     @application.get("/runs/{run_id}/agents")
     def list_agent_jobs(run_id: str) -> list[dict[str, Any]]:
         service = _require_service(runtime_service)
@@ -293,6 +1010,52 @@ def create_app(runtime_service: WorkflowRuntimeService | None = None) -> FastAPI
             return service.list_agent_jobs(run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/agent-checkpoints")
+    def list_agent_checkpoints(run_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_agent_checkpoints(run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/agent-checkpoints/{checkpoint_id}/resume")
+    def resume_agent_checkpoint(
+        run_id: str,
+        checkpoint_id: str,
+        request: ResumeAgentCheckpointRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.resume_agent_checkpoint(
+                run_id,
+                checkpoint_id,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/agent-checkpoints/{checkpoint_id}/discard")
+    def discard_agent_checkpoint(
+        run_id: str,
+        checkpoint_id: str,
+        request: ResumeAgentCheckpointRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.discard_agent_checkpoint(
+                run_id,
+                checkpoint_id,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
 
     @application.get("/runs/{run_id}/agents/{job_id}")
     def get_agent_job(run_id: str, job_id: str) -> dict[str, Any]:
@@ -340,7 +1103,10 @@ def create_runtime_app(db_path: str | Path | None = None) -> FastAPI:
     )
     db = connect(runtime_db_path)
     migrate(db)
-    return create_app(WorkflowRuntimeService(db))
+    return create_app(
+        WorkflowRuntimeService(db),
+        local_token=os.environ.get(LOCAL_RUNTIME_TOKEN_ENV),
+    )
 
 
 def _require_service(runtime_service: WorkflowRuntimeService | None) -> WorkflowRuntimeService:
@@ -354,6 +1120,10 @@ def _http_error_from_value_error(error: ValueError) -> HTTPException:
     status_by_code = {
         "REVISION_CONFLICT": 409,
         "PERMISSION_DENIED": 403,
+        "ACTOR_INVALID": 400,
+        "ACTOR_NOT_TRUSTED": 403,
+        "ACTOR_PERMISSION_DENIED": 403,
+        "PROJECT_ARCHIVED": 409,
         "INVALID_TRANSITION": 400,
         "MISSING_ARTIFACT": 400,
         "MISSING_APPROVAL": 400,
@@ -365,6 +1135,13 @@ def _http_error_from_value_error(error: ValueError) -> HTTPException:
         "AGENT_UNSAFE_CWD": 400,
         "AGENT_TIMEOUT": 408,
         "AGENT_OUTPUT_LIMIT": 413,
+        "KNOWLEDGE_INPUT_INVALID": 400,
+        "KNOWLEDGE_STATUS_INVALID": 400,
+        "KNOWLEDGE_REVIEW_INVALID": 400,
+        "KNOWLEDGE_REVIEW_CONFLICT": 409,
+        "KNOWLEDGE_CANDIDATE_NOT_APPROVED": 409,
+        "KNOWLEDGE_ALREADY_PUBLISHED": 409,
+        "AUDIT_LIMIT_INVALID": 400,
     }
     return HTTPException(status_code=status_by_code.get(code, 400), detail=str(error))
 

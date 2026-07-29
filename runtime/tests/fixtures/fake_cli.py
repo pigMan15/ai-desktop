@@ -39,6 +39,11 @@ def main() -> int:
             time.sleep(0.1)
         emit("final", "fake-cli: woke")
         return 0
+    if mode == "stream":
+        emit("message", "fake-cli: first output")
+        time.sleep(0.8)
+        emit("final", "fake-cli: streamed completion")
+        return 0
     emit("error", "fake-cli: failed")
     return 2
 

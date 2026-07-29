@@ -3,38 +3,114 @@ import { useEffect, useState } from "react";
 import { ApprovalInbox } from "../features/approvals/ApprovalInbox";
 import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
 import { GatesPage } from "../features/gates/GatesPage";
+import { KnowledgePage } from "../features/knowledge/KnowledgePage";
 import { ProjectDashboard } from "../features/projects/ProjectDashboard";
+import {
+  GitWorkspacePanel,
+  type GitWorkspaceStatus,
+  type GitWorktree,
+} from "../features/projects/GitWorkspacePanel";
 import { RecoveryPage } from "../features/recovery/RecoveryPage";
 import { RunDashboard } from "../features/runs/RunDashboard";
-import { SettingsPage } from "../features/settings/SettingsPage";
+import { AuditPage } from "../features/audit/AuditPage";
+import {
+  SettingsPage,
+  type ManagedRuntimeStatus,
+  type RuntimeLogEntry,
+} from "../features/settings/SettingsPage";
 import { TerminalPage } from "../features/terminal/TerminalPage";
 import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
 import { Navigation } from "./navigation";
 import { normalizeRoute, routeHash } from "./routes";
+import { mergeAgentOutput } from "./agentOutput";
+import { desktopGitApi } from "./desktopGit";
 import {
   createRuntimeClient,
   loadWorkbenchState,
+  restoreWorkbenchState,
   type AgentJobSummary,
+  type AgentProviderDiagnostic,
+  type ArtifactPreview,
+  type AuditRecord,
+  type CompiledWorkflowSummary,
+  type DeploymentOutputEvent,
+  type DeploymentSummary,
+  type KnowledgeCandidate,
+  type KnowledgeDocument,
+  type KnowledgeDocumentExport,
+  type KnowledgeDocumentReplay,
+  type KnowledgeSynthesis,
+  type KnowledgeSynthesisOutputEvent,
   type RuntimeWorkbenchState,
+  type RecoveryDiagnostics,
+  type RunConfiguration,
+  type RunSummary,
+  type TerminalOutputEvent,
+  type TerminalSessionSummary,
+  type WorkflowDefinitionSummary,
+  type WorkflowExportFormat,
+  type WorkflowSimulation,
+  type WorkflowVersionDiff,
+  type WorkflowVersionSummary,
 } from "./runtimeClient";
+import { loadWorkspaceSession, saveWorkspaceSession } from "./workspaceSession";
 
 export function App() {
+  const [savedSession] = useState(loadWorkspaceSession);
   const [state, setState] = useState<RuntimeWorkbenchState | null>(null);
   const [currentRoute, setCurrentRoute] = useState(() => normalizeRoute(window.location.hash));
-  const [apiBaseUrl, setApiBaseUrl] = useState("http://127.0.0.1:8765");
-  const [projectPath, setProjectPath] = useState("");
-  const [artifactPath, setArtifactPath] = useState("");
-  const [workflowVersionId, setWorkflowVersionId] = useState("");
-  const [nodeId, setNodeId] = useState("plan");
-  const [agentProvider, setAgentProvider] = useState<AgentJobSummary["provider"]>("fake");
-  const [agentPrompt, setAgentPrompt] = useState("请用中文开发剩余内容");
-  const [lastAgentJobId, setLastAgentJobId] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState(savedSession.apiBaseUrl);
+  const [projectPath, setProjectPath] = useState(savedSession.projectPath);
+  const [projectId, setProjectId] = useState(savedSession.projectId ?? "");
+  const [workflowVersionId, setWorkflowVersionId] = useState(savedSession.workflowVersionId);
   const [operationMessage, setOperationMessage] = useState("等待操作");
+  const [managedRuntime, setManagedRuntime] = useState<ManagedRuntimeStatus | null>(null);
+  const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogEntry[]>([]);
+  const [providerDiagnostics, setProviderDiagnostics] = useState<AgentProviderDiagnostic[] | undefined>(
+    undefined,
+  );
+  const [knowledgeCandidates, setKnowledgeCandidates] = useState<KnowledgeCandidate[]>([]);
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
+  const [knowledgeSyntheses, setKnowledgeSyntheses] = useState<KnowledgeSynthesis[]>([]);
+  const [knowledgeSynthesisOutput, setKnowledgeSynthesisOutput] = useState<
+    KnowledgeSynthesisOutputEvent[]
+  >([]);
+  const [knowledgeReplay, setKnowledgeReplay] = useState<KnowledgeDocumentReplay | null>(null);
+  const [knowledgeGitPreview, setKnowledgeGitPreview] = useState<{
+    documentId: string;
+    title: string;
+    relativePath: string;
+    previousContent: string;
+    nextContent: string;
+  } | null>(null);
+  const [publishingKnowledgeDocumentId, setPublishingKnowledgeDocumentId] = useState<string | null>(null);
+  const [auditRecords, setAuditRecords] = useState<AuditRecord[]>([]);
+  const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview | null>(null);
+  const [artifactComparison, setArtifactComparison] = useState<{
+    before: { id: string; content: string };
+    after: { id: string; content: string };
+  } | null>(null);
+  const [workflowDefinition, setWorkflowDefinition] = useState<WorkflowDefinitionSummary | null>(null);
+  const [compiledWorkflow, setCompiledWorkflow] = useState<CompiledWorkflowSummary | null>(null);
+  const [workflowSimulation, setWorkflowSimulation] = useState<WorkflowSimulation | null>(null);
+  const [workflowHistory, setWorkflowHistory] = useState<WorkflowVersionSummary[]>([]);
+  const [workflowDiff, setWorkflowDiff] = useState<WorkflowVersionDiff | null>(null);
+  const [gitWorkspaceStatus, setGitWorkspaceStatus] = useState<GitWorkspaceStatus | null>(null);
+  const [gitWorktrees, setGitWorktrees] = useState<GitWorktree[]>([]);
+  const [recoveryDiagnostics, setRecoveryDiagnostics] = useState<RecoveryDiagnostics | null>(null);
+  const [terminalSessions, setTerminalSessions] = useState<TerminalSessionSummary[]>([]);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [deployments, setDeployments] = useState<DeploymentSummary[]>([]);
+  const [deploymentOutput, setDeploymentOutput] = useState<DeploymentOutputEvent[]>([]);
 
   useEffect(() => {
     let isMounted = true;
 
-    loadWorkbenchState()
+    const initialLoad = savedSession.runId
+      ? restoreWorkbenchState({ ...savedSession, runId: savedSession.runId })
+      : loadWorkbenchState(apiBaseUrl);
+
+    initialLoad
       .then((workbenchState) => {
         if (isMounted) {
           setState(workbenchState);
@@ -52,6 +128,248 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    void refreshManagedRuntimeDiagnostics();
+  }, []);
+
+  useEffect(() => {
+    if (state?.connection !== "connected") {
+      setProviderDiagnostics(undefined);
+      return;
+    }
+
+    let isMounted = true;
+    createRuntimeClient(apiBaseUrl)
+      .listAgentProviders()
+      .then((diagnostics) => {
+        if (isMounted) {
+          setProviderDiagnostics(Array.isArray(diagnostics) ? diagnostics : []);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setProviderDiagnostics([]);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBaseUrl, state?.connection]);
+
+  useEffect(() => {
+    if (!workflowVersionId || state?.connection !== "connected") {
+      setWorkflowDefinition(null);
+      setCompiledWorkflow(null);
+      setWorkflowSimulation(null);
+      setWorkflowHistory([]);
+      setWorkflowDiff(null);
+      return;
+    }
+    setWorkflowSimulation(null);
+    setWorkflowDiff(null);
+    let isMounted = true;
+    const runtimeClient = createRuntimeClient(apiBaseUrl);
+    Promise.all([
+      runtimeClient.getWorkflowDefinition(workflowVersionId),
+      runtimeClient.compileWorkflowDefinition(workflowVersionId),
+      runtimeClient.listWorkflowVersionHistory(workflowVersionId),
+    ])
+      .then(([definition, compiled, history]) => {
+        if (isMounted) {
+          setWorkflowDefinition(definition);
+          setCompiledWorkflow(compiled);
+          setWorkflowHistory(history);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setWorkflowDefinition(null);
+          setCompiledWorkflow(null);
+          setWorkflowHistory([]);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBaseUrl, state?.connection, workflowVersionId]);
+
+  useEffect(() => {
+    if (!workflowVersionId || state?.connection !== "connected") {
+      setRuns([]);
+      return;
+    }
+    let isMounted = true;
+    createRuntimeClient(apiBaseUrl)
+      .listRunsForWorkflowVersion(workflowVersionId)
+      .then((items) => {
+        if (isMounted) {
+          setRuns(items);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setRuns([]);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBaseUrl, state?.connection, workflowVersionId]);
+
+  const activeRunId = state?.projection?.runId ?? null;
+  const agentJobSignature = (state?.agentJobs ?? [])
+    .map((job) => `${job.id}:${job.status}`)
+    .join("|");
+  const deploymentSignature = deployments.map((deployment) => `${deployment.id}:${deployment.status}`).join("|");
+
+  useEffect(() => {
+    if (!activeRunId || state?.connection !== "connected") {
+      setRecoveryDiagnostics(null);
+      return;
+    }
+    let isMounted = true;
+    createRuntimeClient(apiBaseUrl)
+      .getRecoveryDiagnostics(activeRunId)
+      .then((diagnostics) => {
+        if (isMounted) {
+          setRecoveryDiagnostics(diagnostics);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setRecoveryDiagnostics(null);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [activeRunId, apiBaseUrl, state?.connection]);
+
+  useEffect(() => {
+    if (!activeRunId || state?.connection !== "connected" || currentRoute !== "terminal") {
+      setTerminalSessions([]);
+      return;
+    }
+    let isMounted = true;
+    createRuntimeClient(apiBaseUrl)
+      .listTerminalSessions(activeRunId)
+      .then((sessions) => {
+        if (isMounted) {
+          setTerminalSessions(sessions);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setTerminalSessions([]);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [activeRunId, apiBaseUrl, currentRoute, state?.connection]);
+
+  useEffect(() => {
+    if (!activeRunId) {
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | undefined;
+
+    const pollAgentActivity = async () => {
+      try {
+        const runtimeClient = createRuntimeClient(apiBaseUrl);
+        const jobs = await runtimeClient.listAgentJobs(activeRunId);
+        if (disposed) {
+          return;
+        }
+
+        const currentOutput = state?.agentOutput ?? [];
+        const outputByJob = await Promise.all(
+          jobs.map(async (job) => {
+            const afterSequence = currentOutput
+              .filter((event) => event.jobId === job.id)
+              .reduce((latest, event) => Math.max(latest, event.sequence), 0);
+            return runtimeClient.listAgentOutput(activeRunId, job.id, afterSequence);
+          }),
+        );
+        if (disposed) {
+          return;
+        }
+
+        const incomingOutput = outputByJob.flat();
+        setState((current) => {
+          if (current?.projection?.runId !== activeRunId) {
+            return current;
+          }
+          return {
+            ...current,
+            agentJobs: jobs,
+            agentOutput: mergeAgentOutput(current.agentOutput, incomingOutput),
+          };
+        });
+
+        if (jobs.some((job) => job.status === "QUEUED" || job.status === "RUNNING")) {
+          timer = window.setTimeout(() => void pollAgentActivity(), 1_500);
+        }
+      } catch {
+        // 轮询失败不会伪造任务完成；用户可继续查看上一次可信输出。
+      }
+    };
+
+    void pollAgentActivity();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [activeRunId, agentJobSignature, apiBaseUrl]);
+
+  useEffect(() => {
+    if (!activeRunId || state?.connection !== "connected") {
+      setDeployments([]);
+      setDeploymentOutput([]);
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | undefined;
+
+    const pollDeploymentActivity = async () => {
+      try {
+        const runtimeClient = createRuntimeClient(apiBaseUrl);
+        const items = await runtimeClient.listDeployments(activeRunId);
+        const output = (
+          await Promise.all(
+            items.map((deployment) => runtimeClient.listDeploymentOutput(activeRunId, deployment.id)),
+          )
+        ).flat();
+        if (disposed) {
+          return;
+        }
+        setDeployments(items);
+        setDeploymentOutput(output);
+        if (items.some((deployment) => deployment.status === "QUEUED" || deployment.status === "RUNNING")) {
+          timer = window.setTimeout(() => void pollDeploymentActivity(), 1_500);
+        } else if (deployments.some((deployment) => deployment.status === "QUEUED" || deployment.status === "RUNNING")) {
+          await refreshRun(activeRunId);
+          await refreshRuns();
+        }
+      } catch {
+        // 部署轮询失败时保持上一次可信会话与输出，避免伪造完成结果。
+      }
+    };
+
+    void pollDeploymentActivity();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [activeRunId, apiBaseUrl, deploymentSignature, state?.connection]);
+
+  useEffect(() => {
     const syncRoute = () => {
       const route = normalizeRoute(window.location.hash);
       if (window.location.hash !== routeHash(route)) {
@@ -67,9 +385,39 @@ export function App() {
 
   const connectionText =
     state?.connection === "connected" ? "连接状态：已连接" : "连接状态：不可用";
-  const runStatus = state?.projection.status ?? "正在加载";
+  const runStatus = state?.projection?.status ?? "尚未创建 Run";
   const client = createRuntimeClient(apiBaseUrl);
   const now = () => new Date().toISOString();
+
+  useEffect(() => {
+    if (state?.connection !== "connected" || currentRoute !== "knowledge") {
+      return;
+    }
+    void refreshKnowledge();
+  }, [apiBaseUrl, currentRoute, state?.connection]);
+
+  const hasActiveKnowledgeSynthesis = knowledgeSyntheses.some(
+    (synthesis) => synthesis.status === "QUEUED" || synthesis.status === "RUNNING",
+  );
+
+  useEffect(() => {
+    if (
+      state?.connection !== "connected" ||
+      currentRoute !== "knowledge" ||
+      !hasActiveKnowledgeSynthesis
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => void refreshKnowledge(), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [apiBaseUrl, currentRoute, hasActiveKnowledgeSynthesis, state?.connection]);
+
+  useEffect(() => {
+    if (state?.connection !== "connected" || currentRoute !== "audit") {
+      return;
+    }
+    void refreshAuditRecords("");
+  }, [apiBaseUrl, currentRoute, state?.connection]);
 
   async function refreshRun(runId: string) {
     const [projection, timeline, artifacts, approvals, gates, agentJobs] = await Promise.all([
@@ -82,6 +430,7 @@ export function App() {
     ]);
     setState((current) => ({
       connection: "connected",
+      workspaceStatus: "ready",
       projectName: current?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "未命名项目",
       workflowName: current?.workflowName ?? workflowVersionId,
       projection,
@@ -90,54 +439,248 @@ export function App() {
       approvals,
       gates,
       agentJobs,
-      agentOutput: current?.agentOutput ?? [],
+      agentOutput: current?.projection?.runId === runId ? current.agentOutput : [],
     }));
+  }
+
+  async function refreshRuns() {
+    if (!workflowVersionId) {
+      setRuns([]);
+      return;
+    }
+    setRuns(await createRuntimeClient(apiBaseUrl).listRunsForWorkflowVersion(workflowVersionId));
   }
 
   async function handleImportProject() {
     try {
       await client.health();
       const imported = await client.importProject(projectPath, now());
+      setProjectId(imported.projectId);
       setWorkflowVersionId(imported.workflowVersionId);
+      setRuns([]);
+      const projectName = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? imported.projectId;
+      const workflowName = imported.workflowName ?? imported.workflowId ?? imported.workflowVersionId;
       setState((current) => ({
         ...(current ?? fallbackState()),
         connection: "connected",
-        projectName: projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? imported.projectId,
-        workflowName: imported.workflowName ?? imported.workflowId ?? imported.workflowVersionId,
+        workspaceStatus: "ready",
+        projectName,
+        workflowName,
       }));
-      setOperationMessage(`导入完成：${imported.workflowName ?? imported.workflowVersionId}`);
+      saveWorkspaceSession({
+        apiBaseUrl,
+        projectPath,
+        projectId: imported.projectId,
+        workflowVersionId: imported.workflowVersionId,
+        projectName,
+        workflowName,
+        runId: null,
+      });
+      setOperationMessage(`导入完成：${workflowName}`);
+      void refreshGitWorkspace();
     } catch (error) {
       setOperationMessage(`导入失败：${errorMessage(error)}`);
     }
   }
 
-  async function handleCreateRun() {
+  async function refreshGitWorkspace() {
+    const git = desktopGitApi();
+    if (!git || !projectPath.trim()) {
+      setGitWorkspaceStatus(null);
+      setGitWorktrees([]);
+      return;
+    }
+    try {
+      const [status, worktrees] = await Promise.all([
+        git.status(projectPath),
+        git.listWorktrees(projectPath),
+      ]);
+      setGitWorkspaceStatus(status);
+      setGitWorktrees(worktrees);
+    } catch (error) {
+      setGitWorkspaceStatus(null);
+      setGitWorktrees([]);
+      setOperationMessage(`读取 Git 工作区失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCreateGitWorktree(branch: string) {
+    const git = desktopGitApi();
+    if (!git) {
+      return;
+    }
+    try {
+      await git.createWorktree(projectPath, branch);
+      await refreshGitWorkspace();
+      setOperationMessage(`Git Worktree 已创建：${branch}`);
+    } catch (error) {
+      setOperationMessage(`创建 Git Worktree 失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleRemoveGitWorktree(worktreePath: string) {
+    const git = desktopGitApi();
+    if (!git) {
+      return;
+    }
+    try {
+      await git.removeWorktree(projectPath, worktreePath);
+      await refreshGitWorkspace();
+      setOperationMessage("Git Worktree 已清理。");
+    } catch (error) {
+      setOperationMessage(`清理 Git Worktree 失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleMergeGitWorktree(branch: string) {
+    const git = desktopGitApi();
+    if (!git) {
+      return;
+    }
+    try {
+      await git.mergeBack(projectPath, branch);
+      await refreshGitWorkspace();
+      setOperationMessage(`已快进合并分支：${branch}`);
+    } catch (error) {
+      setOperationMessage(`合并分支失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handlePushGitBranch() {
+    const git = desktopGitApi();
+    if (!git) {
+      return;
+    }
+    try {
+      await git.push(projectPath);
+      await refreshGitWorkspace();
+      setOperationMessage("Git 分支已推送。");
+    } catch (error) {
+      setOperationMessage(`推送 Git 分支失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCheckRuntimeConnection() {
+    const workbenchState = await loadWorkbenchState(apiBaseUrl);
+    setState(workbenchState);
+    setOperationMessage(
+      workbenchState.connection === "connected" ? "Runtime 已连接" : "Runtime API 不可用",
+    );
+  }
+
+  async function refreshManagedRuntimeDiagnostics() {
+    const desktopRuntime = getDesktopRuntimeBridge();
+    if (!desktopRuntime) {
+      return;
+    }
+    try {
+      const [status, logs] = await Promise.all([
+        desktopRuntime.status(),
+        desktopRuntime.logs(),
+      ]);
+      setManagedRuntime(status);
+      setRuntimeLogs(logs);
+    } catch {
+      // IPC 诊断不可用时保留浏览器/外部 Runtime 的使用方式。
+    }
+  }
+
+  async function refreshProviderDiagnostics() {
+    if (state?.connection !== "connected") {
+      setProviderDiagnostics(undefined);
+      setOperationMessage("Runtime 未连接，无法检测 CLI。");
+      return;
+    }
+    try {
+      const diagnostics = await createRuntimeClient(apiBaseUrl).listAgentProviders();
+      setProviderDiagnostics(Array.isArray(diagnostics) ? diagnostics : []);
+      setOperationMessage("CLI 可用性诊断已更新。");
+    } catch (error) {
+      setProviderDiagnostics([]);
+      setOperationMessage(`CLI 可用性诊断失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleRestartManagedRuntime() {
+    const desktopRuntime = getDesktopRuntimeBridge();
+    if (!desktopRuntime) {
+      return;
+    }
+    try {
+      const status = await desktopRuntime.restart();
+      const logs = await desktopRuntime.logs();
+      setManagedRuntime(status);
+      setRuntimeLogs(logs);
+      handleApiBaseUrlChange(status.url);
+      const workbenchState = await loadWorkbenchState(status.url);
+      setState(workbenchState);
+      setOperationMessage(
+        workbenchState.connection === "connected"
+          ? "Runtime 已重启并连接"
+          : "Runtime 重启后仍不可用，请查看诊断日志",
+      );
+    } catch (error) {
+      setOperationMessage(`Runtime 重启失败：${errorMessage(error)}`);
+      await refreshManagedRuntimeDiagnostics();
+    }
+  }
+
+  function handleApiBaseUrlChange(value: string) {
+    setApiBaseUrl(value);
+    saveWorkspaceSession({
+      ...loadWorkspaceSession(),
+      apiBaseUrl: value,
+    });
+  }
+
+  async function handleCreateRun(title: string, configuration: RunConfiguration) {
     try {
       const projection = await client.createRun(
         workflowVersionId,
-        `中文交互 Run ${now()}`,
+        title,
         now(),
+        configuration,
       );
-      setState((current) => ({
-        connection: "connected",
-        projectName: current?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "未命名项目",
-        workflowName: current?.workflowName ?? workflowVersionId,
-        projection,
-        timeline: [],
-        artifacts: [],
-        approvals: [],
-        gates: [],
-        agentJobs: [],
-        agentOutput: [],
-      }));
+      await refreshRun(projection.runId);
+      await refreshRuns();
+      saveWorkspaceSession({
+        apiBaseUrl,
+        projectPath,
+        projectId,
+        workflowVersionId,
+        projectName: state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "未命名项目",
+        workflowName: state?.workflowName ?? workflowVersionId,
+        runId: projection.runId,
+      });
       setOperationMessage(`Run 已创建：${projection.runId}`);
     } catch (error) {
       setOperationMessage(`创建 Run 失败：${errorMessage(error)}`);
     }
   }
 
+  async function handleSelectRun(runId: string) {
+    if (!runId || runId === state?.projection?.runId) {
+      return;
+    }
+    try {
+      await refreshRun(runId);
+      saveWorkspaceSession({
+        apiBaseUrl,
+        projectPath,
+        projectId,
+        workflowVersionId,
+        projectName: state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "未命名项目",
+        workflowName: state?.workflowName ?? workflowVersionId,
+        runId,
+      });
+      setOperationMessage(`已切换到 Run：${runId}`);
+    } catch (error) {
+      setOperationMessage(`切换 Run 失败：${errorMessage(error)}`);
+    }
+  }
+
   async function updateProjection(
-    action: (runId: string, revision: string, timestamp: string) => Promise<RuntimeWorkbenchState["projection"]>,
+    action: (runId: string, revision: string, timestamp: string) => Promise<NonNullable<RuntimeWorkbenchState["projection"]>>,
     successMessage: string,
   ) {
     const projection = state?.projection;
@@ -148,13 +691,18 @@ export function App() {
       const nextProjection = await action(projection.runId, projection.revision, now());
       setState((current) => (current ? { ...current, projection: nextProjection } : current));
       await refreshRun(nextProjection.runId);
+      await refreshRuns();
       setOperationMessage(successMessage);
     } catch (error) {
       setOperationMessage(`操作失败：${errorMessage(error)}`);
     }
   }
 
-  async function handleStartAgent() {
+  async function handleStartAgent(
+    selectedNodeId: string,
+    provider: AgentJobSummary["provider"],
+    prompt: string,
+  ) {
     const projection = state?.projection;
     if (!projection) {
       return;
@@ -162,18 +710,17 @@ export function App() {
     try {
       const job = await client.startAgentJob(
         projection.runId,
-        nodeId,
-        agentProvider,
-        agentPrompt,
+        selectedNodeId,
+        provider,
+        prompt,
         now(),
       );
-      setLastAgentJobId(job.id);
       const output = await client.listAgentOutput(projection.runId, job.id, 0).catch(() => []);
       setState((current) =>
         current
           ? {
               ...current,
-              agentJobs: [job],
+              agentJobs: [...current.agentJobs.filter((candidate) => candidate.id !== job.id), job],
               agentOutput: output,
             }
           : current,
@@ -184,13 +731,13 @@ export function App() {
     }
   }
 
-  async function handleCancelAgent() {
-    const runId = state?.projection.runId;
-    if (!runId || !lastAgentJobId) {
+  async function handleCancelAgent(jobId: string) {
+    const runId = state?.projection?.runId;
+    if (!runId) {
       return;
     }
     try {
-      const job = await client.cancelAgentJob(runId, lastAgentJobId);
+      const job = await client.cancelAgentJob(runId, jobId);
       setState((current) =>
         current
           ? {
@@ -207,14 +754,490 @@ export function App() {
     }
   }
 
+  async function handleStartDeployment(nodeId: string) {
+    const projection = state?.projection;
+    if (!projection) {
+      return;
+    }
+    try {
+      const deployment = await client.startDeployment(
+        projection.runId,
+        nodeId,
+        projection.revision,
+        now(),
+      );
+      setDeployments((current) => [
+        deployment,
+        ...current.filter((candidate) => candidate.id !== deployment.id),
+      ]);
+      setDeploymentOutput([]);
+      await refreshRun(projection.runId);
+      setOperationMessage(`部署已启动：${deployment.id}`);
+    } catch (error) {
+      setOperationMessage(`启动部署失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCancelDeployment(deploymentId: string) {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const deployment = await client.cancelDeployment(runId, deploymentId, now());
+      setDeployments((current) =>
+        current.map((candidate) => (candidate.id === deployment.id ? { ...candidate, ...deployment } : candidate)),
+      );
+      setOperationMessage(`部署取消请求已提交：${deployment.id}`);
+    } catch (error) {
+      setOperationMessage(`取消部署失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function refreshKnowledge() {
+    try {
+      const [candidates, documents, syntheses] = await Promise.all([
+        createRuntimeClient(apiBaseUrl).listKnowledgeCandidates(),
+        createRuntimeClient(apiBaseUrl).listKnowledgeDocuments(),
+        createRuntimeClient(apiBaseUrl).listKnowledgeSyntheses(),
+      ]);
+      const synthesisOutput = (
+        await Promise.all(
+          syntheses.map((synthesis) =>
+            createRuntimeClient(apiBaseUrl).listKnowledgeSynthesisOutput(synthesis.id),
+          ),
+        )
+      ).flat();
+      setKnowledgeCandidates(candidates);
+      setKnowledgeDocuments(documents);
+      setKnowledgeSyntheses(syntheses);
+      setKnowledgeSynthesisOutput(synthesisOutput);
+    } catch (error) {
+      setOperationMessage(`读取知识库失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCreateKnowledgeCandidate(title: string, content: string, source: string) {
+    try {
+      await createRuntimeClient(apiBaseUrl).createKnowledgeCandidate(title, content, source, now());
+      await refreshKnowledge();
+      setOperationMessage("知识候选已创建，等待人工审核");
+    } catch (error) {
+      setOperationMessage(`创建知识候选失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleReviewKnowledgeCandidate(
+    candidateId: string,
+    decision: "approved" | "rejected",
+  ) {
+    try {
+      await createRuntimeClient(apiBaseUrl).reviewKnowledgeCandidate(
+        candidateId,
+        decision,
+        decision === "approved" ? "人工审核通过" : "人工审核拒绝",
+        now(),
+      );
+      await refreshKnowledge();
+      setOperationMessage(decision === "approved" ? "知识候选已批准" : "知识候选已拒绝");
+    } catch (error) {
+      setOperationMessage(`审核知识候选失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handlePublishKnowledgeCandidate(candidateId: string) {
+    try {
+      await createRuntimeClient(apiBaseUrl).publishKnowledgeCandidate(candidateId, now());
+      await refreshKnowledge();
+      setOperationMessage("知识已发布并写入审计记录");
+    } catch (error) {
+      setOperationMessage(`发布知识失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleStartKnowledgeSynthesis(
+    candidateId: string,
+    provider: KnowledgeSynthesis["provider"],
+  ) {
+    try {
+      await createRuntimeClient(apiBaseUrl).startKnowledgeSynthesis(candidateId, provider, now());
+      await refreshKnowledge();
+      setOperationMessage("知识 CLI 合成已开始，将在完成后显示差异稿。");
+    } catch (error) {
+      setOperationMessage(`启动知识 CLI 合成失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleRecordKnowledgeSynthesisFeedback(synthesisId: string, feedback: string) {
+    try {
+      await createRuntimeClient(apiBaseUrl).recordKnowledgeSynthesisFeedback(synthesisId, feedback, now());
+      await refreshKnowledge();
+      setOperationMessage("知识合成反馈已保存。");
+    } catch (error) {
+      setOperationMessage(`保存知识合成反馈失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handlePublishKnowledgeSynthesis(synthesisId: string) {
+    try {
+      await createRuntimeClient(apiBaseUrl).publishKnowledgeSynthesis(synthesisId, now());
+      await refreshKnowledge();
+      setOperationMessage("知识合成稿已发布并写入审计记录。");
+    } catch (error) {
+      setOperationMessage(`发布知识合成稿失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleReplayKnowledgeDocument(documentId: string) {
+    try {
+      const replay = await createRuntimeClient(apiBaseUrl).replayKnowledgeDocument(documentId);
+      setKnowledgeReplay(replay);
+      setOperationMessage("知识发布记录已回放。");
+    } catch (error) {
+      setKnowledgeReplay(null);
+      setOperationMessage(`回放知识发布记录失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function exportKnowledgeDocument(documentId: string): Promise<KnowledgeDocumentExport> {
+    return createRuntimeClient(apiBaseUrl).exportKnowledgeDocument(documentId);
+  }
+
+  async function handlePreviewKnowledgeGit(documentId: string) {
+    const git = desktopGitApi();
+    const document = knowledgeDocuments.find((candidate) => candidate.id === documentId);
+    if (!git || !projectPath.trim() || !document) {
+      setOperationMessage("当前项目未启用 Electron Git 工作区，无法预览知识变更。");
+      return;
+    }
+    try {
+      const exported = await exportKnowledgeDocument(documentId);
+      const preview = await git.previewKnowledgeDocument(projectPath, documentId, exported.content);
+      setKnowledgeGitPreview({ documentId, title: document.title, ...preview });
+      setOperationMessage(`已生成知识 Git 变更预览：${preview.relativePath}`);
+    } catch (error) {
+      setKnowledgeGitPreview(null);
+      setOperationMessage(`预览知识 Git 变更失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handlePublishKnowledgeGit(documentId: string) {
+    const git = desktopGitApi();
+    const document = knowledgeDocuments.find((candidate) => candidate.id === documentId);
+    if (!git || !projectPath.trim() || !document) {
+      setOperationMessage("当前项目未启用 Electron Git 工作区，无法提交知识。");
+      return;
+    }
+    setPublishingKnowledgeDocumentId(documentId);
+    try {
+      const exported = await exportKnowledgeDocument(documentId);
+      const published = await git.publishKnowledgeDocument(projectPath, documentId, exported.content);
+      await client.recordKnowledgeGitPublication(
+        documentId,
+        published.branch,
+        published.relativePath,
+        published.commitHash,
+        now(),
+      );
+      setKnowledgeGitPreview({
+        documentId,
+        title: document.title,
+        relativePath: published.relativePath,
+        previousContent: knowledgeGitPreview?.documentId === documentId
+          ? knowledgeGitPreview.previousContent
+          : "",
+        nextContent: exported.content,
+      });
+      await refreshKnowledge();
+      await refreshGitWorkspace();
+      setOperationMessage(
+        `知识已提交并推送到 ${published.branch}：${published.relativePath}（${published.commitHash}）`,
+      );
+    } catch (error) {
+      setOperationMessage(`提交并推送知识失败：${errorMessage(error)}`);
+    } finally {
+      setPublishingKnowledgeDocumentId(null);
+    }
+  }
+
+  async function refreshAuditRecords(action: string) {
+    try {
+      setAuditRecords(
+        await createRuntimeClient(apiBaseUrl).listAuditRecords(action ? { action } : {}),
+      );
+    } catch (error) {
+      setOperationMessage(`读取审计记录失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleRebuildProjection() {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      await client.rebuildProjection(runId, now());
+      await refreshRun(runId);
+      setOperationMessage(`投影已重建：${runId}`);
+    } catch (error) {
+      setOperationMessage(`投影重建失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCleanupOrphanAgentJobs() {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const result = await client.cleanupOrphanAgentJobs(runId, now());
+      await refreshRun(runId);
+      const diagnostics = await client.getRecoveryDiagnostics(runId);
+      setRecoveryDiagnostics(diagnostics);
+      setOperationMessage(`已清理遗留 Agent：${result.cleanedJobIds.length} 个`);
+    } catch (error) {
+      setOperationMessage(`清理遗留 Agent 失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCleanupOrphanTerminalSessions() {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const result = await client.cleanupOrphanTerminalSessions(runId, now());
+      await refreshRun(runId);
+      const diagnostics = await client.getRecoveryDiagnostics(runId);
+      setRecoveryDiagnostics(diagnostics);
+      setOperationMessage(`已清理遗留终端：${result.cleanedSessionIds.length} 个`);
+    } catch (error) {
+      setOperationMessage(`清理遗留终端失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleResumeAgentCheckpoint(checkpointId: string) {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const job = await client.resumeAgentCheckpoint(runId, checkpointId, now());
+      await refreshRun(runId);
+      setRecoveryDiagnostics(await client.getRecoveryDiagnostics(runId));
+      setOperationMessage(`已从 checkpoint 恢复 Agent：${job.id}`);
+    } catch (error) {
+      setOperationMessage(`恢复 Agent checkpoint 失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleDiscardAgentCheckpoint(checkpointId: string) {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      await client.discardAgentCheckpoint(runId, checkpointId, now());
+      setRecoveryDiagnostics(await client.getRecoveryDiagnostics(runId));
+      setOperationMessage(`已放弃 Agent checkpoint：${checkpointId}`);
+    } catch (error) {
+      setOperationMessage(`放弃 Agent checkpoint 失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handlePreviewArtifact(artifactId: string) {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(runId, artifactId);
+      setArtifactPreview(preview);
+      setOperationMessage(
+        preview.integrity === "changed" ? "产物内容已变更，请重新审核。" : "产物预览已加载。",
+      );
+    } catch (error) {
+      setOperationMessage(`读取产物预览失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCompareArtifacts(beforeArtifactId: string, afterArtifactId: string) {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const [before, after] = await Promise.all([
+        createRuntimeClient(apiBaseUrl).previewArtifact(runId, beforeArtifactId),
+        createRuntimeClient(apiBaseUrl).previewArtifact(runId, afterArtifactId),
+      ]);
+      if (before.integrity !== "verified" || after.integrity !== "verified") {
+        throw new Error("产物内容已变更，不能生成可信差异");
+      }
+      if (before.truncated || after.truncated) {
+        throw new Error("产物预览已截断，不能生成完整差异");
+      }
+      if (before.content === null || after.content === null) {
+        throw new Error("二进制产物不支持文本差异比较");
+      }
+      setArtifactComparison({
+        before: { id: before.id, content: before.content },
+        after: { id: after.id, content: after.content },
+      });
+      setOperationMessage("产物文本差异已加载。");
+    } catch (error) {
+      setArtifactComparison(null);
+      setOperationMessage(`比较产物失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleDownloadEvidencePackage() {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const evidencePackage = await createRuntimeClient(apiBaseUrl).getEvidencePackage(runId);
+      downloadTextFile(
+        `${runId}-evidence-package.json`,
+        JSON.stringify(evidencePackage, null, 2),
+        "application/json",
+      );
+      setOperationMessage("证据包已下载。");
+    } catch (error) {
+      setOperationMessage(`下载证据包失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleDownloadRunReport() {
+    const runId = state?.projection?.runId;
+    if (!runId) {
+      return;
+    }
+    try {
+      const report = await createRuntimeClient(apiBaseUrl).getRunReport(runId);
+      downloadTextFile(report.fileName, report.content, report.mediaType);
+      setOperationMessage("运行报告已下载。");
+    } catch (error) {
+      setOperationMessage(`下载运行报告失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleDownloadDiagnostics() {
+    try {
+      const bundle = await createRuntimeClient(apiBaseUrl).getDiagnosticSupportBundle();
+      downloadTextFile(bundle.fileName, bundle.content, bundle.mediaType);
+      setOperationMessage("诊断支持包已下载。");
+    } catch (error) {
+      setOperationMessage(`下载诊断支持包失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleSaveWorkflowDefinition(definition: WorkflowDefinitionSummary) {
+    if (!workflowVersionId) {
+      return;
+    }
+    try {
+      const saved = await client.saveWorkflowVersion(workflowVersionId, definition, now());
+      setWorkflowVersionId(saved.workflowVersionId);
+      setWorkflowDefinition(saved.definition);
+      setCompiledWorkflow(saved.compiled);
+      setWorkflowSimulation(null);
+      setWorkflowDiff(null);
+      saveWorkspaceSession({
+        ...loadWorkspaceSession(),
+        apiBaseUrl,
+        projectPath,
+        projectId,
+        workflowVersionId: saved.workflowVersionId,
+        projectName: state?.projectName ?? "",
+        workflowName: saved.definition.name,
+      });
+      setOperationMessage(`工作流新版本已保存：${saved.definition.version}`);
+    } catch (error) {
+      setOperationMessage(`保存工作流版本失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleSimulateWorkflowDefinition() {
+    if (!workflowVersionId) {
+      return;
+    }
+    try {
+      const simulation = await client.simulateWorkflowDefinition(workflowVersionId);
+      setWorkflowSimulation(simulation);
+      setOperationMessage(
+        simulation.status === "ready" ? "工作流模拟完成，可创建 Run。" : "工作流模拟发现阻塞项。",
+      );
+    } catch (error) {
+      setOperationMessage(`模拟工作流版本失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCompareWorkflowVersion(againstWorkflowVersionId: string) {
+    if (!workflowVersionId) {
+      return;
+    }
+    try {
+      const diff = await client.diffWorkflowVersions(workflowVersionId, againstWorkflowVersionId);
+      setWorkflowDiff(diff);
+      setOperationMessage("工作流版本差异已加载。");
+    } catch (error) {
+      setOperationMessage(`读取工作流版本差异失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleExportWorkflowVersion(format: WorkflowExportFormat) {
+    if (!workflowVersionId) {
+      return;
+    }
+    try {
+      const exported = await client.exportWorkflowVersion(workflowVersionId, format);
+      downloadTextFile(exported.fileName, exported.content, exported.mediaType);
+      setOperationMessage(`工作流已导出：${exported.fileName}`);
+    } catch (error) {
+      setOperationMessage(`导出工作流失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleArchiveProject() {
+    if (!projectId) {
+      setOperationMessage("当前项目缺少归档标识，请重新导入后再试。");
+      return;
+    }
+    try {
+      await client.archiveProject(projectId, now());
+      setOperationMessage("项目已归档；重新导入同一路径即可恢复为活动状态。");
+    } catch (error) {
+      setOperationMessage(`归档项目失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleApprovalDecision(
+    nodeId: string,
+    decision: "approved" | "rejected" | "deferred",
+    comment: string,
+  ) {
+    const messageByDecision = {
+      approved: "审批已批准",
+      rejected: "审批已拒绝",
+      deferred: "审批已暂缓",
+    };
+    await updateProjection(
+      (runId, revision, timestamp) =>
+        client.decideApproval(runId, nodeId, decision, comment, revision, timestamp),
+      `${messageByDecision[decision]}：${nodeId}`,
+    );
+  }
+
   return (
     <div className="app-shell">
       <Navigation currentRoute={currentRoute} />
       <main className="workbench" aria-labelledby="app-title">
         <header className="workbench-header">
           <div>
-            <p className="section-kicker">Renderer UI MVP</p>
-            <h1 id="app-title">Renderer UI MVP 工作台</h1>
+            <p className="section-kicker">AI WORKFLOW PLATFORM</p>
+            <h1 id="app-title">AI Workflow 工作台</h1>
           </div>
           <div className="run-summary" aria-label="当前运行摘要">
             <span>当前 Run 状态</span>
@@ -222,118 +1245,284 @@ export function App() {
             <span>{connectionText}</span>
           </div>
         </header>
-        {currentRoute === "runs" ? (
-          <section className="panel panel-wide" aria-labelledby="operations-title">
-          <div className="panel-heading">
-            <div>
-              <p className="section-kicker">Operations</p>
-              <h2 id="operations-title">交互式 Runtime 操作</h2>
-            </div>
-            <span className="status-pill">{operationMessage}</span>
-          </div>
-          <div className="form-grid">
-            <label>
-              Runtime API 地址
-              <input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} />
-            </label>
-            <label>
-              项目路径
-              <input value={projectPath} onChange={(event) => setProjectPath(event.target.value)} />
-            </label>
-            <label>
-              Artifact 路径
-              <input value={artifactPath} onChange={(event) => setArtifactPath(event.target.value)} />
-            </label>
-            <label>
-              节点 ID
-              <input value={nodeId} onChange={(event) => setNodeId(event.target.value)} />
-            </label>
-            <label>
-              Agent Provider
-              <select
-                value={agentProvider}
-                onChange={(event) => setAgentProvider(event.target.value as AgentJobSummary["provider"])}
-              >
-                <option value="fake">fake</option>
-                <option value="codex">codex</option>
-                <option value="claude">claude</option>
-              </select>
-            </label>
-            <label className="form-wide">
-              Agent 提示词
-              <textarea value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} />
-            </label>
-          </div>
-          <div className="button-row">
-            <button className="quiet-button" onClick={handleImportProject}>
-              导入项目
-            </button>
-            <button className="quiet-button" disabled={!workflowVersionId} onClick={handleCreateRun}>
-              创建 Run
-            </button>
-            <button className="quiet-button" disabled={!state?.projection} onClick={handleStartAgent}>
-              启动 Agent
-            </button>
-            <button className="quiet-button" disabled={!lastAgentJobId} onClick={handleCancelAgent}>
-              取消 Agent
-            </button>
-          </div>
-          <ul className="compact-list" aria-label="Agent 输出">
-            {(state?.agentOutput ?? []).map((event) => (
-              <li key={event.id}>{formatAgentPayload(event.payload)}</li>
-            ))}
-          </ul>
-          </section>
-        ) : null}
         <div className="content-grid">
-          {currentRoute === "projects" ? <ProjectDashboard state={state} /> : null}
+          {currentRoute === "projects" ? (
+            <ProjectDashboard
+              state={state}
+              projectPath={projectPath}
+              onProjectPathChange={setProjectPath}
+              onImport={handleImportProject}
+              onArchive={projectId ? handleArchiveProject : undefined}
+              operationMessage={operationMessage}
+              gitPanel={
+                desktopGitApi() ? (
+                  <GitWorkspacePanel
+                    projectPath={projectPath}
+                    status={gitWorkspaceStatus}
+                    worktrees={gitWorktrees}
+                    onRefresh={() => void refreshGitWorkspace()}
+                    onCreateWorktree={(branch) => void handleCreateGitWorktree(branch)}
+                    onRemoveWorktree={(worktreePath) => void handleRemoveGitWorktree(worktreePath)}
+                    onMergeBack={(branch) => void handleMergeGitWorktree(branch)}
+                    onPush={() => void handlePushGitBranch()}
+                  />
+                ) : null
+              }
+            />
+          ) : null}
           {currentRoute === "runs" ? (
             <RunDashboard
-            state={state}
-            onStartNode={() =>
-              updateProjection(
-                (runId, revision, timestamp) => client.startNode(runId, nodeId, revision, timestamp),
-                `节点已启动：${nodeId}`,
-              )
-            }
-            onSubmitArtifact={() =>
+              state={state}
+              runs={runs}
+              activeRunId={activeRunId}
+              onSelectRun={handleSelectRun}
+              onCreateRun={handleCreateRun}
+            onStartNode={(selectedNodeId) =>
               updateProjection(
                 (runId, revision, timestamp) =>
-                  client.submitArtifact(runId, nodeId, artifactPath, "plan", revision, timestamp),
-                `Artifact 已提交：${nodeId}`,
+                  client.startNode(runId, selectedNodeId, revision, timestamp),
+                `节点已启动：${selectedNodeId}`,
               )
             }
-            onApprove={() =>
+            onSubmitArtifact={(selectedNodeId, selectedArtifactPath) =>
               updateProjection(
                 (runId, revision, timestamp) =>
-                  client.decideApproval(runId, nodeId, "approved", "中文审批", revision, timestamp),
-                `审批已通过：${nodeId}`,
+                  client.submitArtifact(
+                    runId,
+                    selectedNodeId,
+                    selectedArtifactPath,
+                    "plan",
+                    revision,
+                    timestamp,
+                  ),
+                `Artifact 已提交：${selectedNodeId}`,
               )
             }
-            onPassGate={() =>
+            onApprove={(selectedNodeId) =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.decideApproval(
+                    runId,
+                    selectedNodeId,
+                    "approved",
+                    "中文审批",
+                    revision,
+                    timestamp,
+                  ),
+                `审批已通过：${selectedNodeId}`,
+              )
+            }
+            onPassGate={(selectedNodeId, selectedArtifactPath) =>
               updateProjection(
                 (runId, revision, timestamp) =>
                   client.submitGate(
                     runId,
-                    nodeId,
+                    selectedNodeId,
                     "plan-ready",
                     "passed",
-                    [`file://${artifactPath}`],
+                    [`file://${selectedArtifactPath}`],
+                    null,
                     revision,
                     timestamp,
                   ),
-                `Gate 已通过：${nodeId}`,
+                `Gate 已通过：${selectedNodeId}`,
               )
             }
+            onWaiveGate={(selectedNodeId, waiverReason) =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.submitGate(
+                    runId,
+                    selectedNodeId,
+                    "plan-ready",
+                    "waived",
+                    [],
+                    waiverReason,
+                    revision,
+                    timestamp,
+                  ),
+                `Gate 已豁免：${selectedNodeId}`,
+              )
+            }
+            onPauseRun={() =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.controlRun(runId, "RUN_PAUSED", revision, timestamp),
+                "Run 已暂停。",
+              )
+            }
+            onResumeRun={() =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.controlRun(runId, "RUN_RESUMED", revision, timestamp),
+                "Run 已恢复。",
+              )
+            }
+            onArchiveRun={() =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.controlRun(runId, "RUN_ARCHIVED", revision, timestamp),
+                "Run 已归档。",
+              )
+            }
+            onStartAgent={handleStartAgent}
+            onCancelAgent={handleCancelAgent}
+            deployments={deployments}
+            deploymentOutput={deploymentOutput}
+            onStartDeployment={handleStartDeployment}
+            onCancelDeployment={handleCancelDeployment}
+            operationMessage={operationMessage}
+            providerDiagnostics={providerDiagnostics}
             />
           ) : null}
-          {currentRoute === "workflow" ? <WorkflowViewer /> : null}
-          {currentRoute === "terminal" ? <TerminalPage /> : null}
-          {currentRoute === "gates" ? <GatesPage state={state} /> : null}
-          {currentRoute === "artifacts" ? <ArtifactsPage state={state} /> : null}
-          {currentRoute === "approvals" ? <ApprovalInbox state={state} /> : null}
-          {currentRoute === "recovery" ? <RecoveryPage state={state} /> : null}
-          {currentRoute === "settings" ? <SettingsPage /> : null}
+          {currentRoute === "workflow" ? (
+            <WorkflowViewer
+              state={state}
+              workflow={workflowDefinition}
+              compiled={compiledWorkflow}
+              simulation={workflowSimulation}
+              history={workflowHistory}
+              diff={workflowDiff}
+              onSaveDefinition={handleSaveWorkflowDefinition}
+              onSimulate={handleSimulateWorkflowDefinition}
+              onCompareVersion={handleCompareWorkflowVersion}
+              onExportWorkflow={handleExportWorkflowVersion}
+            />
+          ) : null}
+          {currentRoute === "terminal" ? (
+            <TerminalPage
+              runId={state?.projection?.runId ?? null}
+              projectPath={projectPath}
+              nodeId={state?.projection?.currentNodeIds[0] ?? ""}
+              historySessions={terminalSessions}
+              onRegisterSession={async ({ runId, nodeId, kind, cwd, pid }) => {
+                const registered = await client.registerTerminalSession(
+                  runId,
+                  nodeId,
+                  kind,
+                  cwd,
+                  pid,
+                  now(),
+                );
+                setTerminalSessions(await client.listTerminalSessions(runId));
+                return registered;
+              }}
+              onStopSession={async ({ runId, sessionId }) => {
+                await client.stopTerminalSession(runId, sessionId, now());
+                setTerminalSessions(await client.listTerminalSessions(runId));
+              }}
+              onAppendOutput={async ({ runId, sessionId, stream, data }) => {
+                await client.appendTerminalOutput(runId, sessionId, stream, data, now());
+              }}
+              onLoadHistoryOutput={async (sessionId): Promise<TerminalOutputEvent[]> => {
+                const runId = state?.projection?.runId;
+                return runId ? client.listTerminalOutput(runId, sessionId) : [];
+              }}
+              onExportEvidence={async ({ runId, sessionId }) => {
+                await client.exportTerminalEvidence(runId, sessionId, now());
+                const artifacts = await client.listArtifacts(runId);
+                setState((current) =>
+                  current?.projection?.runId === runId ? { ...current, artifacts } : current,
+                );
+                setOperationMessage("终端输出已转为 Evidence");
+              }}
+            />
+          ) : null}
+          {currentRoute === "gates" ? (
+            <GatesPage
+              state={state}
+              onRetryGate={(nodeId) =>
+                updateProjection(
+                  (runId, revision, timestamp) =>
+                    client.retryGate(runId, nodeId, revision, timestamp),
+                  "Gate 已进入重试复核",
+                )
+              }
+              onDownloadGateReport={handleDownloadRunReport}
+              onWaiveGate={(nodeId, gateId, waiverReason) =>
+                updateProjection(
+                  (runId, revision, timestamp) =>
+                    client.submitGate(
+                      runId,
+                      nodeId,
+                      gateId,
+                      "waived",
+                      [],
+                      waiverReason,
+                      revision,
+                      timestamp,
+                    ),
+                  `Gate 已豁免：${nodeId}`,
+                )
+              }
+            />
+          ) : null}
+          {currentRoute === "artifacts" ? (
+            <ArtifactsPage
+              state={state}
+              preview={artifactPreview}
+              onPreviewArtifact={handlePreviewArtifact}
+              comparison={artifactComparison}
+              onCompareArtifacts={handleCompareArtifacts}
+              onDownloadEvidencePackage={handleDownloadEvidencePackage}
+              onDownloadReport={handleDownloadRunReport}
+            />
+          ) : null}
+          {currentRoute === "approvals" ? (
+            <ApprovalInbox state={state} onDecide={handleApprovalDecision} />
+          ) : null}
+          {currentRoute === "knowledge" ? (
+            <KnowledgePage
+              candidates={knowledgeCandidates}
+              documents={knowledgeDocuments}
+              syntheses={knowledgeSyntheses}
+              synthesisOutput={knowledgeSynthesisOutput}
+              replay={knowledgeReplay}
+              onCreate={handleCreateKnowledgeCandidate}
+              onReview={handleReviewKnowledgeCandidate}
+              onPublish={handlePublishKnowledgeCandidate}
+              onSynthesize={handleStartKnowledgeSynthesis}
+              onFeedbackSynthesis={handleRecordKnowledgeSynthesisFeedback}
+              onPublishSynthesis={handlePublishKnowledgeSynthesis}
+              onReplay={handleReplayKnowledgeDocument}
+              gitAvailable={Boolean(desktopGitApi() && projectPath.trim())}
+              onPreviewGit={handlePreviewKnowledgeGit}
+              onPublishGit={handlePublishKnowledgeGit}
+              publishingDocumentId={publishingKnowledgeDocumentId}
+              gitPreview={knowledgeGitPreview}
+              operationMessage={operationMessage}
+            />
+          ) : null}
+          {currentRoute === "audit" ? (
+            <AuditPage records={auditRecords} onFilter={refreshAuditRecords} />
+          ) : null}
+          {currentRoute === "recovery" ? (
+            <RecoveryPage
+              state={state}
+              diagnostics={recoveryDiagnostics}
+              onRebuild={handleRebuildProjection}
+              onCleanupOrphans={handleCleanupOrphanAgentJobs}
+              onCleanupTerminalSessions={handleCleanupOrphanTerminalSessions}
+              onResumeAgentCheckpoint={handleResumeAgentCheckpoint}
+              onDiscardAgentCheckpoint={handleDiscardAgentCheckpoint}
+              operationMessage={operationMessage}
+            />
+          ) : null}
+          {currentRoute === "settings" ? (
+            <SettingsPage
+              apiBaseUrl={apiBaseUrl}
+              connection={state?.connection ?? "unavailable"}
+              onApiBaseUrlChange={handleApiBaseUrlChange}
+              onCheckConnection={handleCheckRuntimeConnection}
+              managedRuntime={managedRuntime}
+              runtimeLogs={runtimeLogs}
+              onRestartManagedRuntime={managedRuntime ? handleRestartManagedRuntime : undefined}
+              onDownloadDiagnostics={handleDownloadDiagnostics}
+              operationMessage={operationMessage}
+              providerDiagnostics={providerDiagnostics}
+              onRefreshProviderDiagnostics={refreshProviderDiagnostics}
+            />
+          ) : null}
         </div>
       </main>
     </div>
@@ -343,18 +1532,10 @@ export function App() {
 function fallbackState(): RuntimeWorkbenchState {
   return {
     connection: "unavailable",
+    workspaceStatus: "uninitialized",
     projectName: "未导入",
     workflowName: "未导入",
-    projection: {
-      runId: "",
-      status: "CREATED",
-      currentNodeIds: [],
-      nodeStates: {},
-      allowedActions: [],
-      blockingReasons: [],
-      revision: "0",
-      updatedAt: "",
-    },
+    projection: null,
     timeline: [],
     artifacts: [],
     approvals: [],
@@ -368,7 +1549,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function formatAgentPayload(payload: Record<string, unknown>): string {
-  const text = payload.text ?? payload.message ?? payload.summary ?? JSON.stringify(payload);
-  return String(text);
+function downloadTextFile(fileName: string, content: string, mediaType: string) {
+  const downloadUrl = URL.createObjectURL(
+    new Blob([content], { type: `${mediaType};charset=utf-8` }),
+  );
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = fileName;
+  link.style.display = "none";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(downloadUrl);
+}
+
+type DesktopRuntimeBridge = {
+  status(): Promise<ManagedRuntimeStatus>;
+  restart(): Promise<ManagedRuntimeStatus>;
+  logs(): Promise<RuntimeLogEntry[]>;
+};
+
+function getDesktopRuntimeBridge(): DesktopRuntimeBridge | null {
+  const candidate = (window as Window & { workflowRuntime?: DesktopRuntimeBridge }).workflowRuntime;
+  return candidate ?? null;
 }

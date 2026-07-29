@@ -28,7 +28,7 @@ def transition(
             event.nodeId,
         )
 
-    rejection = _validate_event(current_projection.nodeStates, event)
+    rejection = _validate_event(current_projection, event)
     if rejection is not None:
         code, message = rejection
         return _rejected(current_projection, code, message, event.nodeId)
@@ -65,11 +65,56 @@ def transition(
 
 
 def _validate_event(
-    node_states: dict[str, str],
+    projection,
     event: RunEvent,
 ) -> tuple[str, str] | None:
-    if event.type == "NODE_COMPLETED":
-        return ("INVALID_TRANSITION", "NODE_COMPLETED cannot be submitted externally")
+    node_states = projection.nodeStates
+    if event.type in {"NODE_COMPLETED", "NODE_FAILED"}:
+        if event.actor.type not in {"executor", "system"} or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only trusted executors or system actors can finish execution nodes")
+        if event.nodeId is None or node_states.get(event.nodeId) != "RUNNING":
+            return ("INVALID_TRANSITION", "Execution completion requires a RUNNING node")
+        return None
+
+    if event.type == "RUN_PAUSED":
+        if event.actor.type != "human" or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only trusted human actors can pause runs")
+        if projection.status not in {"CREATED", "IN_PROGRESS", "REVIEWING"}:
+            return ("INVALID_TRANSITION", "Only active runs can be paused")
+        if event.nodeId is not None:
+            return ("INVALID_TRANSITION", "Run pause does not accept a node ID")
+        return None
+
+    if event.type == "RUN_RESUMED":
+        if event.actor.type != "human" or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only trusted human actors can resume runs")
+        if projection.status != "PAUSED":
+            return ("INVALID_TRANSITION", "Only paused runs can be resumed")
+        if event.nodeId is not None:
+            return ("INVALID_TRANSITION", "Run resume does not accept a node ID")
+        return None
+
+    if event.type == "RUN_ARCHIVED":
+        if event.actor.type != "human" or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only trusted human actors can archive runs")
+        if projection.status not in {"DONE", "BLOCKED"}:
+            return ("INVALID_TRANSITION", "Only completed or blocked runs can be archived")
+        if event.nodeId is not None:
+            return ("INVALID_TRANSITION", "Run archive does not accept a node ID")
+        return None
+
+    if event.type == "NODE_RETRIED":
+        if event.actor.type not in {"verifier", "system"} or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only trusted verifier or system actors can retry gate nodes")
+        if event.nodeId is None or node_states.get(event.nodeId) != "BLOCKED":
+            return ("INVALID_TRANSITION", "Only blocked nodes can be retried")
+        return None
+
+    if projection.status == "PAUSED":
+        return ("INVALID_TRANSITION", "Paused runs must be resumed before node actions")
+
+    if projection.status == "ARCHIVED":
+        return ("INVALID_TRANSITION", "Archived runs cannot accept new events")
 
     if event.type == "NODE_STARTED":
         if event.nodeId is None or node_states.get(event.nodeId) != "READY":
@@ -83,19 +128,21 @@ def _validate_event(
             return ("MISSING_ARTIFACT", "Artifact submissions require artifactUri and artifactType")
         return None
 
-    if event.type in {"HUMAN_APPROVED", "HUMAN_REJECTED"}:
+    if event.type in {"HUMAN_APPROVED", "HUMAN_REJECTED", "HUMAN_DEFERRED"}:
         if event.actor.type != "human" or not event.actor.trusted:
             return ("PERMISSION_DENIED", "Only trusted human actors can submit approval decisions")
         if event.nodeId is None or node_states.get(event.nodeId) != "AWAITING_APPROVAL":
             return ("INVALID_TRANSITION", "Approval decisions require a node awaiting approval")
         return None
 
-    if event.type in {"GATE_PASSED", "GATE_FAILED"}:
+    if event.type in {"GATE_PASSED", "GATE_FAILED", "GATE_WAIVED"}:
         if event.actor.type not in {"verifier", "system"} or not event.actor.trusted:
             return ("PERMISSION_DENIED", "Only trusted verifier or system actors can submit gate decisions")
         if event.nodeId is None or node_states.get(event.nodeId) != "AWAITING_GATE":
             return ("INVALID_TRANSITION", "Gate decisions require a node awaiting gate verification")
-        if not event.payload.get("evidence") and not event.payload.get("waiverReason"):
+        if event.type == "GATE_WAIVED" and not str(event.payload.get("waiverReason", "")).strip():
+            return ("MISSING_EVIDENCE", "Gate waivers require a non-empty waiverReason")
+        if event.type != "GATE_WAIVED" and not event.payload.get("evidence"):
             return ("MISSING_EVIDENCE", "Gate decisions require evidence or waiverReason")
         return None
 

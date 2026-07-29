@@ -1,0 +1,395 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { RunDashboard } from "./RunDashboard";
+
+afterEach(cleanup);
+
+describe("RunDashboard", () => {
+  it("引导未初始化工作区先导入项目，而不是展示 Run 操作", () => {
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "uninitialized",
+          projectName: "未导入",
+          workflowName: "未导入",
+          projection: null,
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("请先在项目工作区导入一个项目，再创建和管理 Run。")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "前往项目工作区" })).toHaveAttribute("href", "#/projects");
+    expect(screen.queryByRole("button", { name: "启动节点" })).not.toBeInTheDocument();
+  });
+
+  it("在已导入项目但尚未创建 Run 时提供创建表单", () => {
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: null,
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("Run 名称")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建 Run" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "启动节点" })).not.toBeInTheDocument();
+  });
+
+  it("将任务目标和结构化运行参数随 Run 一起提交", () => {
+    const onCreateRun = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: null,
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        onCreateRun={onCreateRun}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Run 名称"), { target: { value: "生产发布准备" } });
+    fireEvent.change(screen.getByLabelText("任务目标"), {
+      target: { value: "验证发布流程并生成可审计报告" },
+    });
+    fireEvent.change(screen.getByLabelText("运行参数（JSON 对象）"), {
+      target: { value: "{\"dryRun\":true,\"region\":\"cn-north-1\"}" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建 Run" }));
+
+    expect(onCreateRun).toHaveBeenCalledWith("生产发布准备", {
+      taskGoal: "验证发布流程并生成可审计报告",
+      parameters: { dryRun: true, region: "cn-north-1" },
+    });
+  });
+
+  it("displays persisted Runs and switches the active Run through the supplied callback", () => {
+    const onSelectRun = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-2",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        runs={[
+          {
+            id: "run-1",
+            title: "第一个并发 Run",
+            status: "CREATED",
+            createdAt: "2026-07-28T00:00:00Z",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          {
+            id: "run-2",
+            title: "第二个并发 Run",
+            status: "IN_PROGRESS",
+            createdAt: "2026-07-28T00:01:00Z",
+            updatedAt: "2026-07-28T00:01:00Z",
+          },
+        ]}
+        activeRunId="run-2"
+        onSelectRun={onSelectRun}
+      />,
+    );
+
+    expect(screen.getByLabelText("切换 Run")).toHaveValue("run-2");
+    fireEvent.change(screen.getByLabelText("切换 Run"), { target: { value: "run-1" } });
+
+    expect(onSelectRun).toHaveBeenCalledWith("run-1");
+    expect(screen.getByText("第一个并发 Run（CREATED）")).toBeInTheDocument();
+  });
+
+  it("展示 CLI Provider 检测结果并禁用不可用的选项", () => {
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        providerDiagnostics={[
+          {
+            id: "codex",
+            executable: "codex.cmd",
+            available: true,
+            path: "C:\\Tools\\codex.cmd",
+            version: "1.0.0",
+            message: "已检测到 Codex CLI。",
+          },
+          {
+            id: "claude",
+            executable: "claude.cmd",
+            available: false,
+            path: null,
+            version: null,
+            message: "未找到 claude.cmd，请安装 Claude Code CLI 并确保其位于 PATH 中。",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByLabelText("CLI Provider 状态").textContent).toContain("已检测到 Codex CLI。");
+    expect(screen.getByLabelText("CLI Provider 状态").textContent).toContain(
+      "未找到 claude.cmd，请安装 Claude Code CLI 并确保其位于 PATH 中。",
+    );
+    expect(screen.getByRole("option", { name: "Claude Code CLI（不可用）" })).toBeDisabled();
+  });
+
+  it("要求填写理由后才能提交 Gate 豁免", () => {
+    const onWaiveGate = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-1",
+            status: "REVIEWING",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "AWAITING_GATE" },
+            allowedActions: [
+              {
+                id: "gate-waive:plan",
+                label: "Waive gate",
+                eventType: "GATE_WAIVED",
+                nodeId: "plan",
+                risk: "high",
+              },
+            ],
+            blockingReasons: [],
+            revision: "4",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        onWaiveGate={onWaiveGate}
+      />,
+    );
+
+    const waiveButton = screen.getByRole("button", { name: "豁免 Gate" });
+    expect(waiveButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("豁免理由"), {
+      target: { value: "上线窗口紧急，已获得授权" },
+    });
+    fireEvent.click(waiveButton);
+
+    expect(onWaiveGate).toHaveBeenCalledWith("plan", "上线窗口紧急，已获得授权");
+  });
+
+  it("renders Kernel-authorized Run pause and resume controls", () => {
+    const { rerender } = render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [
+              {
+                id: "run-pause",
+                label: "Pause run",
+                eventType: "RUN_PAUSED",
+                risk: "medium",
+              },
+            ],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "暂停 Run" })).toBeEnabled();
+
+    rerender(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-1",
+            status: "PAUSED",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [
+              {
+                id: "run-resume",
+                label: "Resume run",
+                eventType: "RUN_RESUMED",
+                risk: "medium",
+              },
+            ],
+            blockingReasons: [],
+            revision: "2",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "恢复 Run" })).toBeEnabled();
+  });
+
+  it("shows governed deployments with output and exposes start and cancel callbacks", () => {
+    const onStartDeployment = vi.fn();
+    const onCancelDeployment = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["deploy"],
+            nodeStates: { deploy: "READY" },
+            allowedActions: [
+              {
+                id: "start:deploy",
+                label: "Start node",
+                eventType: "NODE_STARTED",
+                nodeId: "deploy",
+                risk: "low",
+              },
+            ],
+            blockingReasons: [],
+            revision: "7",
+            updatedAt: "2026-07-28T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        deployments={[
+          {
+            id: "deployment-1",
+            runId: "run-1",
+            nodeId: "deploy",
+            command: ["npm", "run", "deploy"],
+            cwd: "G:\\Project\\demo",
+            status: "RUNNING",
+            pid: 1234,
+            summary: null,
+            error: null,
+            createdAt: "2026-07-28T00:00:00Z",
+            updatedAt: "2026-07-28T00:00:01Z",
+          },
+        ]}
+        deploymentOutput={[
+          {
+            id: "deployment-1:output:1",
+            deploymentId: "deployment-1",
+            sequence: 1,
+            data: "部署日志：正在发布\r\n",
+            createdAt: "2026-07-28T00:00:01Z",
+          },
+        ]}
+        onStartDeployment={onStartDeployment}
+        onCancelDeployment={onCancelDeployment}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("节点 ID"), { target: { value: "deploy" } });
+    fireEvent.click(screen.getByRole("button", { name: "启动部署" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消部署：deployment-1" }));
+
+    expect(onStartDeployment).toHaveBeenCalledWith("deploy");
+    expect(onCancelDeployment).toHaveBeenCalledWith("deployment-1");
+    expect(screen.getByLabelText("部署实时输出").textContent).toContain("部署日志：正在发布");
+  });
+});

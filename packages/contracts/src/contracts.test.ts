@@ -59,6 +59,8 @@ it("exports stable runtime event constants in plan order", () => {
     "NODE_FAILED",
     "NODE_RETRIED",
     "RUN_BLOCKED",
+    "RUN_PAUSED",
+    "RUN_RESUMED",
     "RUN_COMPLETED",
     "RUN_ARCHIVED",
   ]);

@@ -1,6 +1,6 @@
 from pathlib import Path
 import sys
-from threading import Thread
+from threading import Event, Thread
 import time
 
 import pytest
@@ -53,6 +53,7 @@ def test_codex_provider_uses_windows_cmd_json_output_and_workspace_sandbox() -> 
         "--json",
         "--sandbox",
         "workspace-write",
+        "--skip-git-repo-check",
         "--cd",
         str(cwd),
         "实现节点",
@@ -84,6 +85,7 @@ def test_claude_provider_uses_windows_cmd_print_mode_and_allowed_tools() -> None
         "实现节点",
         "--output-format",
         "stream-json",
+        "--verbose",
         "--permission-mode",
         "acceptEdits",
         "--allowedTools",
@@ -102,6 +104,17 @@ def test_claude_provider_omits_allowed_tools_when_empty() -> None:
 
     assert command.executable == "claude"
     assert "--allowedTools" not in command.args
+
+
+def test_executor_preserves_windows_system_root_for_cli_processes(monkeypatch) -> None:
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+
+    environment = CliAgentExecutor(provider=FakeProvider("complete"))._allowed_environment()
+
+    assert next(
+        (value for key, value in environment.items() if key.upper() == "SYSTEMROOT"),
+        None,
+    ) == r"C:\Windows"
 
 
 def test_claude_provider_normalizes_stream_json_text_message() -> None:
@@ -152,6 +165,38 @@ def test_executor_runs_provider_and_parses_output(tmp_path: Path) -> None:
     assert result.status == "COMPLETED"
     assert result.summary == "fake-cli: completed"
     assert result.error is None
+    assert [event["kind"] for event in events] == ["message", "final"]
+
+
+def test_executor_emits_output_before_streaming_process_exits(tmp_path: Path) -> None:
+    first_output = Event()
+    events: list[dict] = []
+
+    def on_output(event: dict) -> None:
+        events.append(event)
+        first_output.set()
+
+    executor = CliAgentExecutor(provider=FakeProvider("stream"), on_output=on_output)
+    result_holder = {}
+    thread = Thread(
+        target=lambda: result_holder.update(
+            result=executor.run(
+                job_id="agent-job-stream",
+                prompt="x",
+                cwd=tmp_path,
+                project_root=tmp_path,
+                timeout_seconds=5,
+                max_output_bytes=4096,
+            )
+        )
+    )
+
+    thread.start()
+
+    assert first_output.wait(timeout=0.3)
+    assert thread.is_alive()
+    thread.join(timeout=5)
+    assert result_holder["result"].status == "COMPLETED"
     assert [event["kind"] for event in events] == ["message", "final"]
 
 

@@ -1,26 +1,41 @@
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 from typing import Any, Callable
+from urllib.parse import unquote, urlparse
 from uuid import uuid4, uuid5, NAMESPACE_URL
+
+import yaml
 
 from workflow_platform.adapters.registry import default_registry
 from workflow_platform.artifacts.service import hash_artifact, validate_safe_path
+from workflow_platform.compiler.compiler import compile_workflow
 from workflow_platform.execution.cli import CliAgentExecutor
+from workflow_platform.execution.deploy import DeployExecutor
 from workflow_platform.execution.providers import ClaudeCliProvider, CliProvider, CodexCliProvider
+from workflow_platform.governance.actors import require_trusted_human
+from workflow_platform.governance.audit import AuditLog
 from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
-from workflow_platform.models import Actor, RunEvent, RunProjection
+from workflow_platform.knowledge.service import LocalKnowledgeService
+from workflow_platform.models import Actor, RunEvent, RunProjection, WorkflowDefinition
+from workflow_platform.terminals.redaction import redact_terminal_output
 from workflow_platform.persistence.repositories import (
+    AgentCheckpointRepository,
     AgentJobRepository,
     ApprovalRepository,
     ArtifactRepository,
+    DeploymentRepository,
     GateResultRepository,
+    KnowledgeSynthesisRepository,
+    KnowledgeSynthesisOutputRepository,
     ProjectRepository,
     ProjectionRepository,
     RunEventRepository,
     RunRepository,
+    TerminalSessionRepository,
     WorkflowVersionRepository,
 )
 
@@ -41,11 +56,20 @@ class WorkflowRuntimeService:
         self._artifacts = ArtifactRepository(db)
         self._approvals = ApprovalRepository(db)
         self._gate_results = GateResultRepository(db)
+        self._terminals = TerminalSessionRepository(db)
         self._agent_jobs = AgentJobRepository(db)
+        self._agent_checkpoints = AgentCheckpointRepository(db)
+        self._deployments = DeploymentRepository(db)
+        self._knowledge_syntheses = KnowledgeSynthesisRepository(db)
+        self._knowledge_synthesis_output = KnowledgeSynthesisOutputRepository(db)
+        self._audit = AuditLog(db)
+        self._lock = RLock()
+        self._knowledge = LocalKnowledgeService(db, self._audit, lock=self._lock)
         self._adapter_registry = default_registry()
         self._agent_provider_factory = agent_provider_factory or _default_agent_provider
         self._agent_executors: dict[str, CliAgentExecutor] = {}
-        self._lock = RLock()
+        self._deploy_executors: dict[str, DeployExecutor] = {}
+        self._knowledge_synthesis_executors: dict[str, CliAgentExecutor] = {}
 
     def import_project(self, project_path: Path, *, now: str) -> dict:
         project_path = project_path.resolve()
@@ -91,7 +115,15 @@ class WorkflowRuntimeService:
             **detection.model_dump(by_alias=True),
         }
 
-    def create_run(self, workflow_version_id: str, *, title: str, now: str) -> RunProjection:
+    def create_run(
+        self,
+        workflow_version_id: str,
+        *,
+        title: str,
+        task_goal: str | None = None,
+        parameters: dict[str, Any] | None = None,
+        now: str,
+    ) -> RunProjection:
         workflow = self._workflow_versions.get(workflow_version_id)
         if workflow is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
@@ -100,16 +132,26 @@ class WorkflowRuntimeService:
             "SELECT project_id FROM workflow_versions WHERE id = ?",
             (workflow_version_id,),
         ).fetchone()
+        if row is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
         project_id = row["project_id"]
         run_id = _stable_id("run", f"{workflow_version_id}:{title}:{now}")
         actor = Actor(id="runtime", type="system", source="runtime", trusted=True)
+        context = {
+            "taskGoal": (task_goal or "").strip(),
+            "parameters": dict(parameters or {}),
+        }
         created_event = RunEvent(
             id=f"{run_id}:event:1",
             runId=run_id,
             type="RUN_CREATED",
             nodeId=None,
             actor=actor,
-            payload={"workflowVersionId": workflow_version_id, "title": title},
+            payload={
+                "workflowVersionId": workflow_version_id,
+                "title": title,
+                "context": context,
+            },
             createdAt=now,
             revision="1",
         )
@@ -118,13 +160,15 @@ class WorkflowRuntimeService:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                if self._projects.is_archived(project_id):
+                    raise ValueError("PROJECT_ARCHIVED: 项目已归档，无法创建新的 Run")
                 self._runs.save(
                     id=run_id,
                     project_id=project_id,
                     workflow_version_id=workflow_version_id,
                     title=title,
                     status=projection.status,
-                    context={},
+                    context=context,
                     now=now,
                 )
                 self._events.append(created_event, 1)
@@ -135,6 +179,203 @@ class WorkflowRuntimeService:
                 raise
 
         return projection
+
+    def archive_project(self, project_id: str, *, actor: dict, now: str) -> dict:
+        archivist = require_trusted_human(actor, operation="归档项目")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                archived = self._projects.archive(project_id, now=now)
+                if archived:
+                    self._audit.record(
+                        actor=archivist,
+                        action="project.archived",
+                        resource=f"project:{project_id}",
+                        detail={"projectId": project_id},
+                        created_at=now,
+                    )
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"projectId": project_id, "archived": True, "archivedAt": now}
+
+    def list_runs_for_workflow_version(self, workflow_version_id: str) -> list[dict]:
+        if self._workflow_versions.get(workflow_version_id) is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        with self._lock:
+            return self._runs.list_for_workflow_version(workflow_version_id)
+
+    def get_workflow_definition(self, workflow_version_id: str) -> dict:
+        workflow = self._workflow_versions.get(workflow_version_id)
+        if workflow is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        return workflow.model_dump(by_alias=True)
+
+    def export_workflow_version(self, workflow_version_id: str, *, format: str) -> dict[str, str]:
+        workflow = self._workflow_versions.get(workflow_version_id)
+        if workflow is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+
+        definition = workflow.model_dump(by_alias=True)
+        if format == "canonical-json":
+            return {
+                "fileName": f"{workflow.id}-{workflow.version}.json",
+                "mediaType": "application/json",
+                "content": json.dumps(definition, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            }
+        if format == "generic-yaml":
+            return {
+                "fileName": f"{workflow.id}-{workflow.version}.yaml",
+                "mediaType": "application/x-yaml",
+                "content": yaml.safe_dump(
+                    definition,
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+            }
+        raise ValueError(
+            "WORKFLOW_EXPORT_FORMAT_INVALID: 仅支持 canonical-json 或 generic-yaml 导出格式"
+        )
+
+    def compile_workflow_version(self, workflow_version_id: str) -> dict:
+        workflow = self._workflow_versions.get(workflow_version_id)
+        if workflow is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        return compile_workflow(workflow)
+
+    def simulate_workflow_version(self, workflow_version_id: str) -> dict:
+        workflow = self._workflow_versions.get(workflow_version_id)
+        if workflow is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        compiled = compile_workflow(workflow)
+        blocked = len(compiled["diagnostics"]) > 0
+        incoming_node_ids = {edge.to for edge in workflow.edges}
+        return {
+            "workflowVersionId": workflow_version_id,
+            "status": "blocked" if blocked else "ready",
+            "diagnostics": compiled["diagnostics"],
+            "steps": [
+                {
+                    "nodeId": node.id,
+                    "state": "BLOCKED"
+                    if blocked
+                    else ("READY" if node.id not in incoming_node_ids else "PENDING"),
+                }
+                for node in workflow.nodes
+            ],
+        }
+
+    def list_workflow_version_history(self, workflow_version_id: str) -> list[dict]:
+        history = self._workflow_versions.list_history(workflow_version_id)
+        if not history:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        return [
+            {
+                "id": entry["id"],
+                "name": entry["name"],
+                "version": entry["version"],
+                "contentHash": entry["contentHash"],
+                "createdAt": entry["createdAt"],
+            }
+            for entry in history
+        ]
+
+    def diff_workflow_versions(
+        self,
+        workflow_version_id: str,
+        *,
+        against_workflow_version_id: str,
+    ) -> dict:
+        target = self._workflow_versions.get(workflow_version_id)
+        baseline = self._workflow_versions.get(against_workflow_version_id)
+        if target is None or baseline is None:
+            raise KeyError("Workflow version not found")
+        if target.id != baseline.id:
+            raise ValueError("WORKFLOW_VERSION_MISMATCH: 只能比较同一工作流的版本")
+
+        return {
+            "fromVersionId": against_workflow_version_id,
+            "toVersionId": workflow_version_id,
+            "addedNodes": _added_items(baseline.nodes, target.nodes),
+            "removedNodes": _added_items(target.nodes, baseline.nodes),
+            "changedNodes": _changed_items(baseline.nodes, target.nodes),
+            "addedEdges": _added_items(baseline.edges, target.edges),
+            "removedEdges": _added_items(target.edges, baseline.edges),
+            "changedEdges": _changed_items(baseline.edges, target.edges),
+        }
+
+    def save_workflow_version(
+        self,
+        workflow_version_id: str,
+        *,
+        definition: dict,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        base = self._workflow_versions.get(workflow_version_id)
+        if base is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        editor = require_trusted_human(actor, operation="保存工作流版本")
+        candidate = WorkflowDefinition.model_validate(definition)
+        if candidate.id != base.id:
+            raise ValueError("WORKFLOW_ID_IMMUTABLE: 新版本不能更改工作流标识")
+
+        draft_hash = hashlib.sha256(
+            candidate.model_dump_json(by_alias=True).encode("utf-8")
+        ).hexdigest()
+        version = f"{base.version}+{draft_hash[:8]}"
+        saved_definition = candidate.model_copy(
+            update={"version": version, "sourceAdapter": base.sourceAdapter}
+        )
+        content_hash = hashlib.sha256(
+            saved_definition.model_dump_json(by_alias=True).encode("utf-8")
+        ).hexdigest()
+        row = self._db.execute(
+            "SELECT project_id, adapter_id FROM workflow_versions WHERE id = ?",
+            (workflow_version_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        new_version_id = _stable_id(
+            "workflow-version",
+            f"{row['project_id']}:{saved_definition.id}:{content_hash}:{now}",
+        )
+
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._workflow_versions.save(
+                    saved_definition,
+                    id=new_version_id,
+                    project_id=row["project_id"],
+                    content_hash=content_hash,
+                    created_at=now,
+                    adapter_id=row["adapter_id"],
+                )
+                self._audit.record(
+                    actor=editor,
+                    action="workflow.version.created",
+                    resource=f"workflow-version:{new_version_id}",
+                    detail={
+                        "parentWorkflowVersionId": workflow_version_id,
+                        "workflowId": saved_definition.id,
+                        "version": saved_definition.version,
+                        "contentHash": content_hash,
+                    },
+                    created_at=now,
+                )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+
+        return {
+            "workflowVersionId": new_version_id,
+            "definition": saved_definition.model_dump(by_alias=True),
+            "compiled": compile_workflow(saved_definition),
+        }
 
     def submit_artifact(
         self,
@@ -151,7 +392,7 @@ class WorkflowRuntimeService:
         safe_path = validate_safe_path(project_root, artifact_path)
         artifact_uri = safe_path.as_uri()
         content_hash = hash_artifact(safe_path)
-        return self._transition_run(
+        projection = self._transition_run(
             run_id,
             "ARTIFACT_SUBMITTED",
             node_id=node_id,
@@ -174,6 +415,7 @@ class WorkflowRuntimeService:
                 created_at=now,
             ),
         )
+        return self._evaluate_automatic_gate(run_id, node_id=node_id, projection=projection, now=now)
 
     def decide_approval(
         self,
@@ -186,11 +428,10 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
     ) -> RunProjection:
-        if decision == "deferred":
-            raise ValueError("INVALID_TRANSITION: deferred approvals are not supported yet")
         event_type_by_decision = {
             "approved": "HUMAN_APPROVED",
             "rejected": "HUMAN_REJECTED",
+            "deferred": "HUMAN_DEFERRED",
         }
         try:
             event_type = event_type_by_decision[decision]
@@ -199,7 +440,7 @@ class WorkflowRuntimeService:
 
         actor_model = Actor.model_validate(actor)
         requested_by = Actor(id="runtime", type="system", source="runtime", trusted=True)
-        return self._transition_run(
+        projection = self._transition_run(
             run_id,
             event_type,
             node_id=node_id,
@@ -219,6 +460,7 @@ class WorkflowRuntimeService:
                 decided_at=now,
             ),
         )
+        return self._evaluate_automatic_gate(run_id, node_id=node_id, projection=projection, now=now)
 
     def submit_gate_result(
         self,
@@ -232,12 +474,12 @@ class WorkflowRuntimeService:
         actor: dict,
         expected_revision: str,
         now: str,
+        failure_reason: str | None = None,
     ) -> RunProjection:
-        if status == "waived" or waiver_reason is not None:
-            raise ValueError("INVALID_TRANSITION: gate waiver is not supported yet")
         event_type_by_status = {
             "passed": "GATE_PASSED",
             "failed": "GATE_FAILED",
+            "waived": "GATE_WAIVED",
         }
         try:
             event_type = event_type_by_status[status]
@@ -245,8 +487,21 @@ class WorkflowRuntimeService:
             raise ValueError(f"INVALID_TRANSITION: unsupported gate status {status}") from exc
 
         evidence = [item.strip() for item in evidence if item.strip()]
-        if not evidence:
-            raise ValueError("MISSING_EVIDENCE: Gate decisions require evidence or waiverReason")
+        waiver_reason = waiver_reason.strip() if waiver_reason is not None else None
+        failure_reason = failure_reason.strip() if failure_reason is not None else None
+        if status == "waived":
+            if not waiver_reason:
+                raise ValueError("MISSING_EVIDENCE: Gate waivers require a non-empty waiverReason")
+            if evidence:
+                raise ValueError("INVALID_TRANSITION: Gate waivers cannot include pass/fail evidence")
+        elif waiver_reason is not None:
+            raise ValueError("INVALID_TRANSITION: waiverReason is only allowed for waived gates")
+        elif not evidence:
+            raise ValueError("MISSING_EVIDENCE: Gate decisions require evidence")
+        elif status == "failed" and not failure_reason:
+            raise ValueError("GATE_FAILURE_REASON_REQUIRED: failed gates require a non-empty failureReason")
+        elif status != "failed" and failure_reason is not None:
+            raise ValueError("INVALID_TRANSITION: failureReason is only allowed for failed gates")
 
         actor_model = Actor.model_validate(actor)
         return self._transition_run(
@@ -254,7 +509,12 @@ class WorkflowRuntimeService:
             event_type,
             node_id=node_id,
             actor=actor,
-            payload={"evidence": evidence, "waiverReason": waiver_reason, "gateId": gate_id},
+            payload={
+                "evidence": evidence,
+                "waiverReason": waiver_reason,
+                "failureReason": failure_reason,
+                "gateId": gate_id,
+            },
             expected_revision=expected_revision,
             now=now,
             after_accept=lambda result: self._gate_results.save(
@@ -265,6 +525,7 @@ class WorkflowRuntimeService:
                 status=status,
                 evidence=evidence,
                 waiver_reason=waiver_reason,
+                failure_reason=failure_reason,
                 actor=actor_model,
                 created_at=now,
             ),
@@ -283,7 +544,7 @@ class WorkflowRuntimeService:
     ) -> RunProjection:
         if event_type == "ARTIFACT_SUBMITTED":
             raise ValueError("MISSING_ARTIFACT: use artifacts endpoint for artifact submissions")
-        if event_type in {"HUMAN_APPROVED", "HUMAN_REJECTED"}:
+        if event_type in {"HUMAN_APPROVED", "HUMAN_REJECTED", "HUMAN_DEFERRED"}:
             raise ValueError(
                 "MISSING_APPROVAL: use typed governance service methods for approval decisions"
             )
@@ -302,16 +563,678 @@ class WorkflowRuntimeService:
         )
 
     def list_artifacts(self, run_id: str) -> list[dict]:
-        self.get_projection(run_id)
-        return self._artifacts.list_for_run(run_id)
+        with self._lock:
+            self.get_projection(run_id)
+            return self._artifacts.list_for_run(run_id)
+
+    def preview_artifact(self, run_id: str, artifact_id: str) -> dict:
+        with self._lock:
+            artifact = self._artifacts.get_for_run(run_id, artifact_id)
+            project_root = self._runs.project_root_for_run(run_id)
+            safe_path = validate_safe_path(project_root, _file_uri_to_path(artifact["uri"]))
+            size_bytes = safe_path.stat().st_size
+            raw_content = safe_path.read_bytes()
+            truncated = len(raw_content) > 262_144
+            preview_bytes = raw_content[:262_144]
+            current_hash = hash_artifact(safe_path)
+
+            try:
+                content = preview_bytes.decode("utf-8")
+                if "\x00" in content:
+                    content = None
+            except UnicodeDecodeError:
+                content = None
+
+            return {
+                "id": artifact["id"],
+                "uri": artifact["uri"],
+                "contentHash": artifact["contentHash"],
+                "currentHash": current_hash,
+                "integrity": "verified" if current_hash == artifact["contentHash"] else "changed",
+                "mediaType": _artifact_media_type(safe_path),
+                "sizeBytes": size_bytes,
+                "truncated": truncated,
+                "content": content,
+            }
+
+    def get_evidence_package(self, run_id: str) -> dict:
+        projection = self.get_projection(run_id)
+        timeline = self.timeline(run_id)
+        artifacts = self.list_artifacts(run_id)
+        approvals = self.list_approvals(run_id)
+        gates = self.list_gate_results(run_id)
+        return {
+            "schemaVersion": 1,
+            "runId": run_id,
+            "projection": projection.model_dump(),
+            "timeline": timeline,
+            "artifacts": artifacts,
+            "approvals": approvals,
+            "gates": gates,
+        }
+
+    def get_run_report(self, run_id: str) -> dict:
+        package = self.get_evidence_package(run_id)
+        projection = package["projection"]
+        lines = [
+            f"# Run 证据报告：{run_id}",
+            "",
+            "## 运行状态",
+            "",
+            f"- 状态：{projection['status']}",
+            f"- 当前节点：{', '.join(projection['currentNodeIds']) or '无'}",
+            f"- 修订版本：{projection['revision']}",
+            f"- 事件数量：{len(package['timeline'])}",
+            "",
+            "## 产物",
+            "",
+        ]
+        if package["artifacts"]:
+            for artifact in package["artifacts"]:
+                lines.extend(
+                    [
+                        f"- `{artifact['id']}`（{artifact['type']}）",
+                        f"  - 位置：{artifact['uri']}",
+                        f"  - 内容哈希：{artifact['contentHash']}",
+                    ]
+                )
+        else:
+            lines.append("- 无已登记产物。")
+
+        lines.extend(["", "## 人工审批", ""])
+        if package["approvals"]:
+            for approval in package["approvals"]:
+                lines.append(
+                    f"- `{approval['nodeId']}`：{approval['status']}；"
+                    f"意见：{approval.get('comment') or '无'}"
+                )
+        else:
+            lines.append("- 无审批记录。")
+
+        lines.extend(["", "## Gate 与证据", ""])
+        if package["gates"]:
+            for gate in package["gates"]:
+                lines.append(f"- `{gate['gateId']}`：{gate['status']}")
+                if gate.get("nodeId"):
+                    lines.append(f"  - 节点：{gate['nodeId']}")
+                actor = gate.get("actor") or {}
+                if actor.get("id"):
+                    lines.append(f"  - 执行者：{actor['id']}")
+                if gate.get("createdAt"):
+                    lines.append(f"  - 提交时间：{gate['createdAt']}")
+                if gate.get("failureReason"):
+                    lines.append(f"  - 失败原因：{gate['failureReason']}")
+                if gate.get("waiverReason"):
+                    lines.append(f"  - 豁免原因：{gate['waiverReason']}")
+                for evidence in gate.get("evidence", []):
+                    lines.append(f"  - 证据：{evidence}")
+        else:
+            lines.append("- 无 Gate 记录。")
+
+        lines.extend(["", "## 事件时间线", ""])
+        for event in package["timeline"]:
+            lines.append(
+                f"- {event['createdAt']} · {event['type']}"
+                f"{f' · {event['nodeId']}' if event.get('nodeId') else ''}"
+            )
+
+        return {
+            "fileName": f"{run_id}-evidence-report.md",
+            "mediaType": "text/markdown",
+            "content": "\n".join(lines) + "\n",
+        }
 
     def list_approvals(self, run_id: str) -> list[dict]:
-        self.get_projection(run_id)
-        return self._approvals.list_for_run(run_id)
+        with self._lock:
+            self.get_projection(run_id)
+            return self._approvals.list_for_run(run_id)
 
     def list_gate_results(self, run_id: str) -> list[dict]:
-        self.get_projection(run_id)
-        return self._gate_results.list_for_run(run_id)
+        with self._lock:
+            self.get_projection(run_id)
+            return self._gate_results.list_for_run(run_id)
+
+    def register_terminal_session(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        kind: str,
+        cwd: Path,
+        pid: int | None,
+        now: str,
+    ) -> dict:
+        if kind not in {"shell", "codex"}:
+            raise ValueError(f"TERMINAL_KIND_INVALID: unsupported terminal kind {kind}")
+
+        with self._lock:
+            workflow = self._runs.workflow_for_run(run_id)
+            if node_id not in {node.id for node in workflow.nodes}:
+                raise ValueError(f"TERMINAL_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+            project_root = self._runs.project_root_for_run(run_id)
+            safe_cwd = validate_safe_path(project_root, cwd)
+            session_id = f"terminal-session-{uuid4()}"
+            project_id = self._runs.project_id_for_run(run_id)
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                self._terminals.save(
+                    id=session_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    node_id=node_id,
+                    kind=kind,
+                    status="running",
+                    cwd=str(safe_cwd),
+                    pid=pid,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self._audit.record(
+                    actor={
+                        "id": "desktop-terminal",
+                        "type": "system",
+                        "source": "terminal",
+                        "trusted": True,
+                    },
+                    action="terminal.session.started",
+                    resource=f"terminal:{session_id}",
+                    detail={"runId": run_id, "nodeId": node_id, "kind": kind, "cwd": str(safe_cwd)},
+                    created_at=now,
+                )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+
+            return self._terminals.list_for_run(run_id)[-1]
+
+    def list_terminal_sessions(self, run_id: str) -> list[dict]:
+        with self._lock:
+            self.get_projection(run_id)
+            return self._terminals.list_for_run(run_id)
+
+    def stop_terminal_session(self, run_id: str, session_id: str, *, now: str) -> dict:
+        with self._lock:
+            self.get_projection(run_id)
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                session = self._terminals.stop(run_id, session_id, updated_at=now)
+                self._audit.record(
+                    actor={
+                        "id": "desktop-terminal",
+                        "type": "system",
+                        "source": "terminal",
+                        "trusted": True,
+                    },
+                    action="terminal.session.stopped",
+                    resource=f"terminal:{session_id}",
+                    detail={"runId": run_id},
+                    created_at=now,
+                )
+                self._db.commit()
+                return session
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+
+    def record_terminal_command_decision(
+        self,
+        run_id: str,
+        session_id: str,
+        *,
+        decision: str,
+        risk_level: str,
+        command_summary: str,
+        impact: str,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("TERMINAL_COMMAND_DECISION_INVALID: 命令审批决定必须为 approved 或 rejected。")
+        if risk_level != "high":
+            raise ValueError("TERMINAL_COMMAND_RISK_INVALID: 终端命令审批仅接受 high 风险等级。")
+        if not command_summary.strip():
+            raise ValueError("TERMINAL_COMMAND_SUMMARY_INVALID: 命令摘要不能为空。")
+        if not impact.strip():
+            raise ValueError("TERMINAL_COMMAND_IMPACT_INVALID: 影响范围不能为空。")
+
+        human_actor = require_trusted_human(actor, operation="批准或拒绝危险终端命令")
+        with self._lock:
+            self._terminal_session_for_run(run_id, session_id)
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                record = self._audit.record(
+                    actor=human_actor,
+                    action=f"terminal.command.{decision}",
+                    resource=f"terminal:{session_id}",
+                    detail={
+                        "runId": run_id,
+                        "sessionId": session_id,
+                        "riskLevel": risk_level,
+                        "commandSummary": redact_terminal_output(command_summary),
+                        "impact": redact_terminal_output(impact),
+                    },
+                    created_at=now,
+                )
+                self._db.commit()
+                return record
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+
+    def append_terminal_output(
+        self,
+        run_id: str,
+        session_id: str,
+        *,
+        stream: str,
+        data: str,
+        now: str,
+    ) -> None:
+        if stream not in {"stdout", "stderr"}:
+            raise ValueError(f"TERMINAL_STREAM_INVALID: unsupported stream {stream}")
+        if not data:
+            raise ValueError("TERMINAL_OUTPUT_INVALID: terminal output cannot be empty")
+        redacted_data = redact_terminal_output(data)
+
+        with self._lock:
+            self._terminal_session_for_run(run_id, session_id)
+            output = self._terminals.list_output(session_id)
+            sequence = len(output) + 1
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                self._terminals.append_output(
+                    id=f"{session_id}:output:{sequence}",
+                    session_id=session_id,
+                    sequence=sequence,
+                    stream=stream,
+                    data=redacted_data,
+                    created_at=now,
+                )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+
+    def list_terminal_output(
+        self,
+        run_id: str,
+        session_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> list[dict]:
+        if after_sequence < 0:
+            raise ValueError("TERMINAL_CURSOR_INVALID: output cursor must not be negative")
+        with self._lock:
+            self._terminal_session_for_run(run_id, session_id)
+            return self._terminals.list_output(session_id, after_sequence=after_sequence)
+
+    def export_terminal_output_as_evidence(
+        self,
+        run_id: str,
+        session_id: str,
+        *,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="导出终端证据")
+        with self._lock:
+            session = self._terminal_session_for_run(run_id, session_id)
+            output = self._terminals.list_output(session_id)
+            if not output:
+                raise ValueError("TERMINAL_EVIDENCE_EMPTY: terminal session has no persisted output")
+
+            first_sequence = output[0]["sequence"]
+            last_sequence = output[-1]["sequence"]
+            project_root = self._runs.project_root_for_run(run_id)
+            evidence_path = validate_safe_path(
+                project_root,
+                Path(".workflow-platform")
+                / "evidence"
+                / f"{session_id}-{first_sequence}-{last_sequence}.log",
+            )
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(
+                "".join(event["data"] for event in output),
+                encoding="utf-8",
+            )
+            content_hash = hash_artifact(evidence_path)
+            artifact_id = f"{run_id}:terminal-evidence:{session_id}:{last_sequence}"
+
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                self._artifacts.save(
+                    id=artifact_id,
+                    run_id=run_id,
+                    node_id=session["nodeId"] or "terminal",
+                    type="evidence",
+                    uri=evidence_path.as_uri(),
+                    content_hash=content_hash,
+                    producer=human_actor,
+                    created_at=now,
+                )
+                self._audit.record(
+                    actor=human_actor,
+                    action="terminal.output.evidence.created",
+                    resource=f"artifact:{artifact_id}",
+                    detail={
+                        "runId": run_id,
+                        "terminalSessionId": session_id,
+                        "firstSequence": first_sequence,
+                        "lastSequence": last_sequence,
+                        "uri": evidence_path.as_uri(),
+                        "contentHash": content_hash,
+                    },
+                    created_at=now,
+                )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+
+            artifact = self._artifacts.get_for_run(run_id, artifact_id)
+            return artifact
+
+    def create_knowledge_candidate(
+        self,
+        *,
+        title: str,
+        content: str,
+        source: str,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        return self._knowledge.create_candidate(
+            title=title,
+            content=content,
+            source=source,
+            actor=actor,
+            now=now,
+        )
+
+    def list_knowledge_candidates(self, *, status: str | None = None) -> list[dict]:
+        return self._knowledge.list_candidates(status=status)
+
+    def review_knowledge_candidate(
+        self,
+        candidate_id: str,
+        *,
+        decision: str,
+        actor: dict,
+        comment: str | None,
+        now: str,
+    ) -> dict:
+        return self._knowledge.review_candidate(
+            candidate_id,
+            decision=decision,
+            actor=actor,
+            comment=comment,
+            now=now,
+        )
+
+    def publish_knowledge_candidate(
+        self,
+        candidate_id: str,
+        *,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        return self._knowledge.publish_candidate(candidate_id, actor=actor, now=now)
+
+    def search_knowledge(self, query: str) -> list[dict]:
+        return self._knowledge.search(query)
+
+    def list_knowledge_documents(self) -> list[dict]:
+        return self._knowledge.list_documents()
+
+    def replay_knowledge_document(self, document_id: str) -> dict:
+        return self._knowledge.replay_document(document_id)
+
+    def export_knowledge_document(self, document_id: str) -> dict:
+        return self._knowledge.export_document(document_id)
+
+    def record_knowledge_git_publication(
+        self,
+        document_id: str,
+        *,
+        branch: str,
+        relative_path: str,
+        commit_hash: str,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        return self._knowledge.record_git_publication(
+            document_id,
+            branch=branch,
+            relative_path=relative_path,
+            commit_hash=commit_hash,
+            actor=actor,
+            now=now,
+        )
+
+    def start_knowledge_synthesis(
+        self,
+        candidate_id: str,
+        *,
+        provider: str,
+        actor: dict,
+        now: str,
+        timeout_seconds: float = 300,
+        max_output_bytes: int = 1_000_000,
+    ) -> dict:
+        reviewer = require_trusted_human(actor, operation="启动知识合成")
+        candidate = self._knowledge.get_candidate(candidate_id)
+        if candidate["status"] != "approved" or candidate["publishedAt"]:
+            raise ValueError("KNOWLEDGE_SYNTHESIS_NOT_READY: 只有未发布的已批准候选可以进行知识合成。")
+        project_root = self._project_root_for_knowledge_source(candidate["source"])
+        cli_provider = self._agent_provider_factory(provider)
+        prompt = _knowledge_synthesis_prompt(candidate)
+        command = cli_provider.build_command(cwd=project_root, prompt=prompt, allowed_tools=[])
+        synthesis_id = f"knowledge-synthesis-{uuid4()}"
+        output_sequence = 0
+
+        def append_output(event: dict[str, Any]) -> None:
+            nonlocal output_sequence
+            output_sequence += 1
+            with self._lock:
+                self._knowledge_synthesis_output.append(
+                    id=f"{synthesis_id}:output:{output_sequence}",
+                    synthesis_id=synthesis_id,
+                    sequence=output_sequence,
+                    kind=event["kind"],
+                    payload=event["payload"],
+                    created_at=now,
+                )
+                self._db.commit()
+
+        with self._lock:
+            self._knowledge_syntheses.create(
+                id=synthesis_id,
+                candidate_id=candidate_id,
+                provider=provider,
+                prompt=prompt,
+                created_at=now,
+            )
+            self._audit.record(
+                actor=reviewer,
+                action="knowledge.synthesis.started",
+                resource=f"knowledge-synthesis:{synthesis_id}",
+                detail={
+                    "candidateId": candidate_id,
+                    "provider": provider,
+                    "command": [command.executable, *command.args[:3]],
+                },
+                created_at=now,
+            )
+            self._db.commit()
+
+        def mark_running(_pid: int) -> None:
+            with self._lock:
+                self._knowledge_syntheses.set_running(id=synthesis_id, updated_at=now)
+                self._db.commit()
+
+        executor = CliAgentExecutor(
+            provider=cli_provider,
+            on_output=append_output,
+            on_started=mark_running,
+        )
+        self._knowledge_synthesis_executors[synthesis_id] = executor
+
+        def execute_synthesis() -> None:
+            try:
+                result = executor.run(
+                    job_id=synthesis_id,
+                    prompt=prompt,
+                    cwd=project_root,
+                    project_root=project_root,
+                    timeout_seconds=timeout_seconds,
+                    max_output_bytes=max_output_bytes,
+                    allowed_tools=[],
+                )
+                status = result.status
+                summary = result.summary
+                error = result.error
+            except Exception as exception:
+                status = "FAILED"
+                summary = None
+                error = f"KNOWLEDGE_SYNTHESIS_EXECUTION_ERROR: {exception}"
+            finally:
+                self._knowledge_synthesis_executors.pop(synthesis_id, None)
+
+            with self._lock:
+                self._knowledge_syntheses.finish(
+                    id=synthesis_id,
+                    status=status,
+                    summary=summary,
+                    error=error,
+                    updated_at=now,
+                )
+                self._audit.record(
+                    actor={
+                        "id": "runtime-knowledge-synthesis",
+                        "type": "system",
+                        "source": "runtime",
+                        "trusted": True,
+                    },
+                    action=(
+                        "knowledge.synthesis.completed"
+                        if status == "COMPLETED"
+                        else "knowledge.synthesis.failed"
+                    ),
+                    resource=f"knowledge-synthesis:{synthesis_id}",
+                    detail={"candidateId": candidate_id, "error": error},
+                    created_at=now,
+                )
+                self._db.commit()
+
+        Thread(
+            target=execute_synthesis,
+            name=f"knowledge-synthesis-{synthesis_id}",
+            daemon=True,
+        ).start()
+        synthesis = self._knowledge_syntheses.get(synthesis_id)
+        if synthesis is None:
+            raise KeyError(f"Knowledge synthesis not found: {synthesis_id}")
+        return synthesis
+
+    def list_knowledge_syntheses(self) -> list[dict]:
+        with self._lock:
+            return self._knowledge_syntheses.list()
+
+    def list_knowledge_synthesis_output(
+        self,
+        synthesis_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> list[dict]:
+        if after_sequence < 0:
+            raise ValueError("KNOWLEDGE_SYNTHESIS_OUTPUT_CURSOR_INVALID: 合成输出游标不能为负数。")
+        with self._lock:
+            if self._knowledge_syntheses.get(synthesis_id) is None:
+                raise KeyError(f"KNOWLEDGE_SYNTHESIS_NOT_FOUND: 未找到知识合成任务 {synthesis_id}。")
+            return self._knowledge_synthesis_output.list(
+                synthesis_id,
+                after_sequence=after_sequence,
+            )
+
+    def record_knowledge_synthesis_feedback(
+        self,
+        synthesis_id: str,
+        *,
+        feedback: str,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        reviewer = require_trusted_human(actor, operation="提交知识合成反馈")
+        normalized_feedback = feedback.strip()
+        if not normalized_feedback:
+            raise ValueError("KNOWLEDGE_SYNTHESIS_FEEDBACK_INVALID: 合成反馈不能为空。")
+        with self._lock:
+            synthesis = self._knowledge_syntheses.get(synthesis_id)
+            if synthesis is None:
+                raise KeyError(f"KNOWLEDGE_SYNTHESIS_NOT_FOUND: 未找到知识合成任务 {synthesis_id}。")
+            self._knowledge_syntheses.set_feedback(
+                id=synthesis_id,
+                feedback=normalized_feedback,
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=reviewer,
+                action="knowledge.synthesis.feedback_recorded",
+                resource=f"knowledge-synthesis:{synthesis_id}",
+                detail={"candidateId": synthesis["candidateId"]},
+                created_at=now,
+            )
+            self._db.commit()
+            updated = self._knowledge_syntheses.get(synthesis_id)
+        if updated is None:
+            raise KeyError(f"KNOWLEDGE_SYNTHESIS_NOT_FOUND: 未找到知识合成任务 {synthesis_id}。")
+        return updated
+
+    def publish_knowledge_synthesis(self, synthesis_id: str, *, actor: dict, now: str) -> dict:
+        synthesis = self._knowledge_syntheses.get(synthesis_id)
+        if synthesis is None:
+            raise KeyError(f"KNOWLEDGE_SYNTHESIS_NOT_FOUND: 未找到知识合成任务 {synthesis_id}。")
+        if synthesis["status"] != "COMPLETED" or not synthesis["summary"]:
+            raise ValueError("KNOWLEDGE_SYNTHESIS_NOT_COMPLETED: 只有成功的知识合成稿可以发布。")
+        document = self._knowledge.publish_candidate(
+            synthesis["candidateId"],
+            actor=actor,
+            now=now,
+            content_override=synthesis["summary"],
+        )
+        with self._lock:
+            self._audit.record(
+                actor=require_trusted_human(actor, operation="发布知识合成稿"),
+                action="knowledge.synthesis.published",
+                resource=f"knowledge-synthesis:{synthesis_id}",
+                detail={"documentId": document["id"]},
+                created_at=now,
+            )
+            self._db.commit()
+        return document
+
+    def list_audit_records(
+        self,
+        *,
+        actor_id: str | None = None,
+        action: str | None = None,
+        resource: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        if not 1 <= limit <= 200:
+            raise ValueError("AUDIT_LIMIT_INVALID: 审计查询数量必须在 1 到 200 之间。")
+        return self._audit.list(
+            actor_id=actor_id,
+            action=action,
+            resource=resource,
+            limit=limit,
+        )
 
     def start_agent_job(
         self,
@@ -325,6 +1248,7 @@ class WorkflowRuntimeService:
         allowed_tools: list[str] | None = None,
         timeout_seconds: float = 300,
         max_output_bytes: int = 1_000_000,
+        resumed_from_checkpoint_id: str | None = None,
     ) -> dict:
         Actor.model_validate(actor)
         workflow = self._runs.workflow_for_run(run_id)
@@ -333,12 +1257,14 @@ class WorkflowRuntimeService:
 
         project_root = self._runs.project_root_for_run(run_id)
         cli_provider = self._agent_provider_factory(provider)
+        safe_allowed_tools = allowed_tools or []
         command = cli_provider.build_command(
             cwd=project_root,
             prompt=prompt,
-            allowed_tools=allowed_tools or [],
+            allowed_tools=safe_allowed_tools,
         )
         job_id = f"agent-job-{uuid4()}"
+        checkpoint_id = f"agent-checkpoint-{uuid4()}"
         output_sequence = 0
 
         def append_output(event: dict[str, Any]) -> None:
@@ -366,40 +1292,188 @@ class WorkflowRuntimeService:
                 cwd=str(project_root),
                 created_at=now,
             )
-            self._db.commit()
-
-        executor = CliAgentExecutor(provider=cli_provider, on_output=append_output)
-        self._agent_executors[job_id] = executor
-        try:
-            result = executor.run(
+            self._agent_checkpoints.create(
+                id=checkpoint_id,
+                run_id=run_id,
                 job_id=job_id,
+                parent_checkpoint_id=resumed_from_checkpoint_id,
+                node_id=node_id,
+                provider=provider,
                 prompt=prompt,
-                cwd=project_root,
-                project_root=project_root,
+                allowed_tools=safe_allowed_tools,
                 timeout_seconds=timeout_seconds,
                 max_output_bytes=max_output_bytes,
-                allowed_tools=allowed_tools or [],
+                status="running",
+                created_at=now,
             )
-        finally:
-            self._agent_executors.pop(job_id, None)
-
-        with self._lock:
-            self._agent_jobs.finish(
-                id=job_id,
-                status=result.status,
-                summary=result.summary,
-                error=result.error,
-                updated_at=now,
+            self._audit.record(
+                actor={
+                    "id": "runtime-agent",
+                    "type": "system",
+                    "source": "runtime",
+                    "trusted": True,
+                },
+                action="agent.checkpoint.created",
+                resource=f"agent-checkpoint:{checkpoint_id}",
+                detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
+                created_at=now,
             )
             self._db.commit()
+
+        def mark_running(pid: int) -> None:
+            with self._lock:
+                self._agent_jobs.set_running(id=job_id, pid=pid, updated_at=now)
+                self._db.commit()
+
+        executor = CliAgentExecutor(
+            provider=cli_provider,
+            on_output=append_output,
+            on_started=mark_running,
+        )
+        self._agent_executors[job_id] = executor
+
+        def execute_job() -> None:
+            try:
+                result = executor.run(
+                    job_id=job_id,
+                    prompt=prompt,
+                    cwd=project_root,
+                    project_root=project_root,
+                    timeout_seconds=timeout_seconds,
+                    max_output_bytes=max_output_bytes,
+                    allowed_tools=safe_allowed_tools,
+                )
+                status = result.status
+                summary = result.summary
+                error = result.error
+            except Exception as exception:
+                status = "FAILED"
+                summary = None
+                error = f"AGENT_EXECUTION_ERROR: {exception}"
+            finally:
+                self._agent_executors.pop(job_id, None)
+
+            with self._lock:
+                self._agent_jobs.finish(
+                    id=job_id,
+                    status=status,
+                    summary=summary,
+                    error=error,
+                    updated_at=now,
+                )
+                checkpoint_status = "completed" if status == "COMPLETED" else "recoverable"
+                self._agent_checkpoints.update_for_job(
+                    job_id=job_id,
+                    status=checkpoint_status,
+                    recovery_reason=error,
+                    updated_at=now,
+                )
+                if checkpoint_status == "recoverable":
+                    self._audit.record(
+                        actor={
+                            "id": "runtime-agent",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        action="agent.checkpoint.recoverable",
+                        resource=f"agent-checkpoint:{checkpoint_id}",
+                        detail={"runId": run_id, "jobId": job_id, "reason": error},
+                        created_at=now,
+                    )
+                self._db.commit()
+
+        Thread(target=execute_job, name=f"workflow-agent-{job_id}", daemon=True).start()
+        with self._lock:
             job = self._agent_jobs.get(job_id)
         if job is None:
             raise KeyError(f"Agent job not found: {job_id}")
         return job
 
     def list_agent_jobs(self, run_id: str) -> list[dict]:
-        self.get_projection(run_id)
-        return self._agent_jobs.list_for_run(run_id)
+        with self._lock:
+            self.get_projection(run_id)
+            return self._agent_jobs.list_for_run(run_id)
+
+    def list_agent_checkpoints(self, run_id: str) -> list[dict]:
+        with self._lock:
+            self.get_projection(run_id)
+            return self._agent_checkpoints.list_for_run(run_id)
+
+    def resume_agent_checkpoint(
+        self,
+        run_id: str,
+        checkpoint_id: str,
+        *,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="恢复 Agent checkpoint")
+        with self._lock:
+            checkpoint = self._agent_checkpoints.get(checkpoint_id)
+            if checkpoint is None or checkpoint["runId"] != run_id:
+                raise KeyError(f"Agent checkpoint not found: {checkpoint_id}")
+            if checkpoint["status"] != "recoverable":
+                raise ValueError("AGENT_CHECKPOINT_NOT_RECOVERABLE: checkpoint is not recoverable")
+            self._agent_checkpoints.update_status(
+                checkpoint_id=checkpoint_id,
+                status="resumed",
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action="agent.checkpoint.resumed",
+                resource=f"agent-checkpoint:{checkpoint_id}",
+                detail={"runId": run_id},
+                created_at=now,
+            )
+            self._db.commit()
+
+        return self.start_agent_job(
+            run_id,
+            node_id=checkpoint["nodeId"],
+            provider=checkpoint["provider"],
+            prompt=checkpoint["prompt"],
+            actor=actor,
+            now=now,
+            allowed_tools=checkpoint["allowedTools"],
+            timeout_seconds=checkpoint["timeoutSeconds"],
+            max_output_bytes=checkpoint["maxOutputBytes"],
+            resumed_from_checkpoint_id=checkpoint_id,
+        )
+
+    def discard_agent_checkpoint(
+        self,
+        run_id: str,
+        checkpoint_id: str,
+        *,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="放弃 Agent checkpoint")
+        with self._lock:
+            checkpoint = self._agent_checkpoints.get(checkpoint_id)
+            if checkpoint is None or checkpoint["runId"] != run_id:
+                raise KeyError(f"Agent checkpoint not found: {checkpoint_id}")
+            if checkpoint["status"] != "recoverable":
+                raise ValueError("AGENT_CHECKPOINT_NOT_RECOVERABLE: checkpoint is not recoverable")
+            self._agent_checkpoints.update_status(
+                checkpoint_id=checkpoint_id,
+                status="discarded",
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action="agent.checkpoint.discarded",
+                resource=f"agent-checkpoint:{checkpoint_id}",
+                detail={"runId": run_id},
+                created_at=now,
+            )
+            self._db.commit()
+            discarded = self._agent_checkpoints.get(checkpoint_id)
+        if discarded is None:
+            raise KeyError(f"Agent checkpoint not found: {checkpoint_id}")
+        return discarded
 
     def get_agent_job(self, run_id: str, job_id: str) -> dict:
         self.get_projection(run_id)
@@ -420,12 +1494,232 @@ class WorkflowRuntimeService:
             executor.cancel(job_id)
         return job
 
+    def start_deployment(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        actor: dict,
+        expected_revision: str,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="启动部署")
+        workflow = self._runs.workflow_for_run(run_id)
+        node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+        if node is None:
+            raise ValueError(f"DEPLOY_UNKNOWN_NODE: 未找到部署节点 {node_id}。")
+        if node.kind != "deploy":
+            raise ValueError(f"DEPLOY_NODE_KIND_INVALID: 节点 {node_id} 不是 deploy 节点。")
+
+        project_root = self._runs.project_root_for_run(run_id)
+        command, cwd, timeout_seconds, max_output_bytes = _deployment_configuration(node, project_root)
+        deployment_id = f"deployment-{uuid4()}"
+        output_sequence = 0
+
+        def append_output(data: str) -> None:
+            nonlocal output_sequence
+            output_sequence += 1
+            with self._lock:
+                self._deployments.append_output(
+                    id=f"{deployment_id}:output:{output_sequence}",
+                    deployment_id=deployment_id,
+                    sequence=output_sequence,
+                    data=redact_terminal_output(data),
+                    created_at=now,
+                )
+                self._db.commit()
+
+        def mark_running(pid: int) -> None:
+            with self._lock:
+                self._deployments.set_running(id=deployment_id, pid=pid, updated_at=now)
+                self._db.commit()
+
+        self._transition_run(
+            run_id,
+            "NODE_STARTED",
+            node_id=node_id,
+            actor=human_actor.model_dump(),
+            expected_revision=expected_revision,
+            now=now,
+            after_accept=lambda _result: self._record_deployment_started(
+                deployment_id=deployment_id,
+                run_id=run_id,
+                node_id=node_id,
+                command=command,
+                cwd=cwd,
+                actor=human_actor,
+                now=now,
+            ),
+        )
+
+        executor = DeployExecutor(on_output=append_output, on_started=mark_running)
+        self._deploy_executors[deployment_id] = executor
+
+        def execute_deployment() -> None:
+            try:
+                result = executor.run(
+                    deployment_id=deployment_id,
+                    command=command,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    max_output_bytes=max_output_bytes,
+                )
+            except Exception as exception:
+                result_status = "FAILED"
+                summary = None
+                error = f"DEPLOY_EXECUTION_ERROR: {exception}"
+                output = ""
+            else:
+                result_status = result.status
+                summary = redact_terminal_output(result.summary) if result.summary else None
+                error = redact_terminal_output(result.error) if result.error else None
+                output = redact_terminal_output(result.output)
+            finally:
+                self._deploy_executors.pop(deployment_id, None)
+
+            try:
+                log_path = validate_safe_path(
+                    project_root,
+                    Path(".workflow-platform") / "deployments" / f"{deployment_id}.log",
+                )
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(output, encoding="utf-8")
+                content_hash = hash_artifact(log_path)
+                executor_actor = {
+                    "id": "runtime-deploy-executor",
+                    "type": "executor",
+                    "source": "runtime",
+                    "trusted": True,
+                }
+                expected = self.get_projection(run_id).revision
+                if result_status == "COMPLETED":
+                    self._transition_run(
+                        run_id,
+                        "NODE_COMPLETED",
+                        node_id=node_id,
+                        actor=executor_actor,
+                        payload={
+                            "deploymentId": deployment_id,
+                            "artifactUri": log_path.as_uri(),
+                            "artifactType": "deploy-log",
+                            "contentHash": content_hash,
+                        },
+                        expected_revision=expected,
+                        now=now,
+                        after_accept=lambda result: self._record_deployment_finished(
+                            deployment_id=deployment_id,
+                            run_id=run_id,
+                            node_id=node_id,
+                            status=result_status,
+                            summary=summary,
+                            error=None,
+                            log_path=log_path,
+                            content_hash=content_hash,
+                            actor=executor_actor,
+                            now=now,
+                            event_revision=result["emittedEvents"][0].revision,
+                        ),
+                    )
+                else:
+                    self._transition_run(
+                        run_id,
+                        "NODE_FAILED",
+                        node_id=node_id,
+                        actor=executor_actor,
+                        payload={
+                            "deploymentId": deployment_id,
+                            "artifactUri": log_path.as_uri(),
+                            "artifactType": "deploy-log",
+                            "contentHash": content_hash,
+                            "error": error,
+                        },
+                        expected_revision=expected,
+                        now=now,
+                        after_accept=lambda result: self._record_deployment_finished(
+                            deployment_id=deployment_id,
+                            run_id=run_id,
+                            node_id=node_id,
+                            status=result_status,
+                            summary=None,
+                            error=error,
+                            log_path=log_path,
+                            content_hash=content_hash,
+                            actor=executor_actor,
+                            now=now,
+                            event_revision=result["emittedEvents"][0].revision,
+                        ),
+                    )
+            except Exception as exception:
+                with self._lock:
+                    self._deployments.finish(
+                        id=deployment_id,
+                        status="FAILED",
+                        summary=None,
+                        error=f"DEPLOY_FINALIZATION_ERROR: {exception}",
+                        updated_at=now,
+                    )
+                    self._db.commit()
+
+        Thread(
+            target=execute_deployment,
+            name=f"workflow-deployment-{deployment_id}",
+            daemon=True,
+        ).start()
+        deployment = self._deployments.get(deployment_id)
+        if deployment is None:
+            raise KeyError(f"Deployment not found: {deployment_id}")
+        return deployment
+
+    def list_deployments(self, run_id: str) -> list[dict]:
+        with self._lock:
+            self.get_projection(run_id)
+            return self._deployments.list_for_run(run_id)
+
+    def get_deployment(self, run_id: str, deployment_id: str) -> dict:
+        self.get_projection(run_id)
+        deployment = self._deployments.get(deployment_id)
+        if deployment is None or deployment["runId"] != run_id:
+            raise KeyError(f"Deployment not found: {deployment_id}")
+        return deployment
+
+    def list_deployment_output(
+        self,
+        run_id: str,
+        deployment_id: str,
+        *,
+        after_sequence: int = 0,
+    ) -> list[dict]:
+        if after_sequence < 0:
+            raise ValueError("DEPLOY_OUTPUT_CURSOR_INVALID: 部署输出游标不能为负数。")
+        self.get_deployment(run_id, deployment_id)
+        return self._deployments.list_output(deployment_id, after_sequence=after_sequence)
+
+    def cancel_deployment(self, run_id: str, deployment_id: str, *, actor: dict, now: str) -> dict:
+        human_actor = require_trusted_human(actor, operation="取消部署")
+        deployment = self.get_deployment(run_id, deployment_id)
+        if deployment["status"] not in {"QUEUED", "RUNNING"}:
+            raise ValueError("DEPLOY_NOT_ACTIVE: 只能取消正在等待或运行中的部署。")
+        executor = self._deploy_executors.get(deployment_id)
+        if executor is not None:
+            executor.cancel(deployment_id)
+        with self._lock:
+            self._audit.record(
+                actor=human_actor,
+                action="deployment.cancel.requested",
+                resource=f"deployment:{deployment_id}",
+                detail={"runId": run_id, "nodeId": deployment["nodeId"]},
+                created_at=now,
+            )
+            self._db.commit()
+        return self.get_deployment(run_id, deployment_id)
+
     def get_run(self, run_id: str) -> dict:
         return self.get_projection(run_id).model_dump()
 
     def timeline(self, run_id: str) -> list[dict]:
-        self.get_projection(run_id)
-        return [event.model_dump() for event in self._events.list_for_run(run_id)]
+        with self._lock:
+            self.get_projection(run_id)
+            return [event.model_dump() for event in self._events.list_for_run(run_id)]
 
     def rebuild_projection(self, run_id: str, *, now: str) -> RunProjection:
         with self._lock:
@@ -441,6 +1735,115 @@ class WorkflowRuntimeService:
                 if self._db.in_transaction:
                     self._db.rollback()
                 raise
+
+    def get_recovery_diagnostics(self, run_id: str) -> dict:
+        with self._lock:
+            self._runs.workflow_for_run(run_id)
+            projection = self._projections.get(run_id)
+            if projection is None:
+                raise KeyError(f"Projection not found: {run_id}")
+            events = self._events.list_for_run(run_id)
+            jobs = self._agent_jobs.list_for_run(run_id)
+            terminal_sessions = self._terminals.list_for_run(run_id)
+            checkpoints = self._agent_checkpoints.list_for_run(run_id)
+            orphan_agent_job_ids = [
+                job["id"]
+                for job in jobs
+                if job["status"] in {"QUEUED", "RUNNING"} and job["id"] not in self._agent_executors
+            ]
+            orphan_terminal_session_ids = [
+                session["id"] for session in terminal_sessions if session["status"] == "running"
+            ]
+            return {
+                "runId": run_id,
+                "eventCount": len(events),
+                "projectionStatus": projection.status,
+                "orphanAgentJobIds": orphan_agent_job_ids,
+                "orphanTerminalSessionIds": orphan_terminal_session_ids,
+                "recoverableAgentCheckpointIds": [
+                    checkpoint["id"]
+                    for checkpoint in checkpoints
+                    if checkpoint["status"] == "recoverable"
+                ],
+                "rebuildAvailable": True,
+            }
+
+    def cleanup_orphan_agent_jobs(self, run_id: str, *, now: str) -> dict:
+        self._runs.workflow_for_run(run_id)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                orphan_job_ids = [
+                    job["id"]
+                    for job in self._agent_jobs.list_for_run(run_id)
+                    if job["status"] in {"QUEUED", "RUNNING"}
+                    and job["id"] not in self._agent_executors
+                ]
+                for job_id in orphan_job_ids:
+                    self._agent_jobs.finish(
+                        id=job_id,
+                        status="CANCELLED",
+                        summary="恢复流程已清理遗留 Agent 任务",
+                        error="RECOVERY_ORPHANED: Runtime 执行器已不可用",
+                        updated_at=now,
+                    )
+                    self._agent_checkpoints.update_for_job(
+                        job_id=job_id,
+                        status="recoverable",
+                        recovery_reason="RECOVERY_ORPHANED: Runtime 执行器已不可用",
+                        updated_at=now,
+                    )
+                if orphan_job_ids:
+                    self._audit.record(
+                        actor={
+                            "id": "runtime-recovery",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        action="recovery.orphan_agents.cleaned",
+                        resource=f"run:{run_id}",
+                        detail={"jobIds": orphan_job_ids},
+                        created_at=now,
+                    )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+        return {"runId": run_id, "cleanedJobIds": orphan_job_ids}
+
+    def cleanup_orphan_terminal_sessions(self, run_id: str, *, now: str) -> dict:
+        with self._lock:
+            self.get_projection(run_id)
+            orphan_session_ids = [
+                session["id"]
+                for session in self._terminals.list_for_run(run_id)
+                if session["status"] == "running"
+            ]
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                for session_id in orphan_session_ids:
+                    self._terminals.stop(run_id, session_id, updated_at=now)
+                if orphan_session_ids:
+                    self._audit.record(
+                        actor={
+                            "id": "runtime-recovery",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        action="recovery.orphan_terminals.cleaned",
+                        resource=f"run:{run_id}",
+                        detail={"sessionIds": orphan_session_ids},
+                        created_at=now,
+                    )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+        return {"runId": run_id, "cleanedSessionIds": orphan_session_ids}
 
     def _transition_run(
         self,
@@ -489,15 +1892,260 @@ class WorkflowRuntimeService:
                     self._db.rollback()
                 raise
 
+    def _evaluate_automatic_gate(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        projection: RunProjection,
+        now: str,
+    ) -> RunProjection:
+        if projection.nodeStates.get(node_id) != "AWAITING_GATE":
+            return projection
+
+        workflow = self._runs.workflow_for_run(run_id)
+        node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+        if node is None or len(node.gates) != 1:
+            return projection
+        gate = next((candidate for candidate in workflow.gates if candidate.id == node.gates[0]), None)
+        if gate is None:
+            return projection
+        automatic = gate.metadata.get("automatic")
+        if not automatic:
+            return projection
+
+        configuration = automatic if isinstance(automatic, dict) else {}
+        required_types = configuration.get("requiredArtifactTypes", [])
+        if not isinstance(required_types, list) or not all(
+            isinstance(item, str) and item.strip() for item in required_types
+        ):
+            raise ValueError(
+                "AUTOMATIC_GATE_CONFIGURATION_INVALID: requiredArtifactTypes must be a string array"
+            )
+
+        artifacts = [
+            artifact
+            for artifact in self._artifacts.list_for_run(run_id)
+            if artifact["nodeId"] == node_id
+        ]
+        evidence = [artifact["uri"] for artifact in artifacts]
+        available_types = {artifact["type"] for artifact in artifacts}
+        missing_types = [artifact_type for artifact_type in required_types if artifact_type not in available_types]
+        status = "passed" if evidence and not missing_types else "failed"
+        failure_reason = (
+            None
+            if status == "passed"
+            else (
+                f"自动 Gate 缺少必需 Artifact 类型：{', '.join(missing_types)}"
+                if missing_types
+                else "自动 Gate 未找到当前节点的 Artifact 证据"
+            )
+        )
+        return self.submit_gate_result(
+            run_id,
+            node_id=node_id,
+            gate_id=gate.id,
+            status=status,
+            evidence=evidence,
+            waiver_reason=None,
+            failure_reason=failure_reason,
+            actor={
+                "id": "runtime-auto-gate",
+                "type": "system",
+                "source": "runtime",
+                "trusted": True,
+            },
+            expected_revision=projection.revision,
+            now=now,
+        )
+
     def get_projection(self, run_id: str) -> RunProjection:
-        projection = self._projections.get(run_id)
-        if projection is None:
-            raise KeyError(f"Projection not found: {run_id}")
-        return projection
+        with self._lock:
+            projection = self._projections.get(run_id)
+            if projection is None:
+                raise KeyError(f"Projection not found: {run_id}")
+            return projection
+
+    def _terminal_session_for_run(self, run_id: str, session_id: str) -> dict:
+        self.get_projection(run_id)
+        for session in self._terminals.list_for_run(run_id):
+            if session["id"] == session_id:
+                return session
+        raise KeyError(f"Terminal session not found: {session_id}")
+
+    def _record_deployment_started(
+        self,
+        *,
+        deployment_id: str,
+        run_id: str,
+        node_id: str,
+        command: list[str],
+        cwd: Path,
+        actor: Actor,
+        now: str,
+    ) -> None:
+        self._deployments.create(
+            id=deployment_id,
+            run_id=run_id,
+            node_id=node_id,
+            command=command,
+            cwd=str(cwd),
+            created_at=now,
+        )
+        self._audit.record(
+            actor=actor,
+            action="deployment.started",
+            resource=f"deployment:{deployment_id}",
+            detail={
+                "runId": run_id,
+                "nodeId": node_id,
+                "command": redact_terminal_output(" ".join(command)),
+                "cwd": str(cwd),
+            },
+            created_at=now,
+        )
+
+    def _record_deployment_finished(
+        self,
+        *,
+        deployment_id: str,
+        run_id: str,
+        node_id: str,
+        status: str,
+        summary: str | None,
+        error: str | None,
+        log_path: Path,
+        content_hash: str,
+        actor: dict,
+        now: str,
+        event_revision: str,
+    ) -> None:
+        self._deployments.finish(
+            id=deployment_id,
+            status=status,
+            summary=summary,
+            error=error,
+            updated_at=now,
+        )
+        self._artifacts.save(
+            id=f"{run_id}:deployment-artifact:{deployment_id}:{event_revision}",
+            run_id=run_id,
+            node_id=node_id,
+            type="deploy-log",
+            uri=log_path.as_uri(),
+            content_hash=content_hash,
+            producer=Actor.model_validate(actor),
+            created_at=now,
+        )
+        self._audit.record(
+            actor=actor,
+            action="deployment.completed" if status == "COMPLETED" else "deployment.failed",
+            resource=f"deployment:{deployment_id}",
+            detail={
+                "runId": run_id,
+                "nodeId": node_id,
+                "artifactUri": log_path.as_uri(),
+                "contentHash": content_hash,
+                "error": error,
+            },
+            created_at=now,
+        )
+
+    def _project_root_for_knowledge_source(self, source: str) -> Path:
+        if not source.startswith("run:") or not source.removeprefix("run:").strip():
+            raise ValueError("KNOWLEDGE_SYNTHESIS_SOURCE_INVALID: 知识候选必须关联有效 Run 才能启动 CLI 合成。")
+        return self._runs.project_root_for_run(source.removeprefix("run:").strip())
+
+
+def _added_items(before: list, after: list) -> list[dict]:
+    before_ids = {item.id for item in before}
+    return [
+        item.model_dump(by_alias=True)
+        for item in after
+        if item.id not in before_ids
+    ]
+
+
+def _changed_items(before: list, after: list) -> list[dict]:
+    before_by_id = {item.id: item.model_dump(by_alias=True) for item in before}
+    changed: list[dict] = []
+    for item in after:
+        prior = before_by_id.get(item.id)
+        current = item.model_dump(by_alias=True)
+        if prior is None:
+            continue
+        fields = {
+            field: {"from": prior.get(field), "to": current.get(field)}
+            for field in sorted(set(prior) | set(current))
+            if field != "id" and prior.get(field) != current.get(field)
+        }
+        if fields:
+            changed.append({"id": item.id, "changes": fields})
+    return changed
+
+
+def _deployment_configuration(node, project_root: Path) -> tuple[list[str], Path, float, int]:
+    raw_config = node.metadata.get("deploy")
+    if not isinstance(raw_config, dict):
+        raise ValueError("DEPLOY_CONFIG_INVALID: deploy 节点必须配置 metadata.deploy。")
+    raw_command = raw_config.get("command")
+    if (
+        not isinstance(raw_command, list)
+        or not raw_command
+        or any(not isinstance(token, str) or not token.strip() for token in raw_command)
+    ):
+        raise ValueError("DEPLOY_COMMAND_INVALID: metadata.deploy.command 必须是非空命令数组。")
+    command = [token.strip() for token in raw_command]
+    if any("\x00" in token or "\r" in token or "\n" in token for token in command):
+        raise ValueError("DEPLOY_COMMAND_INVALID: 部署命令不能包含控制字符。")
+    if command[0].lower() in {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "sh", "bash"}:
+        raise ValueError("DEPLOY_COMMAND_INVALID: 部署命令不能通过 Shell 解释器执行。")
+
+    raw_cwd = raw_config.get("cwd", ".")
+    if not isinstance(raw_cwd, str) or not raw_cwd.strip():
+        raise ValueError("DEPLOY_CWD_INVALID: metadata.deploy.cwd 必须是项目内相对路径。")
+    cwd = validate_safe_path(project_root, raw_cwd.strip())
+    if not cwd.is_dir():
+        raise ValueError(f"DEPLOY_CWD_INVALID: 部署工作目录不存在：{cwd}")
+
+    timeout_seconds = raw_config.get("timeoutSeconds", 300)
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 1 <= float(timeout_seconds) <= 3_600
+    ):
+        raise ValueError("DEPLOY_TIMEOUT_INVALID: timeoutSeconds 必须在 1 到 3600 之间。")
+    max_output_bytes = raw_config.get("maxOutputBytes", 1_000_000)
+    if (
+        isinstance(max_output_bytes, bool)
+        or not isinstance(max_output_bytes, int)
+        or not 1_024 <= max_output_bytes <= 2_000_000
+    ):
+        raise ValueError("DEPLOY_OUTPUT_LIMIT_INVALID: maxOutputBytes 必须在 1024 到 2000000 之间。")
+    return command, cwd, float(timeout_seconds), max_output_bytes
 
 
 def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}-{uuid5(NAMESPACE_URL, value)}"
+
+
+def _file_uri_to_path(uri: str) -> Path:
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ValueError("INVALID_ARTIFACT_URI: artifact preview requires a file URI")
+    path_text = unquote(parsed.path)
+    if len(path_text) >= 3 and path_text[0] == "/" and path_text[2] == ":":
+        path_text = path_text[1:]
+    return Path(path_text)
+
+
+def _artifact_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return "text/markdown"
+    if suffix in {".json", ".yaml", ".yml", ".txt", ".log", ".py", ".ts", ".tsx", ".js"}:
+        return "text/plain"
+    return "application/octet-stream"
 
 
 def _default_agent_provider(provider: str) -> CliProvider:
@@ -506,3 +2154,18 @@ def _default_agent_provider(provider: str) -> CliProvider:
     if provider == "claude":
         return ClaudeCliProvider()
     raise ValueError(f"AGENT_PROVIDER_UNAVAILABLE: Unsupported agent provider: {provider}")
+
+
+def _knowledge_synthesis_prompt(candidate: dict) -> str:
+    return "\n".join(
+        [
+            "请将以下已经通过人工审核的知识候选整理为可发布的中文 Markdown 正文。",
+            "保留可审查的技术结论，不要执行命令、不要修改文件、不要声称已经完成未提供的验证。",
+            "只输出最终知识正文。",
+            "",
+            f"标题：{candidate['title']}",
+            f"来源：{candidate['source']}",
+            "候选内容：",
+            candidate["content"],
+        ]
+    )

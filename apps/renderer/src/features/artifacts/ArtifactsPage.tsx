@@ -1,40 +1,189 @@
-import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
+import { useState } from "react";
 
-type Props = { state: RuntimeWorkbenchState | null };
+import type { ArtifactPreview, RuntimeWorkbenchState } from "../../app/runtimeClient";
+import { diffArtifactText } from "./artifactDiff";
 
-export function ArtifactsPage({ state }: Props) {
+type Props = {
+  state: RuntimeWorkbenchState | null;
+  preview?: ArtifactPreview | null;
+  onPreviewArtifact?: (artifactId: string) => void;
+  onCompareArtifacts?: (beforeArtifactId: string, afterArtifactId: string) => void;
+  onDownloadEvidencePackage?: () => void;
+  onDownloadReport?: () => void;
+  comparison?: {
+    before: { id: string; content: string };
+    after: { id: string; content: string };
+  } | null;
+};
+
+export function ArtifactsPage({
+  state,
+  preview = null,
+  onPreviewArtifact,
+  onCompareArtifacts,
+  onDownloadEvidencePackage,
+  onDownloadReport,
+  comparison = null,
+}: Props) {
   const artifacts = Array.isArray(state?.artifacts) ? state.artifacts : [];
+  const [beforeArtifactId, setBeforeArtifactId] = useState("");
+  const [afterArtifactId, setAfterArtifactId] = useState("");
 
   return (
     <section id="artifacts" className="panel" aria-labelledby="artifacts-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Evidence</p>
-          <h2 id="artifacts-title">Artifacts</h2>
+          <h2 id="artifacts-title">产物</h2>
         </div>
-        <span className="status-pill">{artifacts.length > 0 ? "已索引" : "加载中"}</span>
+        <span className="status-pill">{artifacts.length > 0 ? "已索引" : "等待产物"}</span>
       </div>
       <p className="body-copy">
-        证据与产物索引来自 Runtime artifact guard，包括安全路径、内容哈希、测试日志和审计记录。
+        Runtime 保护的产物记录。每次提交都会经过项目路径限制并记录内容哈希，供审批、门禁和审计引用。
       </p>
-      <dl className="facts">
-        {artifacts.map((artifact) => (
-          <div key={artifact.id}>
-            <dt>{artifact.type}</dt>
-            <dd>
-              <span>{artifact.uri}</span>
-              <br />
-              <span>{artifact.contentHash}</span>
-            </dd>
+      {onDownloadEvidencePackage || onDownloadReport ? (
+        <div className="button-row" aria-label="证据导出">
+          {onDownloadEvidencePackage ? (
+            <button className="quiet-button" onClick={onDownloadEvidencePackage}>
+              下载证据包
+            </button>
+          ) : null}
+          {onDownloadReport ? (
+            <button className="quiet-button" onClick={onDownloadReport}>
+              下载运行报告
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {artifacts.length > 0 ? (
+        <>
+          {onCompareArtifacts ? (
+            <div className="gate-record" aria-label="产物比较">
+              <div className="panel-heading">
+                <strong>文本差异比较</strong>
+                <span className="status-pill">Runtime 预览</span>
+              </div>
+              <div className="button-row">
+                <label>
+                  基准产物
+                  <select
+                    aria-label="基准产物"
+                    value={beforeArtifactId}
+                    onChange={(event) => setBeforeArtifactId(event.target.value)}
+                  >
+                    <option value="">选择基准</option>
+                    {artifacts.map((artifact) => (
+                      <option key={artifact.id} value={artifact.id}>
+                        {artifact.type} · {artifact.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  对比产物
+                  <select
+                    aria-label="对比产物"
+                    value={afterArtifactId}
+                    onChange={(event) => setAfterArtifactId(event.target.value)}
+                  >
+                    <option value="">选择对比项</option>
+                    {artifacts.map((artifact) => (
+                      <option key={artifact.id} value={artifact.id}>
+                        {artifact.type} · {artifact.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="quiet-button"
+                  disabled={!beforeArtifactId || !afterArtifactId || beforeArtifactId === afterArtifactId}
+                  onClick={() => onCompareArtifacts(beforeArtifactId, afterArtifactId)}
+                >
+                  比较产物
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <div className="gate-stack" aria-label="产物记录">
+            {artifacts.map((artifact) => (
+              <article key={artifact.id} className="gate-record">
+                <div className="panel-heading">
+                  <strong>{artifact.type}</strong>
+                  <span className="status-pill">已校验</span>
+                </div>
+                <dl className="facts">
+                  <div>
+                    <dt>产物标识</dt>
+                    <dd>{artifact.id}</dd>
+                  </div>
+                  <div>
+                    <dt>安全位置</dt>
+                    <dd>{artifact.uri}</dd>
+                  </div>
+                  <div>
+                    <dt>内容哈希</dt>
+                    <dd>{artifact.contentHash}</dd>
+                  </div>
+                </dl>
+                <div className="button-row">
+                  <button className="quiet-button" onClick={() => onPreviewArtifact?.(artifact.id)}>
+                    查看内容
+                  </button>
+                </div>
+              </article>
+            ))}
           </div>
-        ))}
-        {artifacts.length === 0 ? (
-          <div>
-            <dt>产物</dt>
-            <dd>等待 Runtime artifact manifest。</dd>
+        </>
+      ) : (
+        <p className="body-copy">当前 Run 还没有已验证的 Artifact 或 Evidence。</p>
+      )}
+      {preview ? (
+        <article className="gate-record" aria-label="产物预览">
+          <div className="panel-heading">
+            <strong>内容预览</strong>
+            <span className={`status-pill${preview.integrity === "changed" ? " status-blocked" : ""}`}>
+              {preview.integrity === "changed" ? "文件内容已变更" : "内容与登记哈希一致"}
+            </span>
           </div>
-        ) : null}
-      </dl>
+          <dl className="facts">
+            <div>
+              <dt>媒体类型</dt>
+              <dd>{preview.mediaType}</dd>
+            </div>
+            <div>
+              <dt>文件大小</dt>
+              <dd>{preview.sizeBytes} bytes</dd>
+            </div>
+            <div>
+              <dt>当前哈希</dt>
+              <dd>{preview.currentHash}</dd>
+            </div>
+          </dl>
+          {preview.content === null ? (
+            <p className="body-copy">该产物为二进制内容，无法在工作台内直接展示。</p>
+          ) : (
+            <pre className="terminal-readout" aria-label="产物内容预览">
+              {preview.content}
+            </pre>
+          )}
+          {preview.truncated ? <p className="body-copy">预览已按安全上限截断。</p> : null}
+        </article>
+      ) : null}
+      {comparison ? (
+        <article className="gate-record" aria-label="产物差异">
+          <div className="panel-heading">
+            <strong>产物差异</strong>
+            <span className="status-pill">
+              {comparison.before.id} → {comparison.after.id}
+            </span>
+          </div>
+          <pre className="terminal-readout" aria-label="产物差异内容">
+            {diffArtifactText(comparison.before.content, comparison.after.content)
+              .map((line) => `${line.kind === "added" ? "+ " : line.kind === "removed" ? "- " : "  "}${line.text}`)
+              .join("\n")}
+          </pre>
+        </article>
+      ) : null}
     </section>
   );
 }

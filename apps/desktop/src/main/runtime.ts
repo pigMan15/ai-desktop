@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 export type RuntimeHealth = {
@@ -43,7 +44,15 @@ type ManagedRuntimeOptions = {
   pythonCommand?: string;
   spawnProcess?: SpawnProcess;
   healthCheck?: (url: string) => Promise<RuntimeHealth>;
+  healthRetryAttempts?: number;
+  healthRetryDelayMs?: number;
   env?: NodeJS.ProcessEnv;
+  runtimeToken?: string;
+};
+
+export type RuntimeRequestOptions = {
+  path: string;
+  body?: unknown;
 };
 
 export function runtimeHealth(): RuntimeHealth {
@@ -59,7 +68,10 @@ export class ManagedRuntime {
   private readonly pythonCommand: string;
   private readonly spawnProcess: SpawnProcess;
   private readonly healthCheck: (url: string) => Promise<RuntimeHealth>;
+  private readonly healthRetryAttempts: number;
+  private readonly healthRetryDelayMs: number;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly runtimeToken?: string;
   private process: RuntimeProcess | null = null;
   private state: RuntimeStatus["state"] = "stopped";
   private lastError: string | null = null;
@@ -67,10 +79,14 @@ export class ManagedRuntime {
   private restartAttempted = false;
 
   constructor(options: ManagedRuntimeOptions = {}) {
-    this.externalUrl = options.externalUrl;
+    this.externalUrl = options.externalUrl?.trim() || undefined;
     this.runtimeExecutablePath = options.runtimeExecutablePath;
     this.host = options.host ?? "127.0.0.1";
-    this.portValue = options.port ?? 8765;
+    this.env = options.env ?? process.env;
+    this.runtimeToken = this.externalUrl
+      ? undefined
+      : options.runtimeToken?.trim() || randomBytes(32).toString("base64url");
+    this.portValue = options.port ?? runtimePortFromEnvironment(this.env);
     this.cwdValue = options.cwd;
     this.pythonCommand =
       options.pythonCommand ?? (process.platform === "win32" ? "python.exe" : "python");
@@ -84,7 +100,8 @@ export class ManagedRuntime {
           stdio: ["ignore", "pipe", "pipe"],
         }) as RuntimeProcess);
     this.healthCheck = options.healthCheck ?? fetchRuntimeHealth;
-    this.env = options.env ?? process.env;
+    this.healthRetryAttempts = Math.max(1, options.healthRetryAttempts ?? 20);
+    this.healthRetryDelayMs = Math.max(0, options.healthRetryDelayMs ?? 250);
   }
 
   async start(): Promise<RuntimeStatus> {
@@ -99,13 +116,13 @@ export class ManagedRuntime {
       this.process = this.spawnProcess(this.runtimeCommand(), this.runtimeArgs(), {
         cwd: this.cwdValue,
         windowsHide: true,
-        env: this.env,
+        env: this.runtimeEnvironment(),
       });
       this.attachProcessListeners(this.process);
     }
 
     try {
-      await this.healthCheck(this.url());
+      await this.waitForHealthyRuntime();
       this.state = "ready";
     } catch (error) {
       this.state = "failed";
@@ -145,6 +162,26 @@ export class ManagedRuntime {
 
   logs(): RuntimeLogEntry[] {
     return [...this.logEntries];
+  }
+
+  async request<T>(options: RuntimeRequestOptions): Promise<T> {
+    const requestPath = validateRuntimeRequestPath(options.path);
+    const headers: Record<string, string> = {};
+    if (options.body !== undefined) {
+      headers["content-type"] = "application/json";
+    }
+    if (this.runtimeToken) {
+      headers["X-Workflow-Platform-Token"] = this.runtimeToken;
+    }
+    const response = await fetch(`${this.url()}${requestPath}`, {
+      method: options.body === undefined ? "GET" : "POST",
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+    if (!response.ok) {
+      throw new Error(`Runtime API ${requestPath} failed with ${response.status}`);
+    }
+    return (await response.json()) as T;
   }
 
   private runtimeArgs(): string[] {
@@ -196,6 +233,43 @@ export class ManagedRuntime {
   private url(): string {
     return this.externalUrl ?? `http://${this.host}:${this.portValue}`;
   }
+
+  private runtimeEnvironment(): NodeJS.ProcessEnv {
+    if (!this.runtimeToken) {
+      return this.env;
+    }
+    return {
+      ...this.env,
+      WORKFLOW_PLATFORM_RUNTIME_TOKEN: this.runtimeToken,
+    };
+  }
+
+  private async waitForHealthyRuntime(): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.healthRetryAttempts; attempt += 1) {
+      try {
+        await this.healthCheck(this.url());
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < this.healthRetryAttempts) {
+          await delay(this.healthRetryDelayMs);
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function validateRuntimeRequestPath(path: string): string {
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
+    throw new Error("Runtime request path must be a relative API path");
+  }
+  return path;
 }
 
 async function fetchRuntimeHealth(url: string): Promise<RuntimeHealth> {
@@ -204,4 +278,9 @@ async function fetchRuntimeHealth(url: string): Promise<RuntimeHealth> {
     throw new Error(`Runtime health failed with ${response.status}`);
   }
   return (await response.json()) as RuntimeHealth;
+}
+
+function runtimePortFromEnvironment(env: NodeJS.ProcessEnv): number {
+  const value = Number(env.WORKFLOW_PLATFORM_RUNTIME_PORT);
+  return Number.isInteger(value) && value >= 1 && value <= 65_535 ? value : 8765;
 }
