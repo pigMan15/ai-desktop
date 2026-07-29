@@ -947,6 +947,7 @@ class AgentSessionRepository:
         job_id: str,
         provider: str,
         cwd: str,
+        max_output_bytes: int,
         created_at: str,
     ) -> None:
         self._db.execute(
@@ -958,12 +959,23 @@ class AgentSessionRepository:
                 provider,
                 status,
                 cwd,
+                max_output_bytes,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (id, run_id, job_id, provider, "QUEUED", cwd, created_at, created_at),
+            (
+                id,
+                run_id,
+                job_id,
+                provider,
+                "QUEUED",
+                cwd,
+                max_output_bytes,
+                created_at,
+                created_at,
+            ),
         )
 
     def mark_running(
@@ -1061,6 +1073,7 @@ class AgentSessionRepository:
             "desktopSessionId": row["desktop_session_id"],
             "pid": row["pid"],
             "cwd": row["cwd"],
+            "maxOutputBytes": row["max_output_bytes"],
             "recoveryReason": row["recovery_reason"],
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],

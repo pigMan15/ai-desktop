@@ -70,6 +70,7 @@ class WorkflowRuntimeService:
         self._adapter_registry = default_registry()
         self._agent_provider_factory = agent_provider_factory or _default_agent_provider
         self._agent_executors: dict[str, CliAgentExecutor] = {}
+        self._interactive_desktop_sessions: dict[str, str] = {}
         self._deploy_executors: dict[str, DeployExecutor] = {}
         self._knowledge_synthesis_executors: dict[str, CliAgentExecutor] = {}
 
@@ -1254,9 +1255,12 @@ class WorkflowRuntimeService:
         mode: str = "automatic",
         parent_job_id: str | None = None,
     ) -> dict:
-        Actor.model_validate(actor)
         if mode not in {"automatic", "interactive"}:
             raise ValueError(f"AGENT_MODE_INVALID: unsupported mode {mode}")
+        if mode == "interactive":
+            actor_model = require_trusted_human(actor, operation="启动交互式 Agent")
+        else:
+            actor_model = Actor.model_validate(actor)
         workflow = self._runs.workflow_for_run(run_id)
         if node_id not in {node.id for node in workflow.nodes}:
             raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
@@ -1288,14 +1292,18 @@ class WorkflowRuntimeService:
                 )
                 self._db.commit()
 
-        with self._lock:
+        with self._lock, self._db:
             self._agent_jobs.create(
                 id=job_id,
                 run_id=run_id,
                 node_id=node_id,
                 provider=provider,
                 status="QUEUED",
-                command=[command.executable, *command.args],
+                command=(
+                    [redact_terminal_output(item) for item in [command.executable, *command.args]]
+                    if mode == "interactive"
+                    else [command.executable, *command.args]
+                ),
                 cwd=str(project_root),
                 created_at=now,
                 mode=mode,
@@ -1311,6 +1319,7 @@ class WorkflowRuntimeService:
                     job_id=job_id,
                     provider=provider,
                     cwd=str(project_root),
+                    max_output_bytes=max_output_bytes,
                     created_at=now,
                 )
                 self._agent_sessions.append_input(
@@ -1322,12 +1331,7 @@ class WorkflowRuntimeService:
                     created_at=now,
                 )
                 self._audit.record(
-                    actor={
-                        "id": "runtime-agent",
-                        "type": "system",
-                        "source": "runtime",
-                        "trusted": True,
-                    },
+                    actor=actor_model,
                     action="agent.interactive.created",
                     resource=f"agent-session:{session_id}",
                     detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
@@ -1362,7 +1366,6 @@ class WorkflowRuntimeService:
                     detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
                     created_at=now,
                 )
-            self._db.commit()
 
         if mode == "interactive":
             with self._lock:
@@ -1455,27 +1458,34 @@ class WorkflowRuntimeService:
         if not desktop_session_id.strip() or pid <= 0:
             raise ValueError("AGENT_INTERACTIVE_SESSION_INVALID: desktop session and pid are required")
         with self._lock:
-            job, session = self._interactive_job_and_session(run_id, job_id)
-            if session["status"] != "QUEUED":
-                raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is already active")
-            self._agent_sessions.mark_running(
-                id=session["id"],
-                desktop_session_id=desktop_session_id,
-                pid=pid,
-                updated_at=now,
-            )
-            self._agent_jobs.set_running(id=job["id"], pid=pid, updated_at=now)
-            self._audit.record(
-                actor=human_actor,
-                action="agent.interactive.session.started",
-                resource=f"agent-session:{session['id']}",
-                detail={"runId": run_id, "jobId": job_id, "desktopSessionId": desktop_session_id},
-                created_at=now,
-            )
-            self._db.commit()
-            started = self._agent_sessions.get_for_job(job_id)
-        if started is None:
-            raise KeyError(f"Interactive agent session not found: {job_id}")
+            with self._db:
+                job, session = self._interactive_job_and_session(run_id, job_id)
+                if session["status"] != "QUEUED":
+                    raise ValueError(
+                        "AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is already active"
+                    )
+                self._agent_sessions.mark_running(
+                    id=session["id"],
+                    desktop_session_id=desktop_session_id,
+                    pid=pid,
+                    updated_at=now,
+                )
+                self._agent_jobs.set_running(id=job["id"], pid=pid, updated_at=now)
+                self._audit.record(
+                    actor=human_actor,
+                    action="agent.interactive.session.started",
+                    resource=f"agent-session:{session['id']}",
+                    detail={
+                        "runId": run_id,
+                        "jobId": job_id,
+                        "desktopSessionId": desktop_session_id,
+                    },
+                    created_at=now,
+                )
+                started = self._agent_sessions.get_for_job(job_id)
+            if started is None:
+                raise KeyError(f"Interactive agent session not found: {job_id}")
+            self._interactive_desktop_sessions[job_id] = desktop_session_id
         return started
 
     def record_interactive_agent_input(
@@ -1491,7 +1501,7 @@ class WorkflowRuntimeService:
         if "\x00" in content or not content.strip():
             raise ValueError("AGENT_INTERACTIVE_INPUT_INVALID: input cannot be blank or contain NUL")
         redacted_content = redact_terminal_output(content.strip())
-        with self._lock:
+        with self._lock, self._db:
             _job, session = self._interactive_job_and_session(run_id, job_id)
             if session["status"] != "RUNNING":
                 raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not running")
@@ -1519,7 +1529,6 @@ class WorkflowRuntimeService:
                 detail={"runId": run_id, "jobId": job_id, "sequence": sequence},
                 created_at=now,
             )
-            self._db.commit()
         return recorded
 
     def list_agent_input(self, session_id: str) -> list[dict]:
@@ -1533,38 +1542,83 @@ class WorkflowRuntimeService:
         events: list[dict[str, str]],
         now: str,
     ) -> list[dict]:
-        with self._lock:
+        output_data: list[str] = []
+        for event in events:
+            data = event.get("data")
+            if not isinstance(data, str) or not data:
+                raise ValueError(
+                    "AGENT_INTERACTIVE_OUTPUT_INVALID: event data must be a non-empty string"
+                )
+            output_data.append(data)
+        output_limit_error: str | None = None
+        with self._lock, self._db:
             _job, session = self._interactive_job_and_session(run_id, job_id)
             if session["status"] != "RUNNING":
                 raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not running")
             current_output = self._agent_jobs.list_output(job_id)
-            next_sequence = current_output[-1]["sequence"] + 1 if current_output else 1
-            recorded: list[dict] = []
-            for event in events:
-                data = event.get("data")
-                if not isinstance(data, str) or not data:
-                    raise ValueError(
-                        "AGENT_INTERACTIVE_OUTPUT_INVALID: event data must be a non-empty string"
-                    )
-                item = {
-                    "id": f"{job_id}:output:{next_sequence}",
-                    "jobId": job_id,
-                    "sequence": next_sequence,
-                    "kind": "terminal_raw",
-                    "payload": {"text": redact_terminal_output(data)},
-                    "createdAt": now,
-                }
-                self._agent_jobs.append_output(
-                    id=item["id"],
-                    job_id=job_id,
-                    sequence=next_sequence,
-                    kind=item["kind"],
-                    payload=item["payload"],
+            current_bytes = sum(
+                len(str(event["payload"].get("text", "")).encode("utf-8"))
+                for event in current_output
+            )
+            incoming_bytes = sum(len(data.encode("utf-8")) for data in output_data)
+            if current_bytes + incoming_bytes > session["maxOutputBytes"]:
+                error = (
+                    "AGENT_OUTPUT_LIMIT: interactive CLI output exceeded "
+                    f"{session['maxOutputBytes']} bytes"
+                )
+                self._agent_sessions.finish(
+                    id=session["id"],
+                    status="FAILED",
+                    recovery_reason=None,
+                    ended_at=now,
+                )
+                self._agent_jobs.finish(
+                    id=job_id,
+                    status="FAILED",
+                    summary=None,
+                    error=error,
+                    updated_at=now,
+                )
+                self._audit.record(
+                    actor={
+                        "id": "runtime-agent",
+                        "type": "system",
+                        "source": "runtime",
+                        "trusted": True,
+                    },
+                    action="agent.interactive.session.failed",
+                    resource=f"agent-session:{session['id']}",
+                    detail={"runId": run_id, "jobId": job_id, "reason": "AGENT_OUTPUT_LIMIT"},
                     created_at=now,
                 )
-                recorded.append(item)
-                next_sequence += 1
-            self._db.commit()
+                output_limit_error = error
+            if output_limit_error is not None:
+                recorded = []
+            else:
+                next_sequence = current_output[-1]["sequence"] + 1 if current_output else 1
+                recorded = []
+                for data in output_data:
+                    item = {
+                        "id": f"{job_id}:output:{next_sequence}",
+                        "jobId": job_id,
+                        "sequence": next_sequence,
+                        "kind": "terminal_raw",
+                        "payload": {"text": redact_terminal_output(data)},
+                        "createdAt": now,
+                    }
+                    self._agent_jobs.append_output(
+                        id=item["id"],
+                        job_id=job_id,
+                        sequence=next_sequence,
+                        kind=item["kind"],
+                        payload=item["payload"],
+                        created_at=now,
+                    )
+                    recorded.append(item)
+                    next_sequence += 1
+        if output_limit_error is not None:
+            self._interactive_desktop_sessions.pop(job_id, None)
+            raise ValueError(output_limit_error)
         return recorded
 
     def finish_interactive_agent_session(
@@ -1581,7 +1635,7 @@ class WorkflowRuntimeService:
         human_actor = require_trusted_human(actor, operation="结束交互式 Agent 会话")
         if status not in {"COMPLETED", "FAILED", "CANCELLED", "RECOVERABLE"}:
             raise ValueError(f"AGENT_INTERACTIVE_SESSION_STATUS_INVALID: unsupported status {status}")
-        with self._lock:
+        with self._lock, self._db:
             job, session = self._interactive_job_and_session(run_id, job_id)
             if session["status"] not in {"QUEUED", "RUNNING"}:
                 raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is already finished")
@@ -1607,10 +1661,10 @@ class WorkflowRuntimeService:
                 detail={"runId": run_id, "jobId": job_id, "status": status},
                 created_at=now,
             )
-            self._db.commit()
             finished = self._agent_sessions.get_for_job(job_id)
         if finished is None:
             raise KeyError(f"Interactive agent session not found: {job_id}")
+        self._interactive_desktop_sessions.pop(job_id, None)
         return finished
 
     def continue_interactive_agent(
@@ -1622,15 +1676,21 @@ class WorkflowRuntimeService:
         now: str,
     ) -> dict:
         require_trusted_human(actor, operation="继续交互式 Agent 会话")
-        with self._lock:
+        with self._lock, self._db:
             job, session = self._interactive_job_and_session(run_id, job_id)
             if session["status"] not in {"FAILED", "CANCELLED", "RECOVERABLE"}:
                 raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not continuable")
             history = self._agent_sessions.list_input(session["id"])
+            output = self._agent_jobs.list_output(job_id)
         history_lines = [
             f"{'用户' if item['kind'] == 'human_input' else '提示'}：{item['content']}"
             for item in history
         ]
+        history_lines.extend(
+            f"Agent：{item['payload'].get('text', '')}"
+            for item in output[-100:]
+            if item["kind"] == "terminal_raw"
+        )
         return self.start_agent_job(
             run_id,
             node_id=job["nodeId"],
@@ -1739,12 +1799,58 @@ class WorkflowRuntimeService:
             raise KeyError(f"Agent job not found: {job_id}")
         return self._agent_jobs.list_output(job_id, after_sequence=after_sequence)
 
-    def cancel_agent_job(self, run_id: str, job_id: str) -> dict:
+    def cancel_agent_job(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        actor: dict | None = None,
+        now: str | None = None,
+    ) -> dict:
         job = self.get_agent_job(run_id, job_id)
         executor = self._agent_executors.get(job_id)
         if executor is not None:
             executor.cancel(job_id)
-        return job
+            return job
+        if job["mode"] != "interactive" or job["status"] not in {"QUEUED", "RUNNING"}:
+            return job
+
+        human_actor = require_trusted_human(actor or {}, operation="取消交互式 Agent 会话")
+        if not now:
+            raise ValueError("AGENT_INTERACTIVE_SESSION_INVALID: cancellation time is required")
+
+        with self._lock, self._db:
+            current_job, session = self._interactive_job_and_session(run_id, job_id)
+            if current_job["status"] not in {"QUEUED", "RUNNING"} or session["status"] not in {
+                "QUEUED",
+                "RUNNING",
+            }:
+                return current_job
+            self._agent_sessions.finish(
+                id=session["id"],
+                status="CANCELLED",
+                recovery_reason=None,
+                ended_at=now,
+            )
+            self._agent_jobs.finish(
+                id=job_id,
+                status="CANCELLED",
+                summary="交互式 Agent 会话已取消",
+                error=None,
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action="agent.interactive.session.cancelled",
+                resource=f"agent-session:{session['id']}",
+                detail={"runId": run_id, "jobId": job_id},
+                created_at=now,
+            )
+            cancelled = self._agent_jobs.get(job_id)
+        if cancelled is None:
+            raise KeyError(f"Agent job not found: {job_id}")
+        self._interactive_desktop_sessions.pop(job_id, None)
+        return cancelled
 
     def start_deployment(
         self,
@@ -2001,7 +2107,17 @@ class WorkflowRuntimeService:
             orphan_agent_job_ids = [
                 job["id"]
                 for job in jobs
-                if job["status"] in {"QUEUED", "RUNNING"} and job["id"] not in self._agent_executors
+                if job["status"] in {"QUEUED", "RUNNING"}
+                and (
+                    (
+                        job["mode"] == "automatic"
+                        and job["id"] not in self._agent_executors
+                    )
+                    or (
+                        job["mode"] == "interactive"
+                        and not self._interactive_job_has_active_desktop_session(job["id"])
+                    )
+                )
             ]
             orphan_terminal_session_ids = [
                 session["id"] for session in terminal_sessions if session["status"] == "running"
@@ -2029,7 +2145,16 @@ class WorkflowRuntimeService:
                     job["id"]
                     for job in self._agent_jobs.list_for_run(run_id)
                     if job["status"] in {"QUEUED", "RUNNING"}
-                    and job["id"] not in self._agent_executors
+                    and (
+                        (
+                            job["mode"] == "automatic"
+                            and job["id"] not in self._agent_executors
+                        )
+                        or (
+                            job["mode"] == "interactive"
+                            and not self._interactive_job_has_active_desktop_session(job["id"])
+                        )
+                    )
                 ]
                 for job_id in orphan_job_ids:
                     job = self._agent_jobs.get(job_id)
@@ -2057,6 +2182,7 @@ class WorkflowRuntimeService:
                                 ),
                                 ended_at=now,
                             )
+                        self._interactive_desktop_sessions.pop(job_id, None)
                 if orphan_job_ids:
                     self._audit.record(
                         actor={
@@ -2238,6 +2364,12 @@ class WorkflowRuntimeService:
         if session is None:
             raise ValueError("AGENT_INTERACTIVE_SESSION_REQUIRED: session is missing")
         return job, session
+
+    def _interactive_job_has_active_desktop_session(self, job_id: str) -> bool:
+        session = self._agent_sessions.get_for_job(job_id)
+        if session is None or not session["desktopSessionId"]:
+            return False
+        return self._interactive_desktop_sessions.get(job_id) == session["desktopSessionId"]
 
     def _terminal_session_for_run(self, run_id: str, session_id: str) -> dict:
         self.get_projection(run_id)

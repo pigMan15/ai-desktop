@@ -233,6 +233,7 @@ class AgentSession(CanonicalModel):
     desktopSessionId: str | None = None
     pid: int | None = None
     cwd: str
+    maxOutputBytes: int
     recoveryReason: str | None = None
     createdAt: str
     updatedAt: str

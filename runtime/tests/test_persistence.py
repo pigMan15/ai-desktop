@@ -165,6 +165,7 @@ EXPECTED_COLUMNS = {
         ("desktop_session_id", "TEXT", False, False),
         ("pid", "INTEGER", False, False),
         ("cwd", "TEXT", True, False),
+        ("max_output_bytes", "INTEGER", True, False),
         ("recovery_reason", "TEXT", False, False),
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
@@ -427,7 +428,7 @@ def test_migrate_adds_interactive_agent_columns_and_tables_to_existing_database(
     assert {"mode", "session_id", "parent_job_id"} <= {
         row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)").fetchall()
     }
-    assert {"id", "run_id", "job_id", "provider", "status", "cwd"} <= {
+    assert {"id", "run_id", "job_id", "provider", "status", "cwd", "max_output_bytes"} <= {
         row["name"] for row in db.execute("PRAGMA table_info(agent_sessions)").fetchall()
     }
     assert {"id", "session_id", "sequence", "kind", "content"} <= {
@@ -687,6 +688,7 @@ def test_agent_session_model_accepts_camel_case_alias_payloads() -> None:
             "desktopSessionId": "pty-1",
             "pid": 1234,
             "cwd": "C:/project",
+            "maxOutputBytes": 1000000,
             "recoveryReason": None,
             "createdAt": "2026-07-29T13:00:00Z",
             "updatedAt": "2026-07-29T13:00:00Z",
@@ -741,9 +743,12 @@ def test_agent_job_repository_round_trips_job_and_output() -> None:
         "nodeId": "implement",
         "provider": "codex",
         "status": "COMPLETED",
+        "mode": "automatic",
         "command": ["codex.cmd", "exec", "--json"],
         "cwd": "C:/project",
         "pid": 1234,
+        "sessionId": None,
+        "parentJobId": None,
         "summary": "done",
         "error": None,
         "createdAt": "2026-07-27T13:00:00Z",

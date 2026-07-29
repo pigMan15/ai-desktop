@@ -367,6 +367,7 @@ def migrate(db: sqlite3.Connection) -> None:
             desktop_session_id TEXT,
             pid INTEGER,
             cwd TEXT NOT NULL,
+            max_output_bytes INTEGER NOT NULL DEFAULT 1000000,
             recovery_reason TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -393,4 +394,11 @@ def migrate(db: sqlite3.Connection) -> None:
             ON agent_input_events(session_id, sequence);
         """
     )
+    agent_session_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(agent_sessions)").fetchall()
+    }
+    if "max_output_bytes" not in agent_session_columns:
+        db.execute(
+            "ALTER TABLE agent_sessions ADD COLUMN max_output_bytes INTEGER NOT NULL DEFAULT 1000000"
+        )
     db.commit()
