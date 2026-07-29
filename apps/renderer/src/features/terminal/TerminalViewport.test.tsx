@@ -1,0 +1,125 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { TerminalViewport } from "./TerminalViewport";
+
+const terminalWrites: string[] = [];
+let terminalDataHandler: ((data: string) => void) | null = null;
+const findNext = vi.fn();
+const findPrevious = vi.fn();
+const clearDecorations = vi.fn();
+const fit = vi.fn();
+
+vi.mock("@xterm/xterm", () => ({
+  Terminal: class FakeTerminal {
+    loadAddon() {}
+    open() {}
+    write(data: string) {
+      terminalWrites.push(data);
+    }
+    clear() {
+      terminalWrites.length = 0;
+    }
+    focus() {}
+    dispose() {}
+    onData(handler: (data: string) => void) {
+      terminalDataHandler = handler;
+      return { dispose() {} };
+    }
+  },
+}));
+
+vi.mock("@xterm/addon-fit", () => ({
+  FitAddon: class FakeFitAddon {
+    fit = fit;
+  },
+}));
+
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: class FakeSearchAddon {
+    findNext = findNext;
+    findPrevious = findPrevious;
+    clearDecorations = clearDecorations;
+  },
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  terminalWrites.length = 0;
+  terminalDataHandler = null;
+});
+
+describe("TerminalViewport", () => {
+  it("writes output to xterm and sends direct user input", async () => {
+    const onInput = vi.fn();
+    render(
+      <TerminalViewport
+        ariaLabel="Agent 交互终端"
+        output={[{ sequence: 1, data: "第一行\r\n" }]}
+        writable
+        onInput={onInput}
+      />,
+    );
+
+    await waitFor(() => expect(terminalWrites).toEqual(["第一行\r\n"]));
+    terminalDataHandler?.("继续执行\r");
+
+    expect(onInput).toHaveBeenCalledWith("继续执行\r");
+    expect(screen.getByLabelText("Agent 交互终端")).toHaveClass("terminal-viewport");
+    expect(screen.getByText("第一行")).toBeInTheDocument();
+  });
+
+  it("pauses follow mode after user scrolls up and shows unread output", async () => {
+    const { rerender } = render(
+      <TerminalViewport
+        ariaLabel="交互日志"
+        output={[{ sequence: 1, data: "第一行\r\n" }]}
+        writable
+      />,
+    );
+    await waitFor(() => expect(terminalWrites).toEqual(["第一行\r\n"]));
+
+    fireEvent.scroll(screen.getByLabelText("交互日志"), { target: { scrollTop: 0 } });
+    rerender(
+      <TerminalViewport
+        ariaLabel="交互日志"
+        output={[
+          { sequence: 1, data: "第一行\r\n" },
+          { sequence: 2, data: "第二行\r\n" },
+        ]}
+        writable
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "跳到最新（1 条未读）" })).toBeVisible();
+  });
+
+  it("searches, copies, clears, and interrupts from the viewport toolbar", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const onInterrupt = vi.fn();
+    render(
+      <TerminalViewport
+        ariaLabel="ANSI 终端"
+        output={[{ sequence: 1, data: "build completed\r\n" }]}
+        writable
+        onInterrupt={onInterrupt}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("搜索终端输出"), { target: { value: "build" } });
+    await waitFor(() => expect(findNext).toHaveBeenCalledWith("build", { caseSensitive: false }));
+    fireEvent.click(screen.getByRole("button", { name: "上一个匹配" }));
+    expect(findPrevious).toHaveBeenCalledWith("build", { caseSensitive: false });
+    fireEvent.click(screen.getByRole("button", { name: "复制输出" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("build completed\r\n"));
+    fireEvent.click(screen.getByRole("button", { name: "中断" }));
+    expect(onInterrupt).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "清屏" }));
+    expect(screen.queryByText("build completed")).not.toBeInTheDocument();
+  });
+});
