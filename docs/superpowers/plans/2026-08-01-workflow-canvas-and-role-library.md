@@ -4,7 +4,7 @@
 
 **Goal:** Add a React Flow editor and platform-managed role definitions that Agent nodes bind into Runtime prompts.
 
-**Architecture:** The canonical workflow stores full role definitions and optional canvas positions in versioned `metadata`; existing `definition_json` persistence therefore captures a Run's role snapshot. Runtime validates references and composes a role section before node instructions. The renderer projects the existing JSON draft to `@xyflow/react`, retaining JSON editing as a recovery path.
+**Architecture:** The canonical workflow stores full role definitions and optional canvas positions in versioned `metadata`; existing `definition_json` persistence therefore captures a Run's role snapshot. Existing `node.role` remains a business or approval role, while Agent execution uses `node.agent.roleId`; Runtime validates that reference and composes a role section before node instructions. The renderer projects the existing JSON draft to `@xyflow/react`, retaining JSON editing as a recovery path.
 
 **Tech Stack:** React 18, TypeScript, `@xyflow/react`, Vitest, FastAPI, Pydantic, SQLite, pytest, Playwright.
 
@@ -37,7 +37,7 @@ it("accepts a versioned role and canvas coordinates", () => {
   const workflow: WorkflowDefinition = {
     ...baseWorkflow,
     roles: [{ id: "developer", name: "Developer", instructions: "Implement only the approved plan.", provider: "codex", allowedTools: ["read", "edit", "test"] }],
-    nodes: [{ ...baseWorkflow.nodes[0], kind: "agent", role: "developer" }],
+    nodes: [{ ...baseWorkflow.nodes[0], kind: "agent", agent: { roleId: "developer" } }],
     metadata: { canvas: { nodes: { plan: { x: 240, y: 96 } } } },
   };
   expect(workflow.roles[0].instructions).toContain("approved plan");
@@ -70,7 +70,7 @@ export type WorkflowMetadata = Record<string, unknown> & {
 };
 ```
 
-Use `WorkflowRole[]` for `WorkflowDefinition.roles` and `WorkflowMetadata` for `metadata`. Leave the existing optional `WorkflowNode.role` unchanged.
+Use `WorkflowRole[]` for `WorkflowDefinition.roles` and `WorkflowMetadata` for `metadata`. Leave the existing optional `WorkflowNode.role` unchanged and add optional `NodeAgentSpec.roleId` for Agent execution binding.
 
 - [ ] **Step 4: Add the canvas dependency**
 
@@ -102,7 +102,7 @@ git commit -m "feat: add workflow role and canvas contracts"
 ```py
 def test_compile_workflow_rejects_invalid_role_references() -> None:
     workflow = _workflow(
-        nodes=[WorkflowNode(id="implement", name="Implement", kind="agent", role="missing")],
+        nodes=[WorkflowNode(id="implement", name="Implement", kind="agent", agent=NodeAgentSpec(roleId="missing"))],
         roles=[],
     )
     codes = {item["code"] for item in compile_workflow(workflow)["diagnostics"]}
@@ -110,7 +110,7 @@ def test_compile_workflow_rejects_invalid_role_references() -> None:
 
 def test_compile_workflow_rejects_role_on_non_agent_node() -> None:
     workflow = _workflow(
-        nodes=[WorkflowNode(id="review", name="Review", kind="approval", role="developer")],
+        nodes=[WorkflowNode(id="review", name="Review", kind="approval", agent=NodeAgentSpec(roleId="developer"))],
         roles=[Role(id="developer", name="Developer", instructions="Review code")],
     )
     codes = {item["code"] for item in compile_workflow(workflow)["diagnostics"]}
@@ -137,7 +137,7 @@ class Role(CanonicalModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 ```
 
-Build a role map in `compile_workflow`. Emit `DUPLICATE_ROLE_ID`, `INVALID_ROLE_DEFINITION`, `NODE_ROLE_MISSING`, `NODE_ROLE_DISABLED`, and `NODE_ROLE_UNSUPPORTED`. A no-role Agent node remains valid. Validate `metadata.canvas` only as an editor warning: ignore unknown node IDs and non-finite coordinates instead of making layout execution data.
+Build a role map in `compile_workflow`. Emit `DUPLICATE_ROLE_ID`, `INVALID_ROLE_DEFINITION`, `AGENT_ROLE_MISSING`, `AGENT_ROLE_DISABLED`, and `AGENT_ROLE_UNSUPPORTED` for `node.agent.roleId`. A no-role Agent node remains valid and existing `node.role` is never reinterpreted. Validate `metadata.canvas` only as an editor warning: ignore unknown node IDs and non-finite coordinates instead of making layout execution data.
 
 - [ ] **Step 4: Write the failing prompt-order test**
 
@@ -153,8 +153,8 @@ def test_start_agent_job_includes_role_before_node_requirements(tmp_path) -> Non
 - [ ] **Step 5: Implement effective prompt composition**
 
 ```py
-if node.role:
-    role = next(candidate for candidate in workflow.roles if candidate.id == node.role)
+if node.agent.roleId:
+    role = next(candidate for candidate in workflow.roles if candidate.id == node.agent.roleId)
     lines = [f"角色：{role.name}"]
     if role.description:
         lines.append(f"说明：{role.description}")
@@ -206,7 +206,7 @@ Expected: failure because `workflowCanvas.ts` does not exist.
 
 - [ ] **Step 3: Implement renderer DTOs and helpers**
 
-Add the full `WorkflowRoleSummary` and `node.role` types to `WorkflowDefinitionSummary`. Implement `toFlowGraph`, `applyNodePositions`, `addFlowEdge`, `removeFlowEdges`, and `autoLayoutPositions`. The layout algorithm uses topological layers, 260px horizontal spacing, 150px vertical spacing, and lexical ID ordering for disconnected nodes. Every helper returns a new draft object and rejects self/duplicate edges.
+Add the full `WorkflowRoleSummary` and `node.agent.roleId` types to `WorkflowDefinitionSummary`. Implement `toFlowGraph`, `applyNodePositions`, `addFlowEdge`, `removeFlowEdges`, and `autoLayoutPositions`. The layout algorithm uses topological layers, 260px horizontal spacing, 150px vertical spacing, and lexical ID ordering for disconnected nodes. Every helper returns a new draft object and rejects self/duplicate edges.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -233,7 +233,7 @@ git commit -m "feat: map workflow drafts to flow canvas state"
 it("selects a canvas node and saves an edge created on the canvas", () => {
   render(<WorkflowViewer state={null} workflow={twoNodeWorkflow} onSaveDefinition={onSaveDefinition} />);
   fireEvent.click(screen.getByRole("button", { name: "选择节点 plan" }));
-  expect(screen.getByLabelText("节点 plan 的角色")).toBeInTheDocument();
+  expect(screen.getByLabelText("节点 plan 的执行角色")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "连接 plan 到 implement" }));
   fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
   expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({ edges: [expect.objectContaining({ from: "plan", to: "implement" })] }));
@@ -268,7 +268,7 @@ Import `@xyflow/react/dist/style.css` in this component. Custom nodes show name,
 
 - [ ] **Step 4: Compose the canvas with a selected-node inspector**
 
-Replace the repeated node cards plus source/target selects in `WorkflowViewer` with a three-column `.workflow-editor`: node toolbox, canvas, and inspector. Retain the JSON editor, simulation, export, history, reset and save controls. The inspector owns node type, role, Agent, Artifact, advance mode and delete actions. Changing away from `kind: "agent"` clears `agent` and `role`.
+Replace the repeated node cards plus source/target selects in `WorkflowViewer` with a three-column `.workflow-editor`: node toolbox, canvas, and inspector. Retain the JSON editor, simulation, export, history, reset and save controls. The inspector owns node type, execution-role selection, Agent, Artifact, advance mode and delete actions. Changing away from `kind: "agent"` clears `agent.roleId` with the Agent configuration but preserves existing `node.role`.
 
 - [ ] **Step 5: Add responsive styles**
 
@@ -311,7 +311,7 @@ it("creates a developer role template and binds it to an Agent node", () => {
   render(<WorkflowViewer state={null} workflow={agentWorkflow} />);
   fireEvent.click(screen.getByRole("button", { name: "新增角色" }));
   fireEvent.click(screen.getByRole("button", { name: "使用开发模板" }));
-  fireEvent.change(screen.getByLabelText("节点 implement 的角色"), { target: { value: "developer" } });
+  fireEvent.change(screen.getByLabelText("节点 implement 的执行角色"), { target: { value: "developer" } });
   expect(screen.getByDisplayValue("developer")).toBeInTheDocument();
 });
 
@@ -339,7 +339,7 @@ export const ROLE_TEMPLATES = [
 ];
 ```
 
-`RoleLibrary` edits `id`, `name`, `description`, `instructions`, `provider`, `allowedTools` and `disabled` through `onChange(nextRoles)`. Copy templates using a collision-free ID. Reject deletion with a rendered list of referencing node IDs. The selected-node inspector shows an `未绑定角色` option and active roles; it only appears for Agent nodes.
+`RoleLibrary` edits `id`, `name`, `description`, `instructions`, `provider`, `allowedTools` and `disabled` through `onChange(nextRoles)`. Copy templates using a collision-free ID. Reject deletion with a rendered list of nodes whose `agent.roleId` references it. The selected-node inspector shows an `未绑定执行角色` option and active roles; it only appears for Agent nodes.
 
 - [ ] **Step 4: Write a failing Run launch-default test**
 
@@ -353,7 +353,7 @@ it("uses the selected node role defaults when starting an Agent", () => {
 });
 ```
 
-Pass `workflow` into `RunDashboard`. When `currentNodeId` changes, resolve `node.role` against `workflow.roles` and prefill `agentProvider` plus a read-only summary of the role's allowed tools. Let the operator override Provider explicitly. Extend `onStartAgent`, `handleStartAgent`, and `runtimeClient.startAgentJob` with `allowedTools: string[]`; send the resolved list in the existing API request so Runtime persists the actual launch options.
+Pass `workflow` into `RunDashboard`. When `currentNodeId` changes, resolve `node.agent.roleId` against `workflow.roles` and prefill `agentProvider` plus a read-only summary of the role's allowed tools. Let the operator override Provider explicitly. Extend `onStartAgent`, `handleStartAgent`, and `runtimeClient.startAgentJob` with `allowedTools: string[]`; send the resolved list in the existing API request so Runtime persists the actual launch options.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -401,7 +401,7 @@ test("operator binds a platform role to a canvas node", async ({ page }) => {
   await page.getByRole("button", { name: "新增角色" }).click();
   await page.getByRole("button", { name: "使用开发模板" }).click();
   await page.getByRole("button", { name: "选择节点 implement" }).click();
-  await page.getByLabel("节点 implement 的角色").selectOption("developer");
+  await page.getByLabel("节点 implement 的执行角色").selectOption("developer");
   await page.getByRole("button", { name: "保存新版本" }).click();
   await expect(page.getByText("开发")).toBeVisible();
 });
@@ -426,4 +426,4 @@ git commit -m "test: cover role-aware workflow execution"
 
 ## Plan Self-Review
 
-The tasks cover all approved requirements: platform-owned roles, canvas edit projection, node binding, compiler enforcement, prompt injection, version snapshots, no `.harness` dependency, compatibility for old no-role Agent nodes, and tests at every layer. Field names are consistent across the contracts, Runtime and renderer. `metadata.canvas.nodes` is the sole layout location, so layout cannot alter execution semantics. The plan contains concrete test code, implementation targets, commands and expected outcomes for every task.
+The tasks cover all approved requirements: platform-owned roles, canvas edit projection, Agent-only binding through `node.agent.roleId`, compiler enforcement, prompt injection, version snapshots, no `.harness` dependency, compatibility for existing `node.role` and no-role Agent nodes, and tests at every layer. Field names are consistent across the contracts, Runtime and renderer. `metadata.canvas.nodes` is the sole layout location, so layout cannot alter execution semantics. The plan contains concrete test code, implementation targets, commands and expected outcomes for every task.

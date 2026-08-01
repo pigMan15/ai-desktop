@@ -34,7 +34,8 @@ type WorkflowRole = {
 
 type WorkflowNode = {
   // existing fields
-  role?: string;
+  role?: string; // Existing business or approval role; unchanged.
+  agent?: NodeAgentSpec & { roleId?: string };
 };
 
 type WorkflowMetadata = {
@@ -44,7 +45,7 @@ type WorkflowMetadata = {
 };
 ```
 
-`role` 是角色 ID，不复制角色正文。角色正文随 `WorkflowDefinition` 一起版本化。`metadata.canvas` 仅保存编辑器位置；Runtime 编译、执行、导出通用 YAML 时不依赖坐标。
+`node.role` 保留现有工作流对业务职责、审批角色的表达，不复用于执行 Agent。`node.agent.roleId` 是 Agent 角色 ID，不复制角色正文。角色正文随 `WorkflowDefinition` 一起版本化。`metadata.canvas` 仅保存编辑器位置；Runtime 编译、执行、导出通用 YAML 时不依赖坐标。
 
 每个 Run 在创建时保存该工作流版本的完整定义，Agent Job 另持久化最终 `effectivePrompt`。后续修改角色或画布均不会影响已运行或已完成的 Run。
 
@@ -52,7 +53,7 @@ type WorkflowMetadata = {
 
 角色是可复用的执行说明，内容包含职责、边界、需要读取的上下文、输出要求。节点是一次具体工作环节，保留自身的 `promptTemplate`、Artifact 声明和上下游配置。
 
-仅 `kind: "agent"` 的节点可绑定角色。一个节点至多绑定一个角色；相同角色可被多个节点复用。节点可以无角色运行，用其现有节点提示词保持向后兼容。禁用角色不能被新节点绑定，但保留旧版本与已有 Run 的可追溯性。
+仅 `kind: "agent"` 的节点可通过 `node.agent.roleId` 绑定执行角色。一个节点至多绑定一个执行角色；相同角色可被多个节点复用。节点可以无执行角色运行，用其现有节点提示词保持向后兼容。禁用角色不能被新节点绑定，但保留旧版本与已有 Run 的可追溯性。
 
 内置模板至少包括：需求分析、技术架构、计划、开发、测试、验证、部署和编排。模板属于平台资源，创建工作流时复制为该工作流版本内的角色定义，用户可以自由编辑副本。
 
@@ -73,8 +74,8 @@ Runtime 以固定顺序组装有效提示词：
 保存与模拟前的工作流编译增加以下诊断：
 
 - 角色 ID 重复、空 ID、空名称或空 instructions。
-- Agent 节点引用不存在或已禁用的角色。
-- 非 Agent 节点设置角色。
+- Agent 节点的 `agent.roleId` 引用不存在或已禁用的角色。
+- 非 Agent 节点设置 `agent.roleId`。
 - 角色声明未知 Provider 或非法工具标识。
 - 画布布局包含未知节点或非有限坐标时忽略布局并返回警告，不阻止工作流运行。
 
@@ -86,7 +87,7 @@ Runtime 以固定顺序组装有效提示词：
 
 - 左侧：节点类型工具箱与角色库入口。
 - 中间：React Flow 画布，节点显示名称、类型、已绑定角色、Run 状态和校验错误；连接手柄只用于定义前后依赖。
-- 右侧：选中节点的属性面板，包含节点类型、角色选择、Agent、Artifact、推进方式与删除操作。
+- 右侧：选中节点的属性面板，包含节点类型、执行角色选择、Agent、Artifact、推进方式与删除操作。
 
 角色库用独立视图或抽屉展示角色列表和 Markdown 文本编辑器。创建角色时可选择内置模板或空白角色。节点删除会同时删除相连边；角色删除在仍被当前工作流引用时应被拒绝，并提示先解绑或替换引用。
 
