@@ -48,6 +48,24 @@ export type NodeAdvanceSpec = {
   mode: "manual" | "auto";
 };
 
+export type WorkflowRole = {
+  id: string;
+  name: string;
+  description?: string;
+  instructions?: string;
+  provider?: "codex" | "claude";
+  allowedTools?: string[];
+  disabled?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+export type WorkflowMetadata = {
+  canvas?: {
+    nodes: Record<string, { x: number; y: number }>;
+  };
+  [key: string]: unknown;
+};
+
 export type WorkflowNode = {
   id: string;
   name: string;
@@ -78,8 +96,8 @@ export type WorkflowDefinition = {
   sourceAdapter: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
-  roles: Array<{ id: string; name: string }>;
+  roles: WorkflowRole[];
   gates: Array<{ id: string; name: string; description?: string }>;
   policies: Record<string, unknown>;
-  metadata: Record<string, unknown>;
+  metadata: WorkflowMetadata;
 };
