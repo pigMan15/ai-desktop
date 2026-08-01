@@ -143,6 +143,7 @@ it("accepts planned workflow, projection, and transition shapes", () => {
           ],
         },
         agent: {
+          roleId: "engineer",
           context: {
             upstream: "direct",
             maxArtifacts: 8,
@@ -216,12 +217,14 @@ it("accepts planned workflow, projection, and transition shapes", () => {
   expect({
     workflowId: workflow.id,
     roleInstructions: workflow.roles[0]?.instructions,
+    agentRoleId: workflow.nodes[0]?.agent?.roleId,
     nodePosition: workflow.metadata.canvas?.nodes["node-1"],
     runStatus: transition.run.status,
     emittedType: transition.emittedEvents[0]?.type,
   }).toEqual({
     workflowId: "workflow-1",
     roleInstructions: "Build and verify the change.",
+    agentRoleId: "engineer",
     nodePosition: { x: 120, y: 80 },
     runStatus: "REVIEWING",
     emittedType: "HUMAN_APPROVED",

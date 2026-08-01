@@ -40,6 +40,7 @@ export type AgentContextSpec = {
 };
 
 export type NodeAgentSpec = {
+  roleId?: string;
   promptTemplate?: string;
   context: AgentContextSpec;
 };
