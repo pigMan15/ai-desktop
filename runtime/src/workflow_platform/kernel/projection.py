@@ -37,49 +37,66 @@ def rebuild_projection(
     for run_event in ordered_events:
         if run_event.type == "NODE_STARTED" and run_event.nodeId:
             has_started_node = True
-            node_states[run_event.nodeId] = "RUNNING"
-            status = "IN_PROGRESS"
+            if _is_approval_node(workflow, run_event.nodeId):
+                node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+                status = "REVIEWING"
+            else:
+                node_states[run_event.nodeId] = "RUNNING"
+                status = "IN_PROGRESS"
         elif run_event.type == "ARTIFACT_SUBMITTED" and run_event.nodeId:
-            node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+            node = _workflow_node(workflow, run_event.nodeId)
+            if node is not None and node.artifacts.outputs:
+                if node_states.get(run_event.nodeId) == "AWAITING_ARTIFACT":
+                    _evaluate_declared_artifact_completion(
+                        workflow,
+                        run_event.nodeId,
+                        ordered_events[: ordered_events.index(run_event) + 1],
+                        node_states,
+                    )
+                    status = _status_from_nodes(node_states, has_started_node)
+            else:
+                node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+                status = "REVIEWING"
+        elif run_event.type == "ARTIFACT_INVALIDATED" and run_event.nodeId:
+            if _node_requires_approval(workflow, run_event.nodeId):
+                node_states[run_event.nodeId] = "AWAITING_APPROVAL"
+            elif _node_requires_gate(workflow, run_event.nodeId):
+                node_states[run_event.nodeId] = "AWAITING_GATE"
+            else:
+                node_states[run_event.nodeId] = "AWAITING_ARTIFACT"
             status = "REVIEWING"
         elif run_event.type == "NODE_COMPLETED" and run_event.nodeId:
-            if _node_requires_approval(workflow, run_event.nodeId):
+            node = _workflow_node(workflow, run_event.nodeId)
+            if node is not None and node.artifacts.outputs:
+                _evaluate_declared_artifact_completion(
+                    workflow,
+                    run_event.nodeId,
+                    ordered_events[: ordered_events.index(run_event) + 1],
+                    node_states,
+                )
+                status = _status_from_nodes(node_states, has_started_node)
+            elif _node_requires_approval(workflow, run_event.nodeId):
                 node_states[run_event.nodeId] = "AWAITING_APPROVAL"
                 status = "REVIEWING"
             elif _node_requires_gate(workflow, run_event.nodeId):
                 node_states[run_event.nodeId] = "AWAITING_GATE"
                 status = "REVIEWING"
             else:
-                node_states[run_event.nodeId] = "PASSED"
-                next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
-                if next_node_id is None:
-                    status = "DONE"
-                else:
-                    node_states[next_node_id] = "READY"
-                    status = "IN_PROGRESS"
+                _pass_node_and_ready_successors(workflow, run_event.nodeId, node_states)
+                status = _status_from_nodes(node_states, has_started_node)
         elif run_event.type == "HUMAN_APPROVED" and run_event.nodeId:
             if _node_requires_gate(workflow, run_event.nodeId):
                 node_states[run_event.nodeId] = "AWAITING_GATE"
                 status = "REVIEWING"
             else:
-                node_states[run_event.nodeId] = "PASSED"
-                next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
-                if next_node_id is None:
-                    status = "DONE"
-                else:
-                    node_states[next_node_id] = "READY"
-                    status = "IN_PROGRESS"
+                _pass_node_and_ready_successors(workflow, run_event.nodeId, node_states)
+                status = _status_from_nodes(node_states, has_started_node)
         elif run_event.type == "HUMAN_DEFERRED" and run_event.nodeId:
             node_states[run_event.nodeId] = "AWAITING_APPROVAL"
             status = "REVIEWING"
         elif run_event.type in {"GATE_PASSED", "GATE_WAIVED"} and run_event.nodeId:
-            node_states[run_event.nodeId] = "PASSED"
-            next_node_id = _first_outgoing_target(workflow, run_event.nodeId)
-            if next_node_id is None:
-                status = "DONE"
-            else:
-                node_states[next_node_id] = "READY"
-                status = "IN_PROGRESS"
+            _pass_node_and_ready_successors(workflow, run_event.nodeId, node_states)
+            status = _status_from_nodes(node_states, has_started_node)
         elif run_event.type in {"HUMAN_REJECTED", "GATE_FAILED", "NODE_FAILED"} and run_event.nodeId:
             node_states[run_event.nodeId] = "BLOCKED"
             status = "BLOCKED"
@@ -122,11 +139,61 @@ def rebuild_projection(
     )
 
 
-def _first_outgoing_target(workflow: WorkflowDefinition, node_id: str) -> str | None:
-    for edge in workflow.edges:
-        if edge.from_ == node_id:
-            return edge.to
-    return None
+def _workflow_node(workflow: WorkflowDefinition, node_id: str):
+    return next((node for node in workflow.nodes if node.id == node_id), None)
+
+
+def _evaluate_declared_artifact_completion(
+    workflow: WorkflowDefinition,
+    node_id: str,
+    events: list[RunEvent],
+    node_states: dict[str, NodeState],
+) -> None:
+    node = _workflow_node(workflow, node_id)
+    if node is None:
+        return
+    submitted_spec_ids = {
+        str(event.payload.get("artifactSpecId", ""))
+        for event in events
+        if event.type == "ARTIFACT_SUBMITTED" and event.nodeId == node_id
+    }
+    missing = [
+        output.id
+        for output in node.artifacts.outputs
+        if output.required and output.id not in submitted_spec_ids
+    ]
+    if missing:
+        node_states[node_id] = "AWAITING_ARTIFACT"
+    elif _node_requires_approval(workflow, node_id):
+        node_states[node_id] = "AWAITING_APPROVAL"
+    elif _node_requires_gate(workflow, node_id):
+        node_states[node_id] = "AWAITING_GATE"
+    else:
+        _pass_node_and_ready_successors(workflow, node_id, node_states)
+
+
+def _pass_node_and_ready_successors(
+    workflow: WorkflowDefinition,
+    node_id: str,
+    node_states: dict[str, NodeState],
+) -> None:
+    node_states[node_id] = "PASSED"
+    for target_id in _outgoing_targets(workflow, node_id):
+        if _all_predecessors_passed(workflow, target_id, node_states):
+            node_states[target_id] = "READY"
+
+
+def _outgoing_targets(workflow: WorkflowDefinition, node_id: str) -> list[str]:
+    return [edge.to for edge in workflow.edges if edge.from_ == node_id]
+
+
+def _all_predecessors_passed(
+    workflow: WorkflowDefinition,
+    node_id: str,
+    node_states: dict[str, NodeState],
+) -> bool:
+    predecessors = [edge.from_ for edge in workflow.edges if edge.to == node_id]
+    return bool(predecessors) and all(node_states.get(source) == "PASSED" for source in predecessors)
 
 
 def _node_requires_gate(workflow: WorkflowDefinition, node_id: str) -> bool:
@@ -141,8 +208,15 @@ def _node_requires_approval(workflow: WorkflowDefinition, node_id: str) -> bool:
     for node in workflow.nodes:
         if node.id != node_id:
             continue
-        return any(requirement.type == "approval" for requirement in node.requires)
+        return node.kind == "approval" or any(
+            requirement.type == "approval" for requirement in node.requires
+        )
     return False
+
+
+def _is_approval_node(workflow: WorkflowDefinition, node_id: str) -> bool:
+    node = _workflow_node(workflow, node_id)
+    return node is not None and node.kind == "approval"
 
 
 def _status_from_nodes(node_states: dict[str, NodeState], has_started_node: bool) -> str:
@@ -207,6 +281,15 @@ def _allowed_actions(
                     risk="medium",
                 )
             )
+            actions.append(
+                AllowedAction(
+                    id=f"complete:{node_id}",
+                    label="Complete node",
+                    eventType="NODE_COMPLETED",
+                    nodeId=node_id,
+                    risk="medium",
+                )
+            )
         elif state == "AWAITING_APPROVAL":
             actions.extend(
                 [
@@ -232,6 +315,16 @@ def _allowed_actions(
                         risk="medium",
                     ),
                 ]
+            )
+        elif state == "AWAITING_ARTIFACT":
+            actions.append(
+                AllowedAction(
+                    id=f"submit-artifact:{node_id}",
+                    label="Submit artifact",
+                    eventType="ARTIFACT_SUBMITTED",
+                    nodeId=node_id,
+                    risk="medium",
+                )
             )
         elif state == "AWAITING_GATE":
             actions.extend(
@@ -283,6 +376,14 @@ def _blocking_reasons(
                 BlockingReason(
                     code="WAITING_FOR_HUMAN",
                     message="Approval is required",
+                    nodeId=node_id,
+                )
+            )
+        elif state == "AWAITING_ARTIFACT":
+            reasons.append(
+                BlockingReason(
+                    code="MISSING_REQUIRED_ARTIFACT",
+                    message="A required artifact is missing",
                     nodeId=node_id,
                 )
             )

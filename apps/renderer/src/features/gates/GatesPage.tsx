@@ -101,6 +101,12 @@ export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGat
                 {gate.failureReason ? (
                   <p className="body-copy">失败原因：{gate.failureReason}</p>
                 ) : null}
+                {gate.invalidatedAt ? (
+                  <p className="body-copy">该决策已失效：{gate.invalidationReason ?? "Artifact 已变更"}</p>
+                ) : null}
+                {gate.artifactHashes?.length ? (
+                  <p className="body-copy">绑定 Artifact 哈希：{gate.artifactHashes.join("；")}</p>
+                ) : null}
                 <p className="body-copy">
                   当前阻塞：
                   {gateBlockingReasons.length > 0

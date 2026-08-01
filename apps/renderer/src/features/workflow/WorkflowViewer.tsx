@@ -17,9 +17,11 @@ type Props = {
   simulation?: WorkflowSimulation | null;
   history?: WorkflowVersionSummary[];
   diff?: WorkflowVersionDiff | null;
-  onSaveDefinition?: (definition: WorkflowDefinitionSummary) => void;
+  workflowVersionId?: string;
+  onSaveDefinition?: (definition: WorkflowDefinitionSummary) => Promise<void> | void;
   onSimulate?: () => void;
   onCompareVersion?: (workflowVersionId: string) => void;
+  onRestoreVersion?: (workflowVersionId: string) => void;
   onExportWorkflow?: (format: WorkflowExportFormat) => void;
 };
 
@@ -30,9 +32,11 @@ export function WorkflowViewer({
   simulation = null,
   history = [],
   diff = null,
+  workflowVersionId,
   onSaveDefinition,
   onSimulate,
   onCompareVersion,
+  onRestoreVersion,
   onExportWorkflow,
 }: Props) {
   const projection = state?.projection;
@@ -43,21 +47,42 @@ export function WorkflowViewer({
   const [newNodeKind, setNewNodeKind] = useState("task");
   const [edgeFrom, setEdgeFrom] = useState("");
   const [edgeTo, setEdgeTo] = useState("");
+  const [selectedHistoryVersionId, setSelectedHistoryVersionId] = useState("");
   const [exportFormat, setExportFormat] = useState<WorkflowExportFormat>("canonical-json");
   const editableWorkflow = parseWorkflowDraft(draft);
+  const draftStorageKey = workflowVersionId ? `workflow-draft:${workflowVersionId}` : null;
+  const selectedHistoryVersion = history.find((version) => version.id === selectedHistoryVersionId);
 
   useEffect(() => {
-    setDraft(workflow ? JSON.stringify(workflow, null, 2) : "");
+    const storedDraft = draftStorageKey ? window.sessionStorage.getItem(draftStorageKey) : null;
+    setDraft(storedDraft ?? (workflow ? JSON.stringify(workflow, null, 2) : ""));
     setDraftError(null);
-  }, [workflow]);
+    setSelectedHistoryVersionId("");
+  }, [draftStorageKey, workflow]);
 
-  function saveDraft() {
+  function updateStoredDraft(value: string) {
+    setDraft(value);
+    if (draftStorageKey) {
+      window.sessionStorage.setItem(draftStorageKey, value);
+    }
+  }
+
+  async function saveDraft() {
+    let parsed: WorkflowDefinitionSummary;
     try {
-      const parsed = JSON.parse(draft) as WorkflowDefinitionSummary;
-      setDraftError(null);
-      onSaveDefinition?.(parsed);
+      parsed = JSON.parse(draft) as WorkflowDefinitionSummary;
     } catch {
       setDraftError("工作流定义不是有效 JSON，无法保存新版本。");
+      return;
+    }
+    try {
+      setDraftError(null);
+      await onSaveDefinition?.(removeUnsupportedAgentSettings(parsed));
+      if (draftStorageKey) {
+        window.sessionStorage.removeItem(draftStorageKey);
+      }
+    } catch (error) {
+      setDraftError(`保存新版本失败：${error instanceof Error ? error.message : "未知错误"}`);
     }
   }
 
@@ -67,7 +92,7 @@ export function WorkflowViewer({
       setDraftError("工作流定义不是有效 JSON，无法进行图形编辑。");
       return;
     }
-    setDraft(JSON.stringify(mutator(definition), null, 2));
+    updateStoredDraft(JSON.stringify(mutator(definition), null, 2));
     setDraftError(null);
   }
 
@@ -128,6 +153,37 @@ export function WorkflowViewer({
     updateDraft((definition) => ({
       ...definition,
       edges: definition.edges.filter((edge) => edge.id !== edgeId),
+    }));
+  }
+
+  function updateNode(nodeId: string, update: (node: WorkflowDefinitionSummary["nodes"][number]) => WorkflowDefinitionSummary["nodes"][number]) {
+    updateDraft((definition) => ({
+      ...definition,
+      nodes: definition.nodes.map((node) => node.id === nodeId ? update(node) : node),
+    }));
+  }
+
+  function changeNodeKind(nodeId: string, kind: string) {
+    updateNode(nodeId, (node) => (
+      kind === "agent" ? { ...node, kind } : { ...node, kind, agent: undefined }
+    ));
+  }
+
+  function addArtifactOutput(nodeId: string) {
+    updateNode(nodeId, (node) => ({
+      ...node,
+      artifacts: {
+        outputs: [
+          ...(node.artifacts?.outputs ?? []),
+          {
+            id: `artifact-${(node.artifacts?.outputs.length ?? 0) + 1}`,
+            name: "新交付物",
+            type: "document",
+            required: true,
+            path: `docs/runs/{{runId}}/{{nodeId}}/artifact-${(node.artifacts?.outputs.length ?? 0) + 1}.md`,
+          },
+        ],
+      },
     }));
   }
 
@@ -202,17 +258,116 @@ export function WorkflowViewer({
             <>
               <div className="table-like" role="list" aria-label="工作流图节点">
                 {editableWorkflow.nodes.map((node) => (
-                  <div className="table-row" role="listitem" key={node.id}>
-                    <span>
-                      <strong>{node.name}</strong> · {node.id} · {node.kind}
-                    </span>
-                    <button
-                      className="quiet-button"
-                      aria-label={`删除节点 ${node.id}`}
-                      onClick={() => removeNode(node.id)}
-                    >
-                      删除
-                    </button>
+                  <div className="gate-record" role="listitem" key={node.id}>
+                    <div className="panel-heading">
+                      <strong><span>{node.name}</span> · {node.id} · {node.kind}</strong>
+                      <button className="quiet-button" aria-label={`删除节点 ${node.id}`} onClick={() => removeNode(node.id)}>删除</button>
+                    </div>
+                    <div className="form-grid">
+                      <label>
+                        推进方式
+                        <select
+                          aria-label={`${node.id} 推进方式`}
+                          value={node.advance?.mode ?? "manual"}
+                          onChange={(event) => updateNode(node.id, (current) => ({
+                            ...current, advance: { mode: event.target.value as "manual" | "auto" },
+                          }))}
+                        >
+                          <option value="manual">人工完成</option>
+                          <option value="auto">自动推进</option>
+                        </select>
+                      </label>
+                      <label>
+                        节点类型
+                        <select
+                          aria-label={`${node.id} 节点类型`}
+                          value={node.kind}
+                          onChange={(event) => changeNodeKind(node.id, event.target.value)}
+                        >
+                          {NODE_KINDS.map((kind) => (
+                            <option key={kind} value={kind}>{kind}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {node.kind === "agent" ? (
+                        <>
+                      <label className="form-wide">
+                        Agent 节点模板
+                        <textarea
+                          aria-label={`${node.id} Agent 节点模板`}
+                          value={node.agent?.promptTemplate ?? ""}
+                          onChange={(event) => updateNode(node.id, (current) => ({
+                            ...current,
+                            agent: {
+                              promptTemplate: event.target.value,
+                              context: current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 },
+                            },
+                          }))}
+                        />
+                      </label>
+                      <label>
+                        允许的产物类型（逗号分隔）
+                        <input
+                          aria-label={`${node.id} 允许的产物类型`}
+                          value={(node.agent?.context?.artifactTypes ?? []).join(", ")}
+                          onChange={(event) => updateNode(node.id, (current) => ({
+                            ...current,
+                            agent: {
+                              promptTemplate: current.agent?.promptTemplate,
+                              context: {
+                                ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }),
+                                artifactTypes: event.target.value.split(",").map((value) => value.trim()).filter(Boolean),
+                              },
+                            },
+                          }))}
+                        />
+                      </label>
+                      <label>
+                        最多引用产物
+                        <input type="number" min="1" aria-label={`${node.id} 最多引用产物`} value={node.agent?.context?.maxArtifacts ?? 8} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }), maxArtifacts: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                      </label>
+                      <label>
+                        单产物摘要上限
+                        <input type="number" min="1" aria-label={`${node.id} 单产物摘要上限`} value={node.agent?.context?.summaryCharsPerArtifact ?? 2000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, maxTotalChars: 8000 }), summaryCharsPerArtifact: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                      </label>
+                      <label>
+                        上下文总长度上限
+                        <input type="number" min="1" aria-label={`${node.id} 上下文总长度上限`} value={node.agent?.context?.maxTotalChars ?? 8000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000 }), maxTotalChars: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                      </label>
+                      <label>
+                        上游上下文范围
+                        <select
+                          aria-label={`${node.id} 上游上下文范围`}
+                          value={node.agent?.context?.upstream ?? "none"}
+                          onChange={(event) => updateNode(node.id, (current) => ({
+                            ...current,
+                            agent: {
+                              promptTemplate: current.agent?.promptTemplate,
+                              context: { ...(current.agent?.context ?? { maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }), upstream: event.target.value as "none" | "direct" | "ancestors" },
+                            },
+                          }))}
+                        >
+                          <option value="none">不注入</option>
+                          <option value="direct">直接上游</option>
+                          <option value="ancestors">全部上游</option>
+                        </select>
+                      </label>
+                        </>
+                      ) : null}
+                    </div>
+                    <div className="panel-heading"><strong>交付物规范</strong><button className="quiet-button" onClick={() => addArtifactOutput(node.id)}>新增交付物</button></div>
+                    {(node.artifacts?.outputs ?? []).map((output, index) => (
+                      <div className="form-grid" key={`${node.id}-${output.id}-${index}`}>
+                        <label>规范 ID<input aria-label={`${node.id} 交付物 ${index + 1} 规范 ID`} value={output.id} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) } }))} /></label>
+                        <label>名称<input aria-label={`${node.id} 交付物 ${index + 1} 名称`} value={output.name} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) } }))} /></label>
+                        <label>类型<input aria-label={`${node.id} 交付物 ${index + 1} 类型`} value={output.type} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value } : item) } }))} /></label>
+                        <label className="form-wide">项目内路径<input aria-label={`${node.id} 交付物 ${index + 1} 路径`} value={output.path} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, path: event.target.value } : item) } }))} /></label>
+                        <label>模板路径<input aria-label={`${node.id} 交付物 ${index + 1} 模板路径`} value={output.templatePath ?? ""} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, templatePath: event.target.value || undefined } : item) } }))} /></label>
+                        <label className="form-wide">交付物说明<textarea aria-label={`${node.id} 交付物 ${index + 1} 说明`} value={output.description ?? ""} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value || undefined } : item) } }))} /></label>
+                        <label><input type="checkbox" checked={output.required} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, required: event.target.checked } : item) } }))} /> 必需交付物</label>
+                        <button className="quiet-button" aria-label={`删除 ${node.id} 交付物 ${index + 1}`} onClick={() => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).filter((_, itemIndex) => itemIndex !== index) } }))}>删除交付物</button>
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
@@ -295,7 +450,7 @@ export function WorkflowViewer({
               工作流定义 JSON
               <textarea
                 value={draft}
-                onChange={(event) => setDraft(event.target.value)}
+                onChange={(event) => updateStoredDraft(event.target.value)}
                 rows={18}
                 spellCheck={false}
               />
@@ -303,10 +458,12 @@ export function WorkflowViewer({
             <label>
               比较版本
               <select
-                value={diff?.fromVersionId ?? ""}
+                value={selectedHistoryVersionId}
                 onChange={(event) => {
-                  if (event.target.value) {
-                    onCompareVersion?.(event.target.value);
+                  const selectedVersionId = event.target.value;
+                  setSelectedHistoryVersionId(selectedVersionId);
+                  if (selectedVersionId) {
+                    onCompareVersion?.(selectedVersionId);
                   }
                 }}
                 disabled={history.length === 0 || !onCompareVersion}
@@ -314,7 +471,7 @@ export function WorkflowViewer({
                 <option value="">选择版本</option>
                 {history.map((version) => (
                   <option key={version.id} value={version.id}>
-                    {version.version} · {version.createdAt}
+                    {version.version} · {version.nodeCount ?? "?"} 个节点 · {version.edgeCount ?? "?"} 条连线 · {version.createdAt}
                   </option>
                 ))}
               </select>
@@ -331,6 +488,12 @@ export function WorkflowViewer({
               </select>
             </label>
           </div>
+          {selectedHistoryVersion ? (
+            <p className="body-copy">
+              选中版本内容：{selectedHistoryVersion.nodeSummary ?? "未提供节点摘要"}。
+              {selectedHistoryVersion.nodeCount === 0 ? "警告：该版本没有任何节点，恢复后可视化编辑器将为空。" : ""}
+            </p>
+          ) : null}
           <div className="button-row">
             <button
               className="quiet-button"
@@ -348,7 +511,24 @@ export function WorkflowViewer({
             </button>
             <button
               className="quiet-button"
-              onClick={() => setDraft(JSON.stringify(workflow, null, 2))}
+              disabled={!selectedHistoryVersionId || !onRestoreVersion}
+              onClick={() => {
+                if (selectedHistoryVersion?.nodeCount === 0 && !window.confirm("该历史版本没有节点，确定要恢复吗？")) {
+                  return;
+                }
+                onRestoreVersion?.(selectedHistoryVersionId);
+              }}
+            >
+              恢复为新版本
+            </button>
+            <button
+              className="quiet-button"
+              onClick={() => {
+                if (draftStorageKey) {
+                  window.sessionStorage.removeItem(draftStorageKey);
+                }
+                setDraft(JSON.stringify(workflow, null, 2));
+              }}
             >
               重置草稿
             </button>
@@ -472,6 +652,15 @@ function parseWorkflowDraft(draft: string): WorkflowDefinitionSummary | null {
   } catch {
     return null;
   }
+}
+
+function removeUnsupportedAgentSettings(definition: WorkflowDefinitionSummary): WorkflowDefinitionSummary {
+  return {
+    ...definition,
+    nodes: definition.nodes.map(({ agent, ...node }) => (
+      node.kind === "agent" ? { ...node, agent } : node
+    )),
+  };
 }
 
 function uniqueEdgeId(baseId: string, existingIds: string[]) {

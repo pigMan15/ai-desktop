@@ -7,8 +7,29 @@ export type RuntimeWorkbenchState = {
   workflowName: string;
   projection: RunProjection | null;
   timeline: Array<{ id: string; type: string; nodeId?: string; createdAt: string }>;
-  artifacts: Array<{ id: string; type: string; uri: string; contentHash: string }>;
-  approvals: Array<{ id: string; status: string; comment?: string }>;
+  artifacts: Array<{
+    id: string;
+    nodeId?: string;
+    type: string;
+    uri: string;
+    contentHash: string;
+    artifactSpecId?: string | null;
+    workflowVersionId?: string | null;
+    relativePath?: string | null;
+    fileSize?: number | null;
+    mediaType?: string | null;
+    status?: "verified" | "provisional" | "invalidated" | null;
+    supersedesArtifactId?: string | null;
+  }>;
+  approvals: Array<{
+    id: string;
+    nodeId?: string;
+    status: string;
+    comment?: string;
+    artifactHashes?: string[];
+    invalidatedAt?: string | null;
+    invalidationReason?: string | null;
+  }>;
   gates: Array<{
     id: string;
     nodeId?: string;
@@ -19,6 +40,9 @@ export type RuntimeWorkbenchState = {
     failureReason?: string | null;
     actor?: { id?: string; type?: string };
     createdAt?: string;
+    artifactHashes?: string[];
+    invalidatedAt?: string | null;
+    invalidationReason?: string | null;
   }>;
   agentJobs: AgentJobSummary[];
   agentOutput: AgentOutputSummary[];
@@ -47,6 +71,43 @@ export type AgentJobSummary = {
   error?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ArtifactConsumer = {
+  id: string;
+  artifactId: string;
+  consumerRunId: string;
+  consumerNodeId: string;
+  agentJobId: string | null;
+  contextCreatedAt: string;
+};
+
+export type AgentStartResult = AgentJobSummary & {
+  job: AgentJobSummary;
+  effectivePrompt: string;
+  contextArtifacts: Array<{
+    artifactId?: string | null;
+    nodeId: string;
+    type: string;
+    path: string;
+    contentHash?: string | null;
+    summary: string;
+  }>;
+  expectedArtifacts: Array<{
+    id: string;
+    name: string;
+    type: string;
+    required: boolean;
+    relativePath: string;
+  }>;
+};
+
+export type NodeContextPreview = {
+  runId: string;
+  nodeId: string;
+  artifacts: AgentStartResult["contextArtifacts"];
+  prompt: string;
+  expectedArtifacts: AgentStartResult["expectedArtifacts"];
 };
 
 export type AgentSessionSummary = {
@@ -99,6 +160,31 @@ export type ArtifactPreview = {
   content: string | null;
 };
 
+export type NodeArtifactScan = {
+  runId: string;
+  nodeId: string;
+  registered: string[];
+  unchanged: string[];
+  missing: string[];
+  invalid: Array<{ artifactSpecId: string; reason: string }>;
+  projection: RunProjection;
+};
+
+export type NodeArtifactRequirements = {
+  runId: string;
+  nodeId: string;
+  requirements: Array<{
+    id: string;
+    name: string;
+    type: string;
+    required: boolean;
+    relativePath: string;
+    templatePath?: string | null;
+    description?: string | null;
+    artifacts: RuntimeWorkbenchState["artifacts"];
+  }>;
+};
+
 export type EvidencePackage = {
   schemaVersion: number;
   runId: string;
@@ -126,7 +212,34 @@ export type WorkflowDefinitionSummary = {
   name: string;
   version: string;
   sourceAdapter: string;
-  nodes: Array<{ id: string; name: string; kind: string }>;
+  nodes: Array<{
+    id: string;
+    name: string;
+    kind: string;
+    description?: string;
+    artifacts?: {
+      outputs: Array<{
+        id: string;
+        name: string;
+        type: string;
+        required: boolean;
+        path: string;
+        templatePath?: string;
+        description?: string;
+      }>;
+    };
+    agent?: {
+      promptTemplate?: string;
+      context?: {
+        upstream: "none" | "direct" | "ancestors";
+        artifactTypes?: string[];
+        maxArtifacts?: number;
+        summaryCharsPerArtifact?: number;
+        maxTotalChars?: number;
+      };
+    };
+    advance?: { mode: "manual" | "auto" };
+  }>;
   edges: Array<{ id: string; from: string; to: string }>;
   roles: Array<{ id: string; name: string }>;
   gates: Array<{
@@ -159,6 +272,9 @@ export type WorkflowVersionSummary = {
   version: string;
   contentHash: string;
   createdAt: string;
+  nodeCount?: number;
+  edgeCount?: number;
+  nodeSummary?: string;
 };
 
 export type WorkflowExportFormat = "canonical-json" | "generic-yaml";
@@ -672,6 +788,27 @@ export function createRuntimeClient(apiBaseUrl: string) {
       request<RuntimeWorkbenchState["timeline"]>(apiBaseUrl, `/runs/${runId}/timeline`),
     listArtifacts: (runId: string) =>
       request<RuntimeWorkbenchState["artifacts"]>(apiBaseUrl, `/runs/${runId}/artifacts`),
+    getNodeArtifactRequirements: (runId: string, nodeId: string) =>
+      request<NodeArtifactRequirements>(
+        apiBaseUrl,
+        `/runs/${runId}/nodes/${nodeId}/artifact-requirements`,
+      ),
+    getNodeContext: (runId: string, nodeId: string) =>
+      request<NodeContextPreview>(apiBaseUrl, `/runs/${runId}/nodes/${nodeId}/context`),
+    completeNode: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
+      request<RunProjection>(apiBaseUrl, `/runs/${runId}/nodes/${nodeId}/complete`, {
+        actor: HUMAN_ACTOR,
+        expectedRevision,
+        now,
+      }),
+    confirmArtifact: (runId: string, nodeId: string, artifactId: string, expectedRevision: string, now: string) =>
+      request<{ artifact: RuntimeWorkbenchState["artifacts"][number]; projection: RunProjection }>(
+        apiBaseUrl,
+        `/runs/${runId}/nodes/${nodeId}/artifacts/${artifactId}/confirm`,
+        { actor: HUMAN_ACTOR, expectedRevision, now },
+      ),
+    listArtifactConsumers: (runId: string, artifactId: string) =>
+      request<ArtifactConsumer[]>(apiBaseUrl, `/runs/${runId}/artifacts/${artifactId}/consumers`),
     previewArtifact: (runId: string, artifactId: string) =>
       request<ArtifactPreview>(apiBaseUrl, `/runs/${runId}/artifacts/${artifactId}/preview`),
     getEvidencePackage: (runId: string) =>
@@ -765,7 +902,7 @@ export function createRuntimeClient(apiBaseUrl: string) {
       now: string,
       mode: "automatic" | "interactive" = "automatic",
     ) =>
-      request<AgentJobSummary>(apiBaseUrl, `/runs/${runId}/agents`, {
+      request<AgentStartResult>(apiBaseUrl, `/runs/${runId}/agents`, {
         nodeId,
         provider,
         prompt,
@@ -774,6 +911,11 @@ export function createRuntimeClient(apiBaseUrl: string) {
         timeoutSeconds: 300,
         maxOutputBytes: 1_000_000,
         mode,
+        now,
+      }),
+    scanNodeArtifacts: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
+      request<NodeArtifactScan>(apiBaseUrl, `/runs/${runId}/nodes/${nodeId}/artifacts/scan`, {
+        expectedRevision,
         now,
       }),
     startInteractiveAgentSession: (
@@ -861,7 +1003,19 @@ async function request<T>(apiBaseUrl: string, path: string, body?: unknown): Pro
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`Runtime API ${path} failed with ${response.status}`);
+    const errorBody: unknown = await response.json().catch(() => null);
+    const detail =
+      typeof errorBody === "object" &&
+      errorBody !== null &&
+      "detail" in errorBody &&
+      typeof errorBody.detail === "string"
+        ? errorBody.detail
+        : null;
+    throw new Error(
+      detail
+        ? `Runtime API ${path} failed with ${response.status}: ${detail}`
+        : `Runtime API ${path} failed with ${response.status}`,
+    );
   }
   return (await response.json()) as T;
 }

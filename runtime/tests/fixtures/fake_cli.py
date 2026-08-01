@@ -27,6 +27,9 @@ def main() -> int:
         emit("message", "fake-cli: started")
         emit("final", "fake-cli: completed")
         return 0
+    if mode == "message-only":
+        emit("message", "fake-cli: message only")
+        return 0
     if mode == "large":
         emit("message", "x" * 512)
         return 0

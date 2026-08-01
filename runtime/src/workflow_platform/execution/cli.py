@@ -17,6 +17,8 @@ ALLOWED_ENVIRONMENT_KEYS = {
     "USERPROFILE",
     "APPDATA",
     "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
     "CODEX_HOME",
     "ANTHROPIC_API_KEY",
 }
@@ -67,13 +69,16 @@ class CliAgentExecutor:
         process = subprocess.Popen(
             [command.executable, *command.args],
             cwd=command.cwd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if command.stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             shell=False,
             env=self._allowed_environment(),
             startupinfo=_hidden_startupinfo(),
         )
+        if command.stdin is not None and process.stdin is not None:
+            process.stdin.write(command.stdin.encode("utf-8"))
+            process.stdin.close()
         with self._lock:
             self._processes[job_id] = process
             cancelled_before_start = job_id in self._cancelled
@@ -141,11 +146,15 @@ class CliAgentExecutor:
                 )
 
             final_event = next((event for event in reversed(events) if event["kind"] == "final"), None)
+            last_message_event = next(
+                (event for event in reversed(events) if event["kind"] == "message"),
+                None,
+            )
             error_event = next((event for event in reversed(events) if event["kind"] == "error"), None)
             if process.returncode == 0:
                 return CliExecutionResult(
                     status="COMPLETED",
-                    summary=_event_text(final_event),
+                    summary=_event_text(final_event) or _event_text(last_message_event),
                     error=None,
                     exit_code=process.returncode,
                 )

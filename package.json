@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File scripts/dev-desktop.ps1",
     "dev:renderer": "npm --workspace apps/renderer run dev --",
     "dev:desktop": "npm --workspace apps/desktop run dev",
     "build": "npm --workspace packages/contracts run build && npm --workspace apps/renderer run build && npm --workspace apps/desktop run build",

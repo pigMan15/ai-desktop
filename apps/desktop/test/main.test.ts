@@ -30,6 +30,7 @@ const runtimeManager = new ManagedRuntime({
   cwd: "G:\\Project\\ai\\ai-desktop",
   port: 8765,
   runtimeToken: "desktop-local-token",
+  env: {},
 });
 
 const packagedRuntime = new ManagedRuntime({
@@ -75,6 +76,29 @@ await createMainWindow({
   rendererUrl: "http://127.0.0.1:5173",
   preloadPath: "preload.js"
 });
+
+const fallbackUrls: string[] = [];
+class FallbackBrowserWindow {
+  constructor(_options: Electron.BrowserWindowConstructorOptions) {}
+
+  async loadURL(url: string) {
+    fallbackUrls.push(url);
+    if (fallbackUrls.length === 1) {
+      throw new Error("renderer unavailable");
+    }
+  }
+}
+
+await createMainWindow({
+  BrowserWindowClass: FallbackBrowserWindow,
+  rendererUrl: "http://127.0.0.1:5173",
+  rendererDistPath: "G:\\Project\\ai\\ai-desktop\\apps\\renderer\\dist",
+  preloadPath: "preload.js"
+});
+assert.deepEqual(fallbackUrls, [
+  "http://127.0.0.1:5173/",
+  "file:///G:/Project/ai/ai-desktop/apps/renderer/dist/index.html"
+]);
 
 assert.deepEqual(createdWindows[0].webPreferences, {
   preload: "preload.js",
@@ -145,6 +169,10 @@ assert.deepEqual(
   },
 );
 assert.equal(fakeSpawnCalls[0]?.env.WORKFLOW_PLATFORM_RUNTIME_TOKEN, "desktop-local-token");
+assert.equal(
+  fakeSpawnCalls[0]?.env.PYTHONPATH,
+  "G:\\Project\\ai\\ai-desktop\\runtime\\src",
+);
 
 fakeProcess.stdout.emit("data", Buffer.from("runtime ready\n"));
 fakeProcess.stderr.emit("data", Buffer.from("warning line\n"));
@@ -225,6 +253,17 @@ await assert.rejects(
   /relative API path/,
 );
 
+globalThis.fetch = (async () => ({
+  ok: false,
+  status: 400,
+  json: async () => ({ detail: "WORKFLOW_DIAGNOSTICS_ERROR: AGENT_CONFIGURATION_UNSUPPORTED" }),
+  text: async () => "",
+}) as Response) as typeof fetch;
+await assert.rejects(
+  () => proxiedRuntime.request({ path: "/workflow-versions/example/save", body: {} }),
+  /400: WORKFLOW_DIAGNOSTICS_ERROR: AGENT_CONFIGURATION_UNSUPPORTED/,
+);
+
 const emptyExternalRuntime = new ManagedRuntime({
   externalUrl: "",
   env: { WORKFLOW_PLATFORM_RUNTIME_PORT: "8877" },
@@ -240,6 +279,7 @@ assert.deepEqual(emptyExternalRuntime.status(), {
 
 const lifecycleHandlers = new Map<string, () => void | Promise<void>>();
 let lifecycleRuntimeStopped = false;
+let lifecycleTerminalsStopped = false;
 const lifecycleProcess = new EventEmitter() as EventEmitter & {
   pid: number;
   stdout: EventEmitter;
@@ -268,12 +308,18 @@ bootstrap({
     handle() {},
   },
   runtimeManager: lifecycleRuntime,
+  terminalManager: {
+    stopAll() {
+      lifecycleTerminalsStopped = true;
+    },
+  },
   createWindow: async () => ({ loadURL: async () => undefined }),
   getAllWindows: () => [],
 });
 await new Promise((resolve) => setImmediate(resolve));
 await lifecycleHandlers.get("before-quit")?.();
 assert.equal(lifecycleRuntimeStopped, true);
+assert.equal(lifecycleTerminalsStopped, true);
 
 const terminalOutputCallbacks: Array<(data: string) => void> = [];
 const terminalWrites: string[] = [];
@@ -312,7 +358,15 @@ const terminal = terminalManager.create({
   columns: 120,
   rows: 40,
 });
+const liveTerminalOutput: Array<{ sequence: number; data: string }> = [];
+const unsubscribeLiveTerminalOutput = terminalManager.subscribeOutput(terminal.id, (event) => {
+  liveTerminalOutput.push(event);
+});
 terminalOutputCallbacks[0]?.("正在执行\r\n");
+assert.deepEqual(liveTerminalOutput, [{ sequence: 1, data: "正在执行\r\n" }]);
+unsubscribeLiveTerminalOutput();
+terminalOutputCallbacks[0]?.("不会实时推送\r\n");
+assert.deepEqual(liveTerminalOutput, [{ sequence: 1, data: "正在执行\r\n" }]);
 assert.deepEqual(terminalManager.requestCommand(terminal.id, "dir"), {
   status: "executed",
   commandSummary: "dir",
@@ -321,7 +375,17 @@ terminalManager.interrupt(terminal.id);
 terminalManager.resize(terminal.id, 100, 30);
 
 assert.equal(terminal.pid, 6789);
-assert.deepEqual(terminalManager.read(terminal.id, 0), [{ sequence: 1, data: "正在执行\r\n" }]);
+assert.deepEqual(terminalManager.read(terminal.id, 0), [
+  { sequence: 1, data: "正在执行\r\n" },
+  { sequence: 2, data: "不会实时推送\r\n" },
+]);
+for (let index = 0; index < 2_001; index += 1) {
+  terminalOutputCallbacks[0]?.(`chunk-${index}`);
+}
+assert.deepEqual(
+  terminalManager.read(terminal.id, 2_000).map((event) => event.sequence),
+  [2_001, 2_002, 2_003],
+);
 assert.deepEqual(terminalWrites, ["dir\r", "\u0003"]);
 assert.deepEqual(terminalResizes, [{ columns: 100, rows: 30 }]);
 
@@ -368,17 +432,16 @@ const codexSession = providerManager.create({
   kind: "codex",
   cwd: "G:\\Project\\demo",
   projectRoot: "G:\\Project\\demo",
-  initialPrompt: "继续实现交互式终端",
+  initialPrompt: "继续实现交互式终端\n并写入计划",
 });
 assert.deepEqual(providerSpawnCalls[1]?.args, [
   "--sandbox",
   "workspace-write",
   "--ask-for-approval",
   "on-request",
-  "--no-alt-screen",
   "--cd",
   "G:\\Project\\demo",
-  "继续实现交互式终端",
+  "继续实现交互式终端 并写入计划",
 ]);
 providerManager.writeInput(claudeSession.id, "继续\r");
 providerManager.writeInput(codexSession.id, "\u0003");
@@ -479,6 +542,7 @@ assert.deepEqual(auditedDecisions, [
 
 const terminalChannels: string[] = [];
 const terminalHandlers = new Map<string, (...args: unknown[]) => unknown>();
+const pushedTerminalOutput: Array<{ channel: string; payload: unknown }> = [];
 registerTerminalHandlers(
   {
     handle(channel: string, handler: (...args: unknown[]) => unknown) {
@@ -502,7 +566,13 @@ assert.deepEqual(terminalChannels, [
   "terminal:stop",
 ]);
 const terminalFromIpc = terminalHandlers.get("terminal:create")?.(
-  undefined,
+  {
+    sender: {
+      send(channel: string, payload: unknown) {
+        pushedTerminalOutput.push({ channel, payload });
+      },
+    },
+  },
   {
     kind: "shell",
     cwd: "G:\\Project\\demo",
@@ -511,6 +581,14 @@ const terminalFromIpc = terminalHandlers.get("terminal:create")?.(
     rows: 28,
   },
 ) as { id: string; columns: number; rows: number };
+terminalOutputCallbacks.at(-1)?.("实时 PTY 帧\r\n");
+assert.deepEqual(pushedTerminalOutput, [{
+  channel: "terminal:output",
+  payload: {
+    sessionId: terminalFromIpc.id,
+    event: { sequence: 1, data: "实时 PTY 帧\r\n" },
+  },
+}]);
 const commandDecision = terminalHandlers.get("terminal:command")?.(
   undefined,
   terminalFromIpc.id,

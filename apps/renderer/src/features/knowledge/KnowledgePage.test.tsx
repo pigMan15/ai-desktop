@@ -20,6 +20,23 @@ describe("KnowledgePage", () => {
             createdAt: "2026-07-28T00:00:00Z",
           },
         ]}
+        runs={[
+          {
+            id: "run-1",
+            title: "旧任务",
+            status: "DONE",
+            createdAt: "2026-07-28T00:00:00Z",
+            updatedAt: "2026-07-28T00:01:00Z",
+          },
+          {
+            id: "run-2",
+            title: "知识沉淀任务",
+            status: "DONE",
+            createdAt: "2026-07-28T00:00:00Z",
+            updatedAt: "2026-07-28T00:01:00Z",
+          },
+        ]}
+        activeRunId="run-1"
         onCreate={onCreate}
         onReview={onReview}
         onPublish={onPublish}
@@ -28,7 +45,7 @@ describe("KnowledgePage", () => {
 
     fireEvent.change(screen.getByLabelText("知识标题"), { target: { value: "终端规范" } });
     fireEvent.change(screen.getByLabelText("知识内容"), { target: { value: "终端输出应保留。" } });
-    fireEvent.change(screen.getByLabelText("知识来源"), { target: { value: "run:run-2" } });
+    fireEvent.change(screen.getByLabelText("关联 Run"), { target: { value: "run-2" } });
     fireEvent.click(screen.getByRole("button", { name: "创建候选" }));
     fireEvent.click(screen.getByRole("button", { name: "发布知识" }));
 

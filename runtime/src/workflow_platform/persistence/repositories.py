@@ -377,7 +377,23 @@ class ArtifactRepository:
         content_hash: str,
         producer: Actor,
         created_at: str,
+        artifact_spec_id: str | None = None,
+        workflow_version_id: str | None = None,
+        template_path: str | None = None,
+        relative_path: str | None = None,
+        file_size: int | None = None,
+        media_type: str | None = None,
+        status: str = "verified",
     ) -> None:
+        supersedes_artifact_id: str | None = None
+        if artifact_spec_id is not None and status == "verified":
+            previous = self._db.execute(
+                "SELECT id FROM artifacts WHERE run_id = ? AND node_id = ? AND artifact_spec_id = ? AND status = 'verified' ORDER BY created_at DESC, id DESC LIMIT 1",
+                (run_id, node_id, artifact_spec_id),
+            ).fetchone()
+            if previous is not None:
+                supersedes_artifact_id = previous["id"]
+                self._db.execute("UPDATE artifacts SET status = 'invalidated' WHERE id = ?", (previous["id"],))
         self._db.execute(
             """
             INSERT INTO artifacts (
@@ -388,9 +404,10 @@ class ArtifactRepository:
                 uri,
                 content_hash,
                 producer_json,
-                created_at
+                created_at, artifact_spec_id, workflow_version_id, template_path,
+                relative_path, file_size, media_type, status, supersedes_artifact_id, verified_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 id,
@@ -401,6 +418,9 @@ class ArtifactRepository:
                 content_hash,
                 json.dumps(producer.model_dump(), separators=(",", ":"), sort_keys=True),
                 created_at,
+                artifact_spec_id, workflow_version_id, template_path, relative_path,
+                file_size, media_type, status, supersedes_artifact_id,
+                created_at if status == "verified" else None,
             ),
         )
 
@@ -422,6 +442,14 @@ class ArtifactRepository:
                 "type": row["type"],
                 "uri": row["uri"],
                 "contentHash": row["content_hash"],
+                "artifactSpecId": row["artifact_spec_id"],
+                "workflowVersionId": row["workflow_version_id"],
+                "templatePath": row["template_path"],
+                "relativePath": row["relative_path"],
+                "fileSize": row["file_size"],
+                "mediaType": row["media_type"],
+                "status": row["status"],
+                "supersedesArtifactId": row["supersedes_artifact_id"],
                 "producer": json.loads(row["producer_json"]),
                 "createdAt": row["created_at"],
             }
@@ -446,9 +474,86 @@ class ArtifactRepository:
             "type": row["type"],
             "uri": row["uri"],
             "contentHash": row["content_hash"],
+            "artifactSpecId": row["artifact_spec_id"],
+            "workflowVersionId": row["workflow_version_id"],
+            "templatePath": row["template_path"],
+            "relativePath": row["relative_path"],
+            "fileSize": row["file_size"],
+            "mediaType": row["media_type"],
+            "status": row["status"],
+            "supersedesArtifactId": row["supersedes_artifact_id"],
             "producer": json.loads(row["producer_json"]),
             "createdAt": row["created_at"],
         }
+
+    def confirm(self, *, run_id: str, artifact_id: str, verified_at: str) -> dict:
+        provisional = self.get_for_run(run_id, artifact_id)
+        if provisional["status"] != "provisional":
+            raise ValueError("ARTIFACT_CONFIRMATION_INVALID: artifact is not provisional")
+        supersedes_artifact_id: str | None = None
+        if provisional["artifactSpecId"] is not None:
+            previous = self._db.execute(
+                "SELECT id FROM artifacts WHERE run_id = ? AND node_id = ? AND artifact_spec_id = ? AND status = 'verified' ORDER BY created_at DESC, id DESC LIMIT 1",
+                (run_id, provisional["nodeId"], provisional["artifactSpecId"]),
+            ).fetchone()
+            if previous is not None:
+                supersedes_artifact_id = previous["id"]
+                self._db.execute("UPDATE artifacts SET status = 'invalidated' WHERE id = ?", (supersedes_artifact_id,))
+        self._db.execute(
+            "UPDATE artifacts SET status = 'verified', verified_at = ?, supersedes_artifact_id = ? WHERE run_id = ? AND id = ? AND status = 'provisional'",
+            (verified_at, supersedes_artifact_id, run_id, artifact_id),
+        )
+        artifact = self.get_for_run(run_id, artifact_id)
+        return artifact
+
+    def record_consumer(
+        self,
+        *,
+        id: str,
+        artifact_id: str,
+        consumer_run_id: str,
+        consumer_node_id: str,
+        agent_job_id: str,
+        context_created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT OR IGNORE INTO artifact_consumers (
+                id, artifact_id, consumer_run_id, consumer_node_id, agent_job_id, context_created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (id, artifact_id, consumer_run_id, consumer_node_id, agent_job_id, context_created_at),
+        )
+
+    def list_consumers(self, *, run_id: str, artifact_id: str) -> list[dict]:
+        self.get_for_run(run_id, artifact_id)
+        rows = self._db.execute(
+            """
+            SELECT id, artifact_id, consumer_run_id, consumer_node_id, agent_job_id, context_created_at
+            FROM artifact_consumers
+            WHERE artifact_id = ? AND consumer_run_id = ?
+            ORDER BY context_created_at, id
+            """,
+            (artifact_id, run_id),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "artifactId": row["artifact_id"],
+                "consumerRunId": row["consumer_run_id"],
+                "consumerNodeId": row["consumer_node_id"],
+                "agentJobId": row["agent_job_id"],
+                "contextCreatedAt": row["context_created_at"],
+            }
+            for row in rows
+        ]
+
+    def verified_hashes_for_node(self, *, run_id: str, node_id: str) -> list[str]:
+        rows = self._db.execute(
+            "SELECT content_hash FROM artifacts WHERE run_id = ? AND node_id = ? AND status = 'verified' ORDER BY artifact_spec_id, created_at, id",
+            (run_id, node_id),
+        ).fetchall()
+        return [row["content_hash"] for row in rows]
 
 
 class ApprovalRepository:
@@ -465,6 +570,7 @@ class ApprovalRepository:
         requested_by: Actor,
         decided_by: Actor,
         comment: str | None,
+        artifact_hashes: list[str],
         created_at: str,
         decided_at: str,
     ) -> None:
@@ -478,10 +584,11 @@ class ApprovalRepository:
                 requested_by_json,
                 decided_by_json,
                 comment,
+                artifact_hashes_json,
                 created_at,
                 decided_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 id,
@@ -491,6 +598,7 @@ class ApprovalRepository:
                 json.dumps(requested_by.model_dump(), separators=(",", ":"), sort_keys=True),
                 json.dumps(decided_by.model_dump(), separators=(",", ":"), sort_keys=True),
                 comment,
+                json.dumps(artifact_hashes, separators=(",", ":")),
                 created_at,
                 decided_at,
             ),
@@ -517,11 +625,21 @@ class ApprovalRepository:
                 if row["decided_by_json"]
                 else None,
                 "comment": row["comment"],
+                "artifactHashes": json.loads(row["artifact_hashes_json"] or "[]"),
+                "invalidatedAt": row["invalidated_at"],
+                "invalidationReason": row["invalidation_reason"],
                 "createdAt": row["created_at"],
                 "decidedAt": row["decided_at"],
             }
             for row in rows
         ]
+
+    def invalidate_for_node(self, *, run_id: str, node_id: str, reason: str, invalidated_at: str) -> int:
+        cursor = self._db.execute(
+            "UPDATE approvals SET invalidated_at = ?, invalidation_reason = ? WHERE run_id = ? AND node_id = ? AND invalidated_at IS NULL",
+            (invalidated_at, reason, run_id, node_id),
+        )
+        return cursor.rowcount
 
 
 class GateResultRepository:
@@ -541,11 +659,13 @@ class GateResultRepository:
         failure_reason: str | None,
         actor: Actor,
         created_at: str,
+        artifact_hashes: list[str],
     ) -> None:
         payload = {
             "evidence": evidence,
             "waiverReason": waiver_reason,
             "failureReason": failure_reason,
+            "artifactHashes": artifact_hashes,
         }
         self._db.execute(
             """
@@ -596,11 +716,21 @@ class GateResultRepository:
                     "evidence": payload["evidence"],
                     "waiverReason": payload.get("waiverReason"),
                     "failureReason": payload.get("failureReason"),
+                    "artifactHashes": payload.get("artifactHashes", []),
+                    "invalidatedAt": row["invalidated_at"],
+                    "invalidationReason": row["invalidation_reason"],
                     "actor": json.loads(row["actor_json"]),
                     "createdAt": row["created_at"],
                 }
             )
         return results
+
+    def invalidate_for_node(self, *, run_id: str, node_id: str, reason: str, invalidated_at: str) -> int:
+        cursor = self._db.execute(
+            "UPDATE gate_results SET invalidated_at = ?, invalidation_reason = ? WHERE run_id = ? AND node_id = ? AND invalidated_at IS NULL",
+            (invalidated_at, reason, run_id, node_id),
+        )
+        return cursor.rowcount
 
 
 class TerminalSessionRepository:
@@ -902,6 +1032,15 @@ class AgentJobRepository:
             (job_id, after_sequence),
         ).fetchall()
         return [self._output_row_to_dict(row) for row in rows]
+
+    def delete_output(self, output_ids: list[str]) -> None:
+        if not output_ids:
+            return
+        placeholders = ", ".join("?" for _ in output_ids)
+        self._db.execute(
+            f"DELETE FROM agent_output_events WHERE id IN ({placeholders})",
+            output_ids,
+        )
 
     @staticmethod
     def _job_row_to_dict(row: sqlite3.Row) -> dict:

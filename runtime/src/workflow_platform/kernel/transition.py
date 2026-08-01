@@ -28,7 +28,7 @@ def transition(
             event.nodeId,
         )
 
-    rejection = _validate_event(current_projection, event)
+    rejection = _validate_event(workflow, current_projection, event)
     if rejection is not None:
         code, message = rejection
         return _rejected(current_projection, code, message, event.nodeId)
@@ -65,13 +65,14 @@ def transition(
 
 
 def _validate_event(
+    workflow: WorkflowDefinition,
     projection,
     event: RunEvent,
 ) -> tuple[str, str] | None:
     node_states = projection.nodeStates
     if event.type in {"NODE_COMPLETED", "NODE_FAILED"}:
-        if event.actor.type not in {"executor", "system"} or not event.actor.trusted:
-            return ("PERMISSION_DENIED", "Only trusted executors or system actors can finish execution nodes")
+        if event.actor.type not in {"human", "executor", "system"} or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only trusted humans, executors, or system actors can finish execution nodes")
         if event.nodeId is None or node_states.get(event.nodeId) != "RUNNING":
             return ("INVALID_TRANSITION", "Execution completion requires a RUNNING node")
         return None
@@ -122,10 +123,36 @@ def _validate_event(
         return None
 
     if event.type == "ARTIFACT_SUBMITTED":
-        if event.nodeId is None or node_states.get(event.nodeId) != "RUNNING":
-            return ("INVALID_TRANSITION", "Artifacts can only be submitted for RUNNING nodes")
+        if event.nodeId is None:
+            return ("INVALID_TRANSITION", "Artifacts can only be submitted for RUNNING or awaiting-artifact nodes")
+        state = node_states.get(event.nodeId)
+        if state not in {"RUNNING", "AWAITING_ARTIFACT", "PASSED", "AWAITING_APPROVAL", "AWAITING_GATE"}:
+            return ("INVALID_TRANSITION", "Artifacts can only be submitted for active or governed nodes")
+        if state in {"PASSED", "AWAITING_APPROVAL", "AWAITING_GATE"} and (
+            event.actor.type != "system" or not event.actor.trusted
+        ):
+            return ("PERMISSION_DENIED", "Only the trusted Runtime can register a changed governed artifact")
         if not event.payload.get("artifactUri") or not event.payload.get("artifactType"):
             return ("MISSING_ARTIFACT", "Artifact submissions require artifactUri and artifactType")
+        node = next((candidate for candidate in workflow.nodes if candidate.id == event.nodeId), None)
+        if node is not None and node.artifacts.outputs:
+            artifact_spec_id = str(event.payload.get("artifactSpecId", ""))
+            if artifact_spec_id not in {output.id for output in node.artifacts.outputs}:
+                return (
+                    "MISSING_ARTIFACT",
+                    "Declared artifact submissions require a known artifactSpecId",
+                )
+        return None
+
+    if event.type == "ARTIFACT_INVALIDATED":
+        if event.actor.type != "system" or not event.actor.trusted:
+            return ("PERMISSION_DENIED", "Only the trusted Runtime can invalidate artifact decisions")
+        if event.nodeId is None or node_states.get(event.nodeId) not in {
+            "PASSED", "AWAITING_APPROVAL", "AWAITING_GATE"
+        }:
+            return ("INVALID_TRANSITION", "Artifact invalidation requires a completed governed node")
+        if not event.payload.get("reason"):
+            return ("MISSING_ARTIFACT", "Artifact invalidation requires a reason")
         return None
 
     if event.type in {"HUMAN_APPROVED", "HUMAN_REJECTED", "HUMAN_DEFERRED"}:

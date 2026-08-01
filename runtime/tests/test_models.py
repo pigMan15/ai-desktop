@@ -4,8 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from workflow_platform.models import (
+    AgentContextSpec,
     Actor,
     AllowedAction,
+    ArtifactOutputSpec,
     NodeKind,
     NodeState,
     RequirementSpec,
@@ -53,6 +55,7 @@ def test_run_event_types_match_contract_order() -> None:
         "RUN_CREATED",
         "NODE_STARTED",
         "ARTIFACT_SUBMITTED",
+        "ARTIFACT_INVALIDATED",
         "APPROVAL_REQUESTED",
         "HUMAN_APPROVED",
         "HUMAN_REJECTED",
@@ -107,6 +110,57 @@ def test_workflow_node_defaults_collection_fields_to_empty_containers() -> None:
     assert node.requires == []
     assert node.gates == []
     assert node.metadata == {}
+    assert node.artifacts.outputs == []
+    assert node.agent.context.upstream == "none"
+    assert node.advance.mode == "manual"
+
+
+def test_workflow_node_accepts_declarative_artifact_and_agent_contracts() -> None:
+    node = WorkflowNode(
+        id="implementation",
+        name="开发实现",
+        kind="agent",
+        artifacts={
+            "outputs": [
+                {
+                    "id": "implementation-report",
+                    "name": "实施报告",
+                    "type": "implementation-report",
+                    "required": True,
+                    "path": "docs/runs/{{runId}}/{{nodeId}}/implementation.md",
+                    "templatePath": "templates/artifacts/implementation.md",
+                }
+            ]
+        },
+        agent={
+            "promptTemplate": "完成实现与测试。",
+            "context": {
+                "upstream": "ancestors",
+                "artifactTypes": ["requirement", "plan"],
+                "maxArtifacts": 8,
+                "summaryCharsPerArtifact": 4000,
+                "maxTotalChars": 16000,
+            },
+        },
+        advance={"mode": "auto"},
+    )
+
+    assert node.artifacts.outputs[0] == ArtifactOutputSpec(
+        id="implementation-report",
+        name="实施报告",
+        type="implementation-report",
+        required=True,
+        path="docs/runs/{{runId}}/{{nodeId}}/implementation.md",
+        templatePath="templates/artifacts/implementation.md",
+    )
+    assert node.agent.context == AgentContextSpec(
+        upstream="ancestors",
+        artifactTypes=["requirement", "plan"],
+        maxArtifacts=8,
+        summaryCharsPerArtifact=4000,
+        maxTotalChars=16000,
+    )
+    assert node.advance.mode == "auto"
 
 
 def test_invalid_node_kind_raises_validation_error() -> None:

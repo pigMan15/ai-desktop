@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type {
   AgentJobSummary,
@@ -8,6 +8,8 @@ import type {
   RunSummary,
   RunConfiguration,
   RuntimeWorkbenchState,
+  NodeArtifactRequirements,
+  NodeContextPreview,
 } from "../../app/runtimeClient";
 import { TerminalViewport, type TerminalViewportOutput } from "../terminal/TerminalViewport";
 
@@ -18,7 +20,11 @@ type Props = {
   onSelectRun?: (runId: string) => void;
   onCreateRun?: (title: string, configuration: RunConfiguration) => void;
   onStartNode?: (nodeId: string) => void;
-  onSubmitArtifact?: (nodeId: string, artifactPath: string) => void;
+  onCompleteNode?: (nodeId: string) => void;
+  onScanNodeArtifacts?: (nodeId: string) => void;
+  onLoadNodeArtifactRequirements?: (nodeId: string) => Promise<NodeArtifactRequirements>;
+  onLoadNodeContext?: (nodeId: string) => Promise<NodeContextPreview>;
+  onSubmitArtifact?: (nodeId: string, artifactPath: string, artifactType: string) => void;
   onApprove?: (nodeId: string) => void;
   onPassGate?: (nodeId: string, artifactPath: string) => void;
   onWaiveGate?: (nodeId: string, waiverReason: string) => void;
@@ -33,6 +39,8 @@ type Props = {
   ) => void;
   onCancelAgent?: (jobId: string) => void;
   onAgentTerminalInput?: (jobId: string, data: string) => void;
+  onAgentTerminalResize?: (jobId: string, columns: number, rows: number) => void;
+  liveAgentOutput?: Record<string, TerminalViewportOutput[]>;
   deployments?: DeploymentSummary[];
   deploymentOutput?: DeploymentOutputEvent[];
   onStartDeployment?: (nodeId: string) => void;
@@ -48,6 +56,10 @@ export function RunDashboard({
   onSelectRun,
   onCreateRun,
   onStartNode,
+  onCompleteNode,
+  onScanNodeArtifacts,
+  onLoadNodeArtifactRequirements,
+  onLoadNodeContext,
   onSubmitArtifact,
   onApprove,
   onPassGate,
@@ -58,6 +70,8 @@ export function RunDashboard({
   onStartAgent,
   onCancelAgent,
   onAgentTerminalInput,
+  onAgentTerminalResize,
+  liveAgentOutput = {},
   deployments = [],
   deploymentOutput = [],
   onStartDeployment,
@@ -69,12 +83,15 @@ export function RunDashboard({
   const [taskGoal, setTaskGoal] = useState("");
   const [parametersText, setParametersText] = useState("{}");
   const [runConfigurationError, setRunConfigurationError] = useState("");
-  const [nodeId, setNodeId] = useState("plan");
+  const [nodeId, setNodeId] = useState("");
   const [artifactPath, setArtifactPath] = useState("");
+  const [artifactType, setArtifactType] = useState("");
   const [waiverReason, setWaiverReason] = useState("");
   const [agentProvider, setAgentProvider] = useState<AgentJobSummary["provider"]>("codex");
   const [agentMode, setAgentMode] = useState<"interactive" | "automatic">("interactive");
   const [agentPrompt, setAgentPrompt] = useState("");
+  const [artifactRequirements, setArtifactRequirements] = useState<NodeArtifactRequirements | null>(null);
+  const [nodeContext, setNodeContext] = useState<NodeContextPreview | null>(null);
   const projection = state?.projection;
   const workspaceReady = state?.workspaceStatus === "ready";
   const agentJobs = Array.isArray(state?.agentJobs) ? state.agentJobs : [];
@@ -84,20 +101,32 @@ export function RunDashboard({
     .find((job) => job.mode === "interactive" && (job.status === "QUEUED" || job.status === "RUNNING"));
   const latestAgentJob = activeInteractiveAgent ?? [...agentJobs].reverse()[0] ?? null;
   const agentTerminalOutput = latestAgentJob
-    ? agentOutput
+    ? (activeInteractiveAgent && liveAgentOutput[latestAgentJob.id]
+      ? liveAgentOutput[latestAgentJob.id]
+      : agentOutput
         .filter((event) => event.jobId === latestAgentJob.id)
         .sort((left, right) => left.sequence - right.sequence)
-        .map((event): TerminalViewportOutput => ({ sequence: event.sequence, data: formatAgentPayload(event.payload) }))
+        .map((event): TerminalViewportOutput => ({ sequence: event.sequence, data: formatAgentPayload(event.payload) })))
     : [];
   const selectedProviderDiagnostic = providerDiagnostics?.find(
     (diagnostic) => diagnostic.id === agentProvider,
   );
   const providerAvailable =
     providerDiagnostics === undefined || selectedProviderDiagnostic?.available === true;
-  const currentNodeId = projection?.currentNodeIds[0] ?? nodeId;
+  const availableNodeIds = Object.keys(projection?.nodeStates ?? {});
+  const currentNodeId = availableNodeIds.includes(nodeId)
+    ? nodeId
+    : projection?.currentNodeIds[0] ?? availableNodeIds[0] ?? null;
   const activeRun = runs.find((run) => run.id === activeRunId) ?? null;
   const nodeState = currentNodeId ? projection?.nodeStates[currentNodeId] : undefined;
   const blockingReason = projection?.blockingReasons[0];
+  const declaredArtifactRequirements = Array.isArray(artifactRequirements?.requirements)
+    ? artifactRequirements.requirements
+    : [];
+  const gateEvidenceUri = declaredArtifactRequirements
+    .flatMap((requirement) => requirement.artifacts)
+    .find((artifact) => artifact.status === "verified")?.uri ?? null;
+  const contextArtifacts = Array.isArray(nodeContext?.artifacts) ? nodeContext.artifacts : [];
   const hasRun = Boolean(state?.connection === "connected" && projection?.runId);
   const canRunAction = (eventType: string, nodeId: string | null = currentNodeId) =>
     hasRun &&
@@ -106,6 +135,48 @@ export function RunDashboard({
         action.eventType === eventType &&
         (action.nodeId === nodeId || action.nodeId === undefined),
     ) ?? false);
+
+  useEffect(() => {
+    if (!projection?.runId || !currentNodeId || !onLoadNodeArtifactRequirements) {
+      setArtifactRequirements(null);
+      return;
+    }
+    let cancelled = false;
+    void onLoadNodeArtifactRequirements(currentNodeId)
+      .then((requirements) => {
+        if (!cancelled) setArtifactRequirements(requirements);
+      })
+      .catch(() => {
+        if (!cancelled) setArtifactRequirements(null);
+      });
+    return () => { cancelled = true; };
+  }, [currentNodeId, onLoadNodeArtifactRequirements, projection?.runId]);
+
+  useEffect(() => {
+    if (!projection?.runId || !currentNodeId || !onLoadNodeContext) {
+      setNodeContext(null);
+      return;
+    }
+    let cancelled = false;
+    void Promise.resolve().then(() => onLoadNodeContext(currentNodeId))
+      .then((context) => { if (!cancelled) setNodeContext(context); })
+      .catch(() => { if (!cancelled) setNodeContext(null); });
+    return () => { cancelled = true; };
+  }, [currentNodeId, onLoadNodeContext, projection?.runId]);
+
+  useEffect(() => {
+    setNodeId((selectedNodeId) => (
+      availableNodeIds.includes(selectedNodeId)
+        ? selectedNodeId
+        : projection?.currentNodeIds[0] ?? availableNodeIds[0] ?? ""
+    ));
+  }, [projection?.runId, projection?.currentNodeIds, availableNodeIds.join("|")]);
+
+  useEffect(() => {
+    if (!declaredArtifactRequirements.some((requirement) => requirement.type === artifactType)) {
+      setArtifactType("");
+    }
+  }, [artifactType, declaredArtifactRequirements]);
 
   function createRun() {
     try {
@@ -273,6 +344,46 @@ export function RunDashboard({
       <pre className="code-block" aria-label="运行参数">
         {JSON.stringify(activeRun?.context?.parameters ?? {}, null, 2)}
       </pre>
+      {declaredArtifactRequirements.length ? (
+        <div className="gate-record" aria-label="节点交付物要求">
+          <div className="panel-heading">
+            <strong>节点交付物要求</strong>
+            <span className="status-pill">Runtime 已计算</span>
+          </div>
+          <ul className="compact-list">
+            {declaredArtifactRequirements.map((requirement) => (
+              <li key={requirement.id}>
+                {requirement.required ? "必需" : "可选"}：{requirement.name}（{requirement.type}）
+                <br />{requirement.relativePath}
+                {requirement.artifacts.length ? `，已登记 ${requirement.artifacts.length} 个版本` : "，尚未登记"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {nodeState === "AWAITING_GATE" ? (
+        <p className="body-copy">
+          Gate 证据：{gateEvidenceUri ?? "当前节点没有已验证交付物，无法通过 Gate。"}
+        </p>
+      ) : null}
+      {nodeContext ? (
+        <div className="gate-record" aria-label="节点上游上下文预览">
+          <div className="panel-heading">
+            <strong>节点上游上下文预览</strong>
+            <span className="status-pill">{contextArtifacts.length} 个正式产物</span>
+          </div>
+          {contextArtifacts.length ? (
+            <ul className="compact-list">
+              {contextArtifacts.map((artifact, index) => (
+                <li key={`${artifact.artifactId ?? artifact.path}-${index}`}>
+                  {artifact.type}：{artifact.path}；哈希 {artifact.contentHash ?? "未记录"}
+                  <pre className="code-block">{artifact.summary}</pre>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="body-copy">当前节点不接收上游正式产物。</p>}
+        </div>
+      ) : null}
       <ul className="compact-list" aria-label="Runtime Timeline">
         {(state?.timeline ?? []).map((event) => (
           <li key={event.id}>
@@ -284,7 +395,16 @@ export function RunDashboard({
       <div className="form-grid">
         <label>
           节点 ID
-          <input value={nodeId} onChange={(event) => setNodeId(event.target.value)} />
+          <select
+            value={currentNodeId ?? ""}
+            onChange={(event) => setNodeId(event.target.value)}
+            disabled={!availableNodeIds.length}
+          >
+            {!availableNodeIds.length ? <option value="">当前 Run 没有可用节点</option> : null}
+            {availableNodeIds.map((availableNodeId) => (
+              <option key={availableNodeId} value={availableNodeId}>{availableNodeId}</option>
+            ))}
+          </select>
         </label>
         <label>
           Artifact 路径
@@ -293,6 +413,21 @@ export function RunDashboard({
             onChange={(event) => setArtifactPath(event.target.value)}
             placeholder="例如 G:\Project\my-workflow\docs\plan.md"
           />
+        </label>
+        <label>
+          Artifact 类型
+          <select
+            value={artifactType}
+            onChange={(event) => setArtifactType(event.target.value)}
+            disabled={!declaredArtifactRequirements.length}
+          >
+            <option value="">选择当前节点交付物</option>
+            {declaredArtifactRequirements.map((requirement) => (
+              <option key={requirement.id} value={requirement.type}>
+                {requirement.name}（{requirement.type}）
+              </option>
+            ))}
+          </select>
         </label>
         <label className="form-wide">
           豁免理由
@@ -311,6 +446,13 @@ export function RunDashboard({
         >
           启动节点
         </button>
+        <button
+          className="quiet-button"
+          disabled={!canRunAction("NODE_COMPLETED") || !nodeId.trim()}
+          onClick={() => onCompleteNode?.(nodeId.trim())}
+        >
+          完成当前节点
+        </button>
         {onStartDeployment ? (
           <button
             className="quiet-button"
@@ -322,10 +464,23 @@ export function RunDashboard({
         ) : null}
         <button
           className="quiet-button"
-          disabled={!canRunAction("ARTIFACT_SUBMITTED") || !nodeId.trim() || !artifactPath.trim()}
-          onClick={() => onSubmitArtifact?.(nodeId.trim(), artifactPath.trim())}
+          disabled={!canRunAction("ARTIFACT_SUBMITTED") || !nodeId.trim()}
+          onClick={() => onScanNodeArtifacts?.(nodeId.trim())}
         >
-          提交 Artifact
+          重新检查节点产物
+        </button>
+        <button
+          className="quiet-button"
+          disabled={
+            !canRunAction("ARTIFACT_SUBMITTED") ||
+            !nodeId.trim() ||
+            !artifactPath.trim() ||
+            !artifactType.trim()
+          }
+          onClick={() => onSubmitArtifact?.(nodeId.trim(), artifactPath.trim(), artifactType.trim())}
+          aria-label="提交 Artifact"
+        >
+          附加非声明产物
         </button>
         <button
           className="quiet-button"
@@ -336,8 +491,12 @@ export function RunDashboard({
         </button>
         <button
           className="quiet-button"
-          disabled={!canRunAction("GATE_PASSED") || !nodeId.trim() || !artifactPath.trim()}
-          onClick={() => onPassGate?.(nodeId.trim(), artifactPath.trim())}
+          disabled={!canRunAction("GATE_PASSED") || !currentNodeId || !gateEvidenceUri}
+          onClick={() => {
+            if (currentNodeId && gateEvidenceUri) {
+              onPassGate?.(currentNodeId, gateEvidenceUri);
+            }
+          }}
         >
           通过 Gate
         </button>
@@ -510,11 +669,17 @@ export function RunDashboard({
       </ul>
       <TerminalViewport
         ariaLabel="Agent 交互终端"
+        resetKey={`${activeRunId ?? "none"}:${latestAgentJob?.id ?? "none"}`}
         output={agentTerminalOutput}
         writable={Boolean(activeInteractiveAgent && onAgentTerminalInput)}
         onInput={(data) => {
           if (activeInteractiveAgent) {
             onAgentTerminalInput?.(activeInteractiveAgent.id, data);
+          }
+        }}
+        onResize={(columns, rows) => {
+          if (activeInteractiveAgent) {
+            onAgentTerminalResize?.(activeInteractiveAgent.id, columns, rows);
           }
         }}
         onInterrupt={() => {

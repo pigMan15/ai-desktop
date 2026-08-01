@@ -47,6 +47,7 @@ it("exports stable runtime event constants in plan order", () => {
     "RUN_CREATED",
     "NODE_STARTED",
     "ARTIFACT_SUBMITTED",
+    "ARTIFACT_INVALIDATED",
     "APPROVAL_REQUESTED",
     "HUMAN_APPROVED",
     "HUMAN_REJECTED",
@@ -114,6 +115,26 @@ it("accepts planned workflow, projection, and transition shapes", () => {
         requires: [{ type: "artifact", artifactType: "build-log", required: true }],
         gates: ["unit-tests"],
         metadata: { owner: "platform" },
+        artifacts: {
+          outputs: [
+            {
+              id: "build-log",
+              name: "构建日志",
+              type: "build-log",
+              required: true,
+              path: "reports/{{runId}}/build.log",
+            },
+          ],
+        },
+        agent: {
+          context: {
+            upstream: "direct",
+            maxArtifacts: 8,
+            summaryCharsPerArtifact: 4000,
+            maxTotalChars: 16000,
+          },
+        },
+        advance: { mode: "manual" },
       },
     ],
     edges: [

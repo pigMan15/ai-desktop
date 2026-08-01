@@ -10,15 +10,21 @@ const findPrevious = vi.fn();
 const clearDecorations = vi.fn();
 const fit = vi.fn();
 const focus = vi.fn();
+const reset = vi.fn();
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class FakeTerminal {
+    options = {};
     loadAddon() {}
     open() {}
     write(data: string) {
       terminalWrites.push(data);
     }
     clear() {
+      terminalWrites.length = 0;
+    }
+    reset() {
+      reset();
       terminalWrites.length = 0;
     }
     focus = focus;
@@ -71,6 +77,25 @@ describe("TerminalViewport", () => {
     expect(screen.getByText("第一行")).toBeInTheDocument();
   });
 
+  it("locally echoes governed shell input while forwarding it to the handler", async () => {
+    const onInput = vi.fn();
+    render(
+      <TerminalViewport
+        ariaLabel="ANSI 终端"
+        output={[]}
+        writable
+        localEcho
+        onInput={onInput}
+      />,
+    );
+
+    await waitFor(() => expect(fit).toHaveBeenCalled());
+    terminalDataHandler?.("echo hello");
+
+    expect(terminalWrites.at(-1)).toBe("echo hello");
+    expect(onInput).toHaveBeenCalledWith("echo hello");
+  });
+
   it("focuses xterm before interactive viewport click handlers run", async () => {
     render(<TerminalViewport ariaLabel="ANSI 终端" output={[]} writable />);
 
@@ -91,11 +116,56 @@ describe("TerminalViewport", () => {
     rerender(
       <TerminalViewport ariaLabel="ANSI 终端" output={[]} writable onInput={interactiveInput} />,
     );
-    await waitFor(() => expect(fit).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fit).toHaveBeenCalledTimes(1));
     terminalDataHandler?.("del .\\build\r");
 
     expect(interactiveInput).toHaveBeenCalledWith("del .\\build\r");
     expect(initialInput).not.toHaveBeenCalled();
+  });
+
+  it("keeps the terminal buffer when writable state changes", async () => {
+    const { rerender } = render(
+      <TerminalViewport
+        ariaLabel="Agent 交互终端"
+        output={[{ sequence: 1, data: "\u001b[2J当前界面\r\n" }]}
+        writable
+      />,
+    );
+
+    await waitFor(() => expect(terminalWrites).toEqual(["\u001b[2J当前界面\r\n"]));
+    rerender(
+      <TerminalViewport
+        ariaLabel="Agent 交互终端"
+        output={[{ sequence: 1, data: "\u001b[2J当前界面\r\n" }]}
+      />,
+    );
+
+    await waitFor(() => expect(fit).toHaveBeenCalledTimes(1));
+    expect(terminalWrites).toEqual(["\u001b[2J当前界面\r\n"]);
+  });
+
+  it("resets the xterm screen when the output session changes", async () => {
+    const { rerender } = render(
+      <TerminalViewport
+        ariaLabel="Agent 交互终端"
+        resetKey="run-old:agent-old"
+        output={[{ sequence: 1, data: "旧 Run 输出\r\n" }]}
+        writable
+      />,
+    );
+
+    await waitFor(() => expect(terminalWrites).toEqual(["旧 Run 输出\r\n"]));
+    rerender(
+      <TerminalViewport
+        ariaLabel="Agent 交互终端"
+        resetKey="run-empty:none"
+        output={[]}
+      />,
+    );
+
+    await waitFor(() => expect(reset).toHaveBeenCalledTimes(1));
+    expect(fit).toHaveBeenCalledTimes(2);
+    expect(terminalWrites).toEqual([]);
   });
 
   it("pauses follow mode after user scrolls up and shows unread output", async () => {

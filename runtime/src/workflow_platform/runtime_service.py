@@ -10,9 +10,10 @@ from uuid import uuid4, uuid5, NAMESPACE_URL
 import yaml
 
 from workflow_platform.adapters.registry import default_registry
-from workflow_platform.artifacts.service import hash_artifact, validate_safe_path
+from workflow_platform.artifacts.service import hash_artifact, render_artifact_path, validate_safe_path
 from workflow_platform.compiler.compiler import compile_workflow
 from workflow_platform.execution.cli import CliAgentExecutor
+from workflow_platform.execution.agent_context import AgentContextBuilder
 from workflow_platform.execution.deploy import DeployExecutor
 from workflow_platform.execution.providers import ClaudeCliProvider, CliProvider, CodexCliProvider
 from workflow_platform.governance.actors import require_trusted_human
@@ -21,7 +22,7 @@ from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
 from workflow_platform.knowledge.service import LocalKnowledgeService
 from workflow_platform.models import Actor, RunEvent, RunProjection, WorkflowDefinition
-from workflow_platform.terminals.redaction import redact_terminal_output
+from workflow_platform.terminals.redaction import normalize_terminal_output, redact_terminal_output
 from workflow_platform.persistence.repositories import (
     AgentCheckpointRepository,
     AgentJobRepository,
@@ -83,6 +84,7 @@ class WorkflowRuntimeService:
         detection = detections[0]
         adapter = self._adapter_registry.adapter_for(detection.adapter_id)
         workflow = adapter.import_workflow(project_path)
+        _require_valid_workflow(workflow)
         project_id = _stable_id("project", project_path.as_posix())
         workflow_version_id = _stable_id("workflow-version", f"{project_id}:{workflow.id}:{workflow.version}")
         content_hash = hashlib.sha256(
@@ -130,6 +132,8 @@ class WorkflowRuntimeService:
         workflow = self._workflow_versions.get(workflow_version_id)
         if workflow is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
+
+        _require_valid_workflow(workflow)
 
         row = self._db.execute(
             "SELECT project_id FROM workflow_versions WHERE id = ?",
@@ -198,6 +202,7 @@ class WorkflowRuntimeService:
                         created_at=now,
                     )
                 self._db.commit()
+
             except Exception:
                 self._db.rollback()
                 raise
@@ -280,6 +285,9 @@ class WorkflowRuntimeService:
                 "version": entry["version"],
                 "contentHash": entry["contentHash"],
                 "createdAt": entry["createdAt"],
+                "nodeCount": len(entry["definition"].nodes),
+                "edgeCount": len(entry["definition"].edges),
+                "nodeSummary": _workflow_node_summary(entry["definition"]),
             }
             for entry in history
         ]
@@ -321,6 +329,7 @@ class WorkflowRuntimeService:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
         editor = require_trusted_human(actor, operation="保存工作流版本")
         candidate = WorkflowDefinition.model_validate(definition)
+        _require_valid_workflow(candidate)
         if candidate.id != base.id:
             raise ValueError("WORKFLOW_ID_IMMUTABLE: 新版本不能更改工作流标识")
 
@@ -387,14 +396,80 @@ class WorkflowRuntimeService:
         node_id: str,
         artifact_path: Path,
         artifact_type: str,
+        artifact_spec_id: str | None = None,
+        artifact_status: str = "verified",
         actor: dict,
         expected_revision: str,
         now: str,
     ) -> RunProjection:
+        if artifact_status not in {"verified", "provisional"}:
+            raise ValueError(f"ARTIFACT_STATUS_INVALID: unsupported artifact status {artifact_status}")
+        workflow = self._runs.workflow_for_run(run_id)
         project_root = self._runs.project_root_for_run(run_id)
         safe_path = validate_safe_path(project_root, artifact_path)
+        node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+        if node is None:
+            raise ValueError(f"ARTIFACT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+        if node.artifacts.outputs:
+            artifact_spec_id = artifact_spec_id or _matching_artifact_spec_id(
+                workflow=workflow,
+                project_root=project_root,
+                run_id=run_id,
+                node_id=node_id,
+                artifact_path=safe_path,
+                artifact_type=artifact_type,
+                now=now,
+            )
+            if artifact_spec_id is None:
+                raise ValueError(
+                    "ARTIFACT_SPEC_MISMATCH: declared artifacts must match a configured path and type"
+                )
         artifact_uri = safe_path.as_uri()
         content_hash = hash_artifact(safe_path)
+        before_hashes = self._artifacts.verified_hashes_for_node(run_id=run_id, node_id=node_id)
+        artifact_metadata = {
+            "run_id": run_id,
+            "node_id": node_id,
+            "type": artifact_type,
+            "uri": artifact_uri,
+            "content_hash": content_hash,
+            "producer": Actor.model_validate(actor),
+            "created_at": now,
+            "artifact_spec_id": artifact_spec_id,
+            "workflow_version_id": workflow.id,
+            "template_path": next(
+                (output.templatePath for output in node.artifacts.outputs if output.id == artifact_spec_id),
+                None,
+            ),
+            "relative_path": safe_path.relative_to(project_root.resolve()).as_posix(),
+            "file_size": safe_path.stat().st_size,
+            "media_type": _artifact_media_type(safe_path),
+        }
+        if artifact_status == "provisional":
+            with self._lock, self._db:
+                projection = self.get_projection(run_id)
+                if projection.revision != expected_revision:
+                    raise ValueError("REVISION_CONFLICT: Expected revision does not match current revision")
+                provisional_id = f"{run_id}:artifact:{node_id}:provisional:{uuid4()}"
+                self._artifacts.save(id=provisional_id, status="provisional", **artifact_metadata)
+                self._audit.record(
+                    actor={
+                        "id": "runtime-artifact-scanner",
+                        "type": "system",
+                        "source": "runtime",
+                        "trusted": True,
+                    },
+                    action="artifact.provisional.recorded",
+                    resource=f"artifact:{provisional_id}",
+                    detail={
+                        "runId": run_id,
+                        "nodeId": node_id,
+                        "artifactSpecId": artifact_spec_id,
+                        "producer": Actor.model_validate(actor).model_dump(),
+                    },
+                    created_at=now,
+                )
+            return projection
         projection = self._transition_run(
             run_id,
             "ARTIFACT_SUBMITTED",
@@ -404,21 +479,124 @@ class WorkflowRuntimeService:
                 "artifactUri": artifact_uri,
                 "artifactType": artifact_type,
                 "contentHash": content_hash,
+                **({"artifactSpecId": artifact_spec_id} if artifact_spec_id else {}),
             },
             expected_revision=expected_revision,
             now=now,
             after_accept=lambda result: self._artifacts.save(
                 id=f"{run_id}:artifact:{node_id}:{result['emittedEvents'][0].revision}",
-                run_id=run_id,
-                node_id=node_id,
-                type=artifact_type,
-                uri=artifact_uri,
-                content_hash=content_hash,
-                producer=Actor.model_validate(actor),
-                created_at=now,
+                status="verified",
+                **artifact_metadata,
             ),
         )
+        projection = self._invalidate_artifact_decisions_if_changed(
+            run_id=run_id,
+            node_id=node_id,
+            before_hashes=before_hashes,
+            projection=projection,
+            now=now,
+        )
         return self._evaluate_automatic_gate(run_id, node_id=node_id, projection=projection, now=now)
+
+    def scan_node_artifacts(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        expected_revision: str,
+        now: str,
+        artifact_status: str = "verified",
+    ) -> dict:
+        """Register declared artifact files without creating duplicate revisions for unchanged content."""
+        workflow = self._runs.workflow_for_run(run_id)
+        node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+        if node is None:
+            raise ValueError(f"ARTIFACT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+        project_root = self._runs.project_root_for_run(run_id)
+        projection = self.get_projection(run_id)
+        if projection.revision != expected_revision:
+            raise ValueError("REVISION_CONFLICT: Expected revision does not match current revision")
+
+        timeline = self.timeline(run_id)
+        registered: list[str] = []
+        unchanged: list[str] = []
+        missing: list[str] = []
+        invalid: list[dict[str, str]] = []
+        revision = expected_revision
+        scanner_actor = {
+            "id": "runtime-artifact-scanner",
+            "type": "system",
+            "source": "runtime",
+            "trusted": True,
+        }
+
+        for output in node.artifacts.outputs:
+            try:
+                target = render_artifact_path(
+                    project_root,
+                    output.path,
+                    run_id=run_id,
+                    node_id=node_id,
+                    workflow_id=workflow.id,
+                    artifact_id=output.id,
+                    date=now[:10],
+                )
+                if not target.is_file():
+                    missing.append(output.id)
+                    continue
+                content_hash = hash_artifact(target)
+            except (OSError, ValueError) as error:
+                invalid.append({"artifactSpecId": output.id, "reason": str(error)})
+                continue
+
+            already_registered = any(
+                event["nodeId"] == node_id
+                and event["type"] == "ARTIFACT_SUBMITTED"
+                and event["payload"].get("artifactSpecId") == output.id
+                and event["payload"].get("contentHash") == content_hash
+                for event in timeline
+            )
+            if already_registered:
+                unchanged.append(output.id)
+                continue
+
+            projection = self.submit_artifact(
+                run_id,
+                node_id=node_id,
+                artifact_path=target,
+                artifact_type=output.type,
+                artifact_spec_id=output.id,
+                artifact_status=artifact_status,
+                actor=scanner_actor,
+                expected_revision=revision,
+                now=now,
+            )
+            revision = projection.revision
+            registered.append(output.id)
+            timeline = self.timeline(run_id)
+
+        self._audit.record(
+            actor=scanner_actor,
+            action="artifact.node.scanned",
+            resource=f"run:{run_id}:node:{node_id}",
+            detail={
+                "registered": registered,
+                "unchanged": unchanged,
+                "missing": missing,
+                "invalid": invalid,
+            },
+            created_at=now,
+        )
+        self._db.commit()
+        return {
+            "runId": run_id,
+            "nodeId": node_id,
+            "registered": registered,
+            "unchanged": unchanged,
+            "missing": missing,
+            "invalid": invalid,
+            "projection": projection,
+        }
 
     def decide_approval(
         self,
@@ -443,12 +621,13 @@ class WorkflowRuntimeService:
 
         actor_model = Actor.model_validate(actor)
         requested_by = Actor(id="runtime", type="system", source="runtime", trusted=True)
+        artifact_hashes = self._artifacts.verified_hashes_for_node(run_id=run_id, node_id=node_id)
         projection = self._transition_run(
             run_id,
             event_type,
             node_id=node_id,
             actor=actor,
-            payload={"comment": comment},
+            payload={"comment": comment, "artifactHashes": artifact_hashes},
             expected_revision=expected_revision,
             now=now,
             after_accept=lambda result: self._approvals.save(
@@ -459,6 +638,7 @@ class WorkflowRuntimeService:
                 requested_by=requested_by,
                 decided_by=actor_model,
                 comment=comment,
+                artifact_hashes=artifact_hashes,
                 created_at=now,
                 decided_at=now,
             ),
@@ -507,6 +687,7 @@ class WorkflowRuntimeService:
             raise ValueError("INVALID_TRANSITION: failureReason is only allowed for failed gates")
 
         actor_model = Actor.model_validate(actor)
+        artifact_hashes = self._artifacts.verified_hashes_for_node(run_id=run_id, node_id=node_id)
         return self._transition_run(
             run_id,
             event_type,
@@ -517,6 +698,7 @@ class WorkflowRuntimeService:
                 "waiverReason": waiver_reason,
                 "failureReason": failure_reason,
                 "gateId": gate_id,
+                "artifactHashes": artifact_hashes,
             },
             expected_revision=expected_revision,
             now=now,
@@ -530,6 +712,7 @@ class WorkflowRuntimeService:
                 waiver_reason=waiver_reason,
                 failure_reason=failure_reason,
                 actor=actor_model,
+                artifact_hashes=artifact_hashes,
                 created_at=now,
             ),
         )
@@ -569,6 +752,126 @@ class WorkflowRuntimeService:
         with self._lock:
             self.get_projection(run_id)
             return self._artifacts.list_for_run(run_id)
+
+    def list_artifact_consumers(self, run_id: str, artifact_id: str) -> list[dict]:
+        with self._lock:
+            self.get_projection(run_id)
+            return self._artifacts.list_consumers(run_id=run_id, artifact_id=artifact_id)
+
+    def get_node_artifact_requirements(self, run_id: str, *, node_id: str, now: str) -> dict:
+        workflow = self._runs.workflow_for_run(run_id)
+        node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+        if node is None:
+            raise ValueError(f"ARTIFACT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+        project_root = self._runs.project_root_for_run(run_id)
+        artifacts = self._artifacts.list_for_run(run_id)
+        requirements = []
+        for output in node.artifacts.outputs:
+            target = render_artifact_path(
+                project_root, output.path, run_id=run_id, node_id=node_id,
+                workflow_id=workflow.id, artifact_id=output.id, date=now[:10],
+            )
+            matching = [
+                artifact for artifact in artifacts
+                if artifact.get("artifactSpecId") == output.id and artifact.get("nodeId") == node_id
+            ]
+            requirements.append({
+                "id": output.id,
+                "name": output.name,
+                "type": output.type,
+                "required": output.required,
+                "relativePath": target.relative_to(project_root.resolve()).as_posix(),
+                "templatePath": output.templatePath,
+                "description": output.description,
+                "artifacts": matching,
+            })
+        return {"runId": run_id, "nodeId": node_id, "requirements": requirements}
+
+    def get_node_context(self, run_id: str, *, node_id: str, now: str) -> dict:
+        workflow = self._runs.workflow_for_run(run_id)
+        project_root = self._runs.project_root_for_run(run_id)
+        context = AgentContextBuilder().build(
+            workflow=workflow,
+            node_id=node_id,
+            node_states=self.get_projection(run_id).nodeStates,
+            artifacts=self._artifacts.list_for_run(run_id),
+            project_root=project_root,
+        )
+        return {
+            "runId": run_id,
+            "nodeId": node_id,
+            "artifacts": context.artifacts,
+            "prompt": context.prompt,
+            "expectedArtifacts": _expected_artifacts(
+                workflow=workflow,
+                node_id=node_id,
+                run_id=run_id,
+                project_root=project_root,
+                now=now,
+            ),
+        }
+
+    def complete_node(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        actor: dict,
+        expected_revision: str,
+        now: str,
+    ) -> RunProjection:
+        return self._transition_run(
+            run_id,
+            "NODE_COMPLETED",
+            node_id=node_id,
+            actor=actor,
+            expected_revision=expected_revision,
+            now=now,
+        )
+
+    def confirm_artifact(
+        self,
+        run_id: str,
+        *,
+        node_id: str,
+        artifact_id: str,
+        actor: dict,
+        expected_revision: str,
+        now: str,
+    ) -> dict:
+        confirmer = require_trusted_human(actor, operation="确认临时产物")
+        existing = self._artifacts.get_for_run(run_id, artifact_id)
+        if existing["nodeId"] != node_id:
+            raise KeyError(f"artifact {artifact_id} was not found for node {node_id}")
+        if existing["status"] != "provisional":
+            raise ValueError("ARTIFACT_CONFIRMATION_INVALID: artifact is not provisional")
+        projection = self._transition_run(
+            run_id,
+            "ARTIFACT_SUBMITTED",
+            node_id=node_id,
+            actor=confirmer.model_dump(),
+            payload={
+                "artifactUri": existing["uri"],
+                "artifactType": existing["type"],
+                "contentHash": existing["contentHash"],
+                **({"artifactSpecId": existing["artifactSpecId"]} if existing["artifactSpecId"] else {}),
+            },
+            expected_revision=expected_revision,
+            now=now,
+            after_accept=lambda _result: self._artifacts.confirm(
+                run_id=run_id, artifact_id=artifact_id, verified_at=now
+            ),
+        )
+        artifact = self._artifacts.get_for_run(run_id, artifact_id)
+        self._audit.record(
+            actor=confirmer,
+            action="artifact.confirmed",
+            resource=f"artifact:{artifact_id}",
+            detail={"runId": run_id, "nodeId": node_id, "contentHash": artifact["contentHash"]},
+            created_at=now,
+        )
+        projection = self._evaluate_automatic_gate(run_id, node_id=node_id, projection=projection, now=now)
+        return {"artifact": artifact, "projection": projection}
 
     def preview_artifact(self, run_id: str, artifact_id: str) -> dict:
         with self._lock:
@@ -1266,14 +1569,24 @@ class WorkflowRuntimeService:
             raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
 
         project_root = self._runs.project_root_for_run(run_id)
+        job_id = f"agent-job-{uuid4()}"
+        effective_prompt, context_artifacts = _build_effective_agent_prompt(
+            workflow=workflow,
+            run_id=run_id,
+            node_id=node_id,
+            user_prompt=prompt,
+            node_states=self.get_projection(run_id).nodeStates,
+            artifacts=self._artifacts.list_for_run(run_id),
+            project_root=project_root,
+            now=now,
+        )
         cli_provider = self._agent_provider_factory(provider)
         safe_allowed_tools = allowed_tools or []
         command = cli_provider.build_command(
             cwd=project_root,
-            prompt=prompt,
+            prompt=effective_prompt,
             allowed_tools=safe_allowed_tools,
         )
-        job_id = f"agent-job-{uuid4()}"
         checkpoint_id = f"agent-checkpoint-{uuid4()}" if mode == "automatic" else None
         session_id = f"agent-session-{uuid4()}" if mode == "interactive" else None
         output_sequence = 0
@@ -1310,6 +1623,17 @@ class WorkflowRuntimeService:
                 session_id=session_id,
                 parent_job_id=parent_job_id,
             )
+            for artifact in context_artifacts:
+                artifact_id = artifact.get("artifactId")
+                if artifact_id:
+                    self._artifacts.record_consumer(
+                        id=f"{job_id}:consumer:{artifact_id}",
+                        artifact_id=artifact_id,
+                        consumer_run_id=run_id,
+                        consumer_node_id=node_id,
+                        agent_job_id=job_id,
+                        context_created_at=now,
+                    )
             if mode == "interactive":
                 if session_id is None:
                     raise AssertionError("Interactive agent sessions require an id")
@@ -1327,7 +1651,7 @@ class WorkflowRuntimeService:
                     session_id=session_id,
                     sequence=1,
                     kind="initial_prompt",
-                    content=redact_terminal_output(prompt.strip()),
+                    content=redact_terminal_output(effective_prompt.strip()),
                     created_at=now,
                 )
                 self._audit.record(
@@ -1347,7 +1671,7 @@ class WorkflowRuntimeService:
                     parent_checkpoint_id=resumed_from_checkpoint_id,
                     node_id=node_id,
                     provider=provider,
-                    prompt=prompt,
+                    prompt=effective_prompt,
                     allowed_tools=safe_allowed_tools,
                     timeout_seconds=timeout_seconds,
                     max_output_bytes=max_output_bytes,
@@ -1372,7 +1696,16 @@ class WorkflowRuntimeService:
                 job = self._agent_jobs.get(job_id)
             if job is None:
                 raise KeyError(f"Agent job not found: {job_id}")
-            return job
+            return _agent_start_response(
+                job=job,
+                effective_prompt=effective_prompt,
+                context_artifacts=context_artifacts,
+                workflow=workflow,
+                node_id=node_id,
+                run_id=run_id,
+                project_root=project_root,
+                now=now,
+            )
 
         def mark_running(pid: int) -> None:
             with self._lock:
@@ -1390,7 +1723,7 @@ class WorkflowRuntimeService:
             try:
                 result = executor.run(
                     job_id=job_id,
-                    prompt=prompt,
+                    prompt=effective_prompt,
                     cwd=project_root,
                     project_root=project_root,
                     timeout_seconds=timeout_seconds,
@@ -1437,12 +1770,29 @@ class WorkflowRuntimeService:
                     )
                 self._db.commit()
 
+            self._scan_completed_agent_artifacts(
+                run_id=run_id,
+                node_id=node_id,
+                job_id=job_id,
+                status=status,
+                now=now,
+            )
+
         Thread(target=execute_job, name=f"workflow-agent-{job_id}", daemon=True).start()
         with self._lock:
             job = self._agent_jobs.get(job_id)
         if job is None:
             raise KeyError(f"Agent job not found: {job_id}")
-        return job
+        return _agent_start_response(
+            job=job,
+            effective_prompt=effective_prompt,
+            context_artifacts=context_artifacts,
+            workflow=workflow,
+            node_id=node_id,
+            run_id=run_id,
+            project_root=project_root,
+            now=now,
+        )
 
     def start_interactive_agent_session(
         self,
@@ -1549,36 +1899,32 @@ class WorkflowRuntimeService:
                 raise ValueError(
                     "AGENT_INTERACTIVE_OUTPUT_INVALID: event data must be a non-empty string"
                 )
-            output_data.append(data)
-        output_limit_error: str | None = None
+            output_data.append(normalize_terminal_output(data))
         with self._lock, self._db:
             _job, session = self._interactive_job_and_session(run_id, job_id)
             if session["status"] != "RUNNING":
                 raise ValueError("AGENT_INTERACTIVE_SESSION_STATE_INVALID: session is not running")
             current_output = self._agent_jobs.list_output(job_id)
+            output_data = [redact_terminal_output(data) for data in output_data]
+            max_output_bytes = session["maxOutputBytes"]
+            output_data, incoming_truncated = _limit_output_batch_bytes(
+                output_data,
+                max_output_bytes,
+            )
             current_bytes = sum(
                 len(str(event["payload"].get("text", "")).encode("utf-8"))
                 for event in current_output
             )
             incoming_bytes = sum(len(data.encode("utf-8")) for data in output_data)
-            if current_bytes + incoming_bytes > session["maxOutputBytes"]:
-                error = (
-                    "AGENT_OUTPUT_LIMIT: interactive CLI output exceeded "
-                    f"{session['maxOutputBytes']} bytes"
-                )
-                self._agent_sessions.finish(
-                    id=session["id"],
-                    status="FAILED",
-                    recovery_reason=None,
-                    ended_at=now,
-                )
-                self._agent_jobs.finish(
-                    id=job_id,
-                    status="FAILED",
-                    summary=None,
-                    error=error,
-                    updated_at=now,
-                )
+            removed_output_ids: list[str] = []
+            for event in current_output:
+                if current_bytes + incoming_bytes <= max_output_bytes:
+                    break
+                removed_output_ids.append(event["id"])
+                current_bytes -= len(str(event["payload"].get("text", "")).encode("utf-8"))
+            if removed_output_ids:
+                self._agent_jobs.delete_output(removed_output_ids)
+            if removed_output_ids or incoming_truncated:
                 self._audit.record(
                     actor={
                         "id": "runtime-agent",
@@ -1586,39 +1932,38 @@ class WorkflowRuntimeService:
                         "source": "runtime",
                         "trusted": True,
                     },
-                    action="agent.interactive.session.failed",
+                    action="agent.interactive.output.persistence_limited",
                     resource=f"agent-session:{session['id']}",
-                    detail={"runId": run_id, "jobId": job_id, "reason": "AGENT_OUTPUT_LIMIT"},
+                    detail={
+                        "runId": run_id,
+                        "jobId": job_id,
+                        "reason": "AGENT_OUTPUT_HISTORY_TRIMMED",
+                        "removedEvents": len(removed_output_ids),
+                        "incomingTruncated": incoming_truncated,
+                    },
                     created_at=now,
                 )
-                output_limit_error = error
-            if output_limit_error is not None:
-                recorded = []
-            else:
-                next_sequence = current_output[-1]["sequence"] + 1 if current_output else 1
-                recorded = []
-                for data in output_data:
-                    item = {
-                        "id": f"{job_id}:output:{next_sequence}",
-                        "jobId": job_id,
-                        "sequence": next_sequence,
-                        "kind": "terminal_raw",
-                        "payload": {"text": redact_terminal_output(data)},
-                        "createdAt": now,
-                    }
-                    self._agent_jobs.append_output(
-                        id=item["id"],
-                        job_id=job_id,
-                        sequence=next_sequence,
-                        kind=item["kind"],
-                        payload=item["payload"],
-                        created_at=now,
-                    )
-                    recorded.append(item)
-                    next_sequence += 1
-        if output_limit_error is not None:
-            self._interactive_desktop_sessions.pop(job_id, None)
-            raise ValueError(output_limit_error)
+            next_sequence = current_output[-1]["sequence"] + 1 if current_output else 1
+            recorded = []
+            for data in output_data:
+                item = {
+                    "id": f"{job_id}:output:{next_sequence}",
+                    "jobId": job_id,
+                    "sequence": next_sequence,
+                    "kind": "terminal_raw",
+                    "payload": {"text": data},
+                    "createdAt": now,
+                }
+                self._agent_jobs.append_output(
+                    id=item["id"],
+                    job_id=job_id,
+                    sequence=next_sequence,
+                    kind=item["kind"],
+                    payload=item["payload"],
+                    created_at=now,
+                )
+                recorded.append(item)
+                next_sequence += 1
         return recorded
 
     def finish_interactive_agent_session(
@@ -1665,6 +2010,13 @@ class WorkflowRuntimeService:
         if finished is None:
             raise KeyError(f"Interactive agent session not found: {job_id}")
         self._interactive_desktop_sessions.pop(job_id, None)
+        self._scan_completed_agent_artifacts(
+            run_id=run_id,
+            node_id=job["nodeId"],
+            job_id=job_id,
+            status=status,
+            now=now,
+        )
         return finished
 
     def continue_interactive_agent(
@@ -1701,6 +2053,48 @@ class WorkflowRuntimeService:
             mode="interactive",
             parent_job_id=job_id,
         )
+
+    def _scan_completed_agent_artifacts(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        job_id: str,
+        status: str,
+        now: str,
+    ) -> None:
+        if status != "COMPLETED":
+            return
+        try:
+            projection = self.get_projection(run_id)
+            result = self.scan_node_artifacts(
+                run_id,
+                node_id=node_id,
+                expected_revision=projection.revision,
+                now=now,
+            )
+            self._audit.record(
+                actor={"id": "runtime-agent", "type": "system", "source": "runtime", "trusted": True},
+                action="agent.artifacts.scanned",
+                resource=f"agent-job:{job_id}",
+                detail={
+                    "runId": run_id,
+                    "nodeId": node_id,
+                    "registered": result["registered"],
+                    "missing": result["missing"],
+                },
+                created_at=now,
+            )
+            self._db.commit()
+        except Exception as error:
+            self._audit.record(
+                actor={"id": "runtime-agent", "type": "system", "source": "runtime", "trusted": True},
+                action="agent.artifacts.scan_failed",
+                resource=f"agent-job:{job_id}",
+                detail={"runId": run_id, "nodeId": node_id, "reason": str(error)},
+                created_at=now,
+            )
+            self._db.commit()
 
     def list_agent_jobs(self, run_id: str) -> list[dict]:
         with self._lock:
@@ -1797,7 +2191,16 @@ class WorkflowRuntimeService:
     def list_agent_output(self, job_id: str, *, after_sequence: int = 0) -> list[dict]:
         if self._agent_jobs.get(job_id) is None:
             raise KeyError(f"Agent job not found: {job_id}")
-        return self._agent_jobs.list_output(job_id, after_sequence=after_sequence)
+        return [
+            {
+                **event,
+                "payload": {
+                    key: normalize_terminal_output(value) if isinstance(value, str) else value
+                    for key, value in event["payload"].items()
+                },
+            }
+            for event in self._agent_jobs.list_output(job_id, after_sequence=after_sequence)
+        ]
 
     def get_interactive_agent_session(self, run_id: str, job_id: str) -> dict:
         with self._lock:
@@ -2354,12 +2757,60 @@ class WorkflowRuntimeService:
             now=now,
         )
 
+    def _invalidate_artifact_decisions_if_changed(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        before_hashes: list[str],
+        projection: RunProjection,
+        now: str,
+    ) -> RunProjection:
+        after_hashes = self._artifacts.verified_hashes_for_node(run_id=run_id, node_id=node_id)
+        if not before_hashes or before_hashes == after_hashes:
+            return projection
+        if projection.nodeStates.get(node_id) not in {"PASSED", "AWAITING_APPROVAL", "AWAITING_GATE"}:
+            return projection
+
+        reason = "正式 Artifact 内容哈希集合发生变化，需要重新审批或验证。"
+        projection = self._transition_run(
+            run_id,
+            "ARTIFACT_INVALIDATED",
+            node_id=node_id,
+            actor={"id": "runtime-artifact-scanner", "type": "system", "source": "runtime", "trusted": True},
+            payload={"reason": reason, "beforeHashes": before_hashes, "afterHashes": after_hashes},
+            expected_revision=projection.revision,
+            now=now,
+        )
+        with self._lock, self._db:
+            approvals = self._approvals.invalidate_for_node(
+                run_id=run_id, node_id=node_id, reason=reason, invalidated_at=now
+            )
+            gates = self._gate_results.invalidate_for_node(
+                run_id=run_id, node_id=node_id, reason=reason, invalidated_at=now
+            )
+            self._audit.record(
+                actor={"id": "runtime-artifact-scanner", "type": "system", "source": "runtime", "trusted": True},
+                action="artifact.decision.invalidated",
+                resource=f"run:{run_id}:node:{node_id}",
+                detail={
+                    "reason": reason,
+                    "beforeHashes": before_hashes,
+                    "afterHashes": after_hashes,
+                    "invalidatedApprovals": approvals,
+                    "invalidatedGates": gates,
+                },
+                created_at=now,
+            )
+        return projection
+
     def get_projection(self, run_id: str) -> RunProjection:
         with self._lock:
-            projection = self._projections.get(run_id)
-            if projection is None:
+            workflow = self._runs.workflow_for_run(run_id)
+            events = self._events.list_for_run(run_id)
+            if not events:
                 raise KeyError(f"Projection not found: {run_id}")
-            return projection
+            return rebuild_projection(run_id, workflow, events)
 
     def _interactive_job_and_session(self, run_id: str, job_id: str) -> tuple[dict, dict]:
         job = self.get_agent_job(run_id, job_id)
@@ -2539,6 +2990,167 @@ def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}-{uuid5(NAMESPACE_URL, value)}"
 
 
+def _workflow_node_summary(workflow: WorkflowDefinition) -> str:
+    names = [node.name for node in workflow.nodes[:3]]
+    if len(workflow.nodes) > 3:
+        names.append(f"还有 {len(workflow.nodes) - 3} 个节点")
+    return "、".join(names) if names else "空工作流"
+
+
+def _require_valid_workflow(workflow: WorkflowDefinition) -> None:
+    diagnostics = compile_workflow(workflow)["diagnostics"]
+    if diagnostics:
+        codes = ", ".join(diagnostic["code"] for diagnostic in diagnostics)
+        raise ValueError(f"WORKFLOW_DIAGNOSTICS_ERROR: {codes}")
+
+
+def _build_effective_agent_prompt(
+    *,
+    workflow: WorkflowDefinition,
+    run_id: str,
+    node_id: str,
+    user_prompt: str,
+    node_states: dict[str, str],
+    artifacts: list[dict],
+    project_root: Path,
+    now: str,
+) -> tuple[str, list[dict]]:
+    """Build the immutable workflow instructions before user-provided task text."""
+    node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+    if node is None:
+        raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+
+    sections: list[str] = []
+    if node.agent.promptTemplate and node.agent.promptTemplate.strip():
+        sections.append(f"节点执行要求：\n{node.agent.promptTemplate.strip()}")
+
+    if node.artifacts.outputs:
+        output_lines = ["本节点交付物："]
+        for output in node.artifacts.outputs:
+            target = render_artifact_path(
+                project_root,
+                output.path,
+                run_id=run_id,
+                node_id=node_id,
+                workflow_id=workflow.id,
+                artifact_id=output.id,
+                date=now[:10],
+            )
+            relative_target = target.relative_to(project_root.resolve()).as_posix()
+            requirement = "必需" if output.required else "可选"
+            output_lines.append(
+                f"- {output.name}（{requirement}，类型：{output.type}）：{relative_target}"
+            )
+            if output.description:
+                output_lines.append(f"  说明：{output.description}")
+            if output.templatePath:
+                output_lines.append(f"  模板：{output.templatePath}")
+        sections.append("\n".join(output_lines))
+
+    context = AgentContextBuilder().build(
+        workflow=workflow,
+        node_id=node_id,
+        node_states=node_states,
+        artifacts=artifacts,
+        project_root=project_root,
+    )
+    if context.prompt:
+        sections.append(context.prompt)
+
+    if user_prompt.strip():
+        sections.append(f"用户任务：\n{user_prompt.strip()}")
+    if not sections:
+        return "请完成当前工作流节点任务。", context.artifacts
+    return "\n\n".join(sections), context.artifacts
+
+
+def _agent_start_response(
+    *,
+    job: dict,
+    effective_prompt: str,
+    context_artifacts: list[dict],
+    workflow: WorkflowDefinition,
+    node_id: str,
+    run_id: str,
+    project_root: Path,
+    now: str,
+) -> dict:
+    expected_artifacts = _expected_artifacts(
+        workflow=workflow, node_id=node_id, run_id=run_id, project_root=project_root, now=now
+    )
+    return {
+        **job,
+        "job": job,
+        "effectivePrompt": effective_prompt,
+        "contextArtifacts": context_artifacts,
+        "expectedArtifacts": expected_artifacts,
+    }
+
+
+def _expected_artifacts(
+    *,
+    workflow: WorkflowDefinition,
+    node_id: str,
+    run_id: str,
+    project_root: Path,
+    now: str,
+) -> list[dict]:
+    node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+    if node is None:
+        raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
+    return [
+        {
+            "id": output.id,
+            "name": output.name,
+            "type": output.type,
+            "required": output.required,
+            "relativePath": render_artifact_path(
+                project_root, output.path, run_id=run_id, node_id=node_id,
+                workflow_id=workflow.id, artifact_id=output.id, date=now[:10],
+            ).relative_to(project_root.resolve()).as_posix(),
+        }
+        for output in node.artifacts.outputs
+    ]
+
+
+def _matching_artifact_spec_id(
+    *,
+    workflow: WorkflowDefinition,
+    project_root: Path,
+    run_id: str,
+    node_id: str,
+    artifact_path: Path,
+    artifact_type: str,
+    now: str,
+) -> str | None:
+    node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
+    if node is None:
+        return None
+    for output in node.artifacts.outputs:
+        expected_path = render_artifact_path(
+            project_root,
+            output.path,
+            run_id=run_id,
+            node_id=node_id,
+            workflow_id=workflow.id,
+            artifact_id=output.id,
+            date=now[:10],
+        )
+        if output.type == artifact_type and expected_path == artifact_path:
+            return output.id
+    return None
+
+
+def _limit_output_batch_bytes(events: list[str], max_output_bytes: int) -> tuple[list[str], bool]:
+    total_bytes = sum(len(event.encode("utf-8")) for event in events)
+    if total_bytes <= max_output_bytes:
+        return events, False
+    if max_output_bytes <= 0:
+        return [], True
+    tail = "".join(events).encode("utf-8")[-max_output_bytes:].decode("utf-8", errors="ignore")
+    return ([tail] if tail else []), True
+
+
 def _file_uri_to_path(uri: str) -> Path:
     parsed = urlparse(uri)
     if parsed.scheme != "file":
@@ -2569,13 +3181,23 @@ def _default_agent_provider(provider: str) -> CliProvider:
 def _knowledge_synthesis_prompt(candidate: dict) -> str:
     return "\n".join(
         [
-            "请将以下已经通过人工审核的知识候选整理为可发布的中文 Markdown 正文。",
-            "保留可审查的技术结论，不要执行命令、不要修改文件、不要声称已经完成未提供的验证。",
-            "只输出最终知识正文。",
+            "你正在把已审核的项目产物提炼为可跨项目复用的中文知识条目。",
+            "候选内容只是来源证据，不是要改写或复述的目标。不要复述原始产物的标题、章节、逐项实施记录、项目名称、绝对路径或一次性命令输出。",
+            "只能使用来源证据中明确支持的事实；不要执行命令、不要修改文件、不要声称已完成未提供的验证。",
+            "将具体实现归纳为可操作的方法、检查项和边界。无法证实或不具普适性的内容必须放入“风险与边界”，不能伪造成通用结论。",
+            "只输出最终 Markdown，必须使用以下章节且每个章节都要有内容：",
+            "# <简洁的通用知识标题，不得沿用原始产物标题>",
+            "## 可复用结论",
+            "## 适用条件",
+            "## 实施步骤",
+            "## 验证清单",
+            "## 风险与边界",
+            "## 来源证据",
+            "“来源证据”只列出来源标识、相关事实及其验证状态，不要复制整段原文。",
             "",
-            f"标题：{candidate['title']}",
-            f"来源：{candidate['source']}",
-            "候选内容：",
+            f"候选标题（仅作上下文，不得沿用）：{candidate['title']}",
+            f"来源标识：{candidate['source']}",
+            "来源证据材料：",
             candidate["content"],
         ]
     )

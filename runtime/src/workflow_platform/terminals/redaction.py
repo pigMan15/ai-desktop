@@ -19,10 +19,16 @@ _BEARER_SECRET = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
 _KNOWN_TOKEN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b"
 )
+_UNPAIRED_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def normalize_terminal_output(output: str) -> str:
+    """Make arbitrary PTY chunks safe for UTF-8 storage and JSON responses."""
+    return _UNPAIRED_SURROGATE.sub("\ufffd", output)
 
 
 def redact_terminal_output(output: str) -> str:
-    redacted = _ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", output)
+    redacted = _ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", normalize_terminal_output(output))
     redacted = _AUTHORIZATION_SECRET.sub(r"\1[REDACTED]", redacted)
     redacted = _JSON_SECRET.sub(r"\1[REDACTED]\2", redacted)
     redacted = _QUERY_SECRET.sub(r"\1[REDACTED]", redacted)

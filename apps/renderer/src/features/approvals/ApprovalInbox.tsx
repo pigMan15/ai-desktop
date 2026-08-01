@@ -49,6 +49,8 @@ export function ApprovalInbox({ state, onDecide }: Props) {
           <li key={approval.id}>
             {approval.id}：{approvalStatusText[approval.status] ?? approval.status}
             {approval.comment ? `；备注：${approval.comment}` : "；暂无备注"}
+            {approval.invalidatedAt ? `；已失效：${approval.invalidationReason ?? "Artifact 已变更"}` : ""}
+            {approval.artifactHashes?.length ? `；绑定产物 ${approval.artifactHashes.length} 个哈希` : ""}
           </li>
         ))}
         {approvals.length === 0 ? <li>等待 Runtime 审批队列。</li> : null}

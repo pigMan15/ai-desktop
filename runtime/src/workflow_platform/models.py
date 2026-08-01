@@ -18,6 +18,7 @@ RUN_EVENT_TYPES = (
     "RUN_CREATED",
     "NODE_STARTED",
     "ARTIFACT_SUBMITTED",
+    "ARTIFACT_INVALIDATED",
     "APPROVAL_REQUESTED",
     "HUMAN_APPROVED",
     "HUMAN_REJECTED",
@@ -50,6 +51,7 @@ RunEventType = Literal[
     "RUN_CREATED",
     "NODE_STARTED",
     "ARTIFACT_SUBMITTED",
+    "ARTIFACT_INVALIDATED",
     "APPROVAL_REQUESTED",
     "HUMAN_APPROVED",
     "HUMAN_REJECTED",
@@ -103,6 +105,8 @@ NodeState = Literal[
 ]
 ActionRisk = Literal["low", "medium", "high"]
 RequirementType = Literal["artifact", "approval", "gate", "evidence"]
+ArtifactContextScope = Literal["none", "direct", "ancestors"]
+AdvanceMode = Literal["manual", "auto"]
 
 
 class CanonicalModel(BaseModel):
@@ -118,6 +122,37 @@ class RequirementSpec(CanonicalModel):
     required: bool = True
 
 
+class ArtifactOutputSpec(CanonicalModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    required: bool
+    path: str = Field(min_length=1)
+    templatePath: str | None = None
+    description: str | None = None
+
+
+class NodeArtifactSpec(CanonicalModel):
+    outputs: list[ArtifactOutputSpec] = Field(default_factory=list)
+
+
+class AgentContextSpec(CanonicalModel):
+    upstream: ArtifactContextScope = "none"
+    artifactTypes: list[str] = Field(default_factory=list)
+    maxArtifacts: int = 8
+    summaryCharsPerArtifact: int = 4000
+    maxTotalChars: int = 16000
+
+
+class NodeAgentSpec(CanonicalModel):
+    promptTemplate: str | None = None
+    context: AgentContextSpec = Field(default_factory=AgentContextSpec)
+
+
+class NodeAdvanceSpec(CanonicalModel):
+    mode: AdvanceMode = "manual"
+
+
 class WorkflowNode(CanonicalModel):
     id: str
     name: str
@@ -126,6 +161,9 @@ class WorkflowNode(CanonicalModel):
     description: str | None = None
     requires: list[RequirementSpec] = Field(default_factory=list)
     gates: list[str] = Field(default_factory=list)
+    artifacts: NodeArtifactSpec = Field(default_factory=NodeArtifactSpec)
+    agent: NodeAgentSpec = Field(default_factory=NodeAgentSpec)
+    advance: NodeAdvanceSpec = Field(default_factory=NodeAdvanceSpec)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

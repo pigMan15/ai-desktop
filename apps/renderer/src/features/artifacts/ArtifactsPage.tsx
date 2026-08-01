@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { ArtifactPreview, RuntimeWorkbenchState } from "../../app/runtimeClient";
+import type { ArtifactConsumer, ArtifactPreview, RuntimeWorkbenchState } from "../../app/runtimeClient";
 import { diffArtifactText } from "./artifactDiff";
 
 type Props = {
@@ -10,6 +10,8 @@ type Props = {
   onCompareArtifacts?: (beforeArtifactId: string, afterArtifactId: string) => void;
   onDownloadEvidencePackage?: () => void;
   onDownloadReport?: () => void;
+  onConfirmArtifact?: (artifact: RuntimeWorkbenchState["artifacts"][number]) => void;
+  onLoadArtifactConsumers?: (artifactId: string) => Promise<ArtifactConsumer[]>;
   comparison?: {
     before: { id: string; content: string };
     after: { id: string; content: string };
@@ -23,11 +25,14 @@ export function ArtifactsPage({
   onCompareArtifacts,
   onDownloadEvidencePackage,
   onDownloadReport,
+  onConfirmArtifact,
+  onLoadArtifactConsumers,
   comparison = null,
 }: Props) {
   const artifacts = Array.isArray(state?.artifacts) ? state.artifacts : [];
   const [beforeArtifactId, setBeforeArtifactId] = useState("");
   const [afterArtifactId, setAfterArtifactId] = useState("");
+  const [consumersByArtifact, setConsumersByArtifact] = useState<Record<string, ArtifactConsumer[]>>({});
 
   return (
     <section id="artifacts" className="panel" aria-labelledby="artifacts-title">
@@ -109,7 +114,9 @@ export function ArtifactsPage({
               <article key={artifact.id} className="gate-record">
                 <div className="panel-heading">
                   <strong>{artifact.type}</strong>
-                  <span className="status-pill">已校验</span>
+                  <span className={`status-pill${artifact.status === "invalidated" ? " status-blocked" : ""}`}>
+                    {artifact.status === "invalidated" ? "已失效" : artifact.status === "provisional" ? "待确认" : "已校验"}
+                  </span>
                 </div>
                 <dl className="facts">
                   <div>
@@ -118,8 +125,20 @@ export function ArtifactsPage({
                   </div>
                   <div>
                     <dt>安全位置</dt>
-                    <dd>{artifact.uri}</dd>
+                    <dd>{artifact.relativePath ?? artifact.uri}</dd>
                   </div>
+                  {artifact.artifactSpecId ? (
+                    <div>
+                      <dt>交付物规范</dt>
+                      <dd>{artifact.artifactSpecId}</dd>
+                    </div>
+                  ) : null}
+                  {artifact.supersedesArtifactId ? (
+                    <div>
+                      <dt>替代版本</dt>
+                      <dd>{artifact.supersedesArtifactId}</dd>
+                    </div>
+                  ) : null}
                   <div>
                     <dt>内容哈希</dt>
                     <dd>{artifact.contentHash}</dd>
@@ -129,7 +148,33 @@ export function ArtifactsPage({
                   <button className="quiet-button" onClick={() => onPreviewArtifact?.(artifact.id)}>
                     查看内容
                   </button>
+                  {artifact.status === "provisional" ? (
+                    <button className="quiet-button" onClick={() => onConfirmArtifact?.(artifact)}>
+                      确认正式产物
+                    </button>
+                  ) : null}
+                  {onLoadArtifactConsumers ? (
+                    <button
+                      className="quiet-button"
+                      onClick={() => {
+                        void onLoadArtifactConsumers(artifact.id).then((consumers) => {
+                          setConsumersByArtifact((current) => ({ ...current, [artifact.id]: consumers }));
+                        });
+                      }}
+                    >
+                      查看使用记录
+                    </button>
+                  ) : null}
                 </div>
+                {consumersByArtifact[artifact.id] ? (
+                  <ul className="compact-list" aria-label={`产物消费者：${artifact.id}`}>
+                    {consumersByArtifact[artifact.id].length > 0 ? consumersByArtifact[artifact.id].map((consumer) => (
+                      <li key={consumer.id}>
+                        节点 {consumer.consumerNodeId} 使用于 Agent {consumer.agentJobId ?? "未绑定"}
+                      </li>
+                    )) : <li>尚未被下游节点使用。</li>}
+                  </ul>
+                ) : null}
               </article>
             ))}
           </div>

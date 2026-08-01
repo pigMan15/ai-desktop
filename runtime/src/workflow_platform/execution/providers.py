@@ -12,6 +12,7 @@ class CliCommand:
     executable: str
     args: list[str]
     cwd: Path
+    stdin: str | None = None
 
 
 class CliProvider(Protocol):
@@ -52,9 +53,10 @@ class CodexCliProvider:
                 "--skip-git-repo-check",
                 "--cd",
                 str(cwd),
-                prompt,
+                "-",
             ],
             cwd=cwd,
+            stdin=prompt,
         )
 
     def parse_line(self, line: str) -> dict[str, Any]:
@@ -63,6 +65,14 @@ class CodexCliProvider:
             return _raw_event(line)
 
         event_type = payload.get("type")
+        if event_type == "thread.started":
+            thread_id = _text_from_value(payload.get("thread_id"))
+            suffix = f"（{thread_id}）" if thread_id else ""
+            return {"kind": "progress", "payload": {"text": f"Codex 会话已创建{suffix}。"}}
+        if event_type == "turn.started":
+            return {"kind": "progress", "payload": {"text": "Codex 正在分析并生成结果。"}}
+        if event_type == "turn.completed":
+            return {"kind": "progress", "payload": {"text": "Codex 已完成本轮处理。"}}
         if event_type in {"message", "assistant_message"}:
             text = _text_from_value(payload.get("message")) or _text_from_value(payload.get("text"))
             if text is not None:
@@ -75,6 +85,18 @@ class CodexCliProvider:
             text = _text_from_value(payload.get("message")) or _text_from_value(payload.get("error"))
             if text is not None:
                 return {"kind": "error", "payload": {"text": text}}
+        if event_type == "item.completed":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = _text_from_value(item.get("text"))
+                if text is not None:
+                    return {"kind": "message", "payload": {"text": text}}
+        if event_type == "item.started":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "command_execution":
+                command = _text_from_value(item.get("command"))
+                if command is not None:
+                    return {"kind": "progress", "payload": {"text": f"Codex 正在执行命令：{command}"}}
 
         return _raw_event(line)
 

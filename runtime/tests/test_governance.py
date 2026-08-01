@@ -5,7 +5,7 @@ import shutil
 import pytest
 
 from workflow_platform.approvals.service import validate_human_decision
-from workflow_platform.artifacts.service import hash_artifact, validate_safe_path
+from workflow_platform.artifacts.service import hash_artifact, render_artifact_path, validate_safe_path
 from workflow_platform.gates.service import validate_gate_decision
 
 
@@ -70,6 +70,44 @@ def test_hash_artifact_returns_stable_sha256(governance_workspace: Path) -> None
 def test_hash_artifact_raises_for_missing_file(governance_workspace: Path) -> None:
     with pytest.raises(FileNotFoundError):
         hash_artifact(governance_workspace / "missing.txt")
+
+
+def test_render_artifact_path_resolves_allowed_runtime_variables(governance_workspace: Path) -> None:
+    resolved = render_artifact_path(
+        governance_workspace,
+        "docs/{{workflowId}}/{{runId}}/{{nodeId}}/{{artifactId}}-{{date}}.md",
+        run_id="run-1",
+        node_id="plan",
+        workflow_id="workflow-1",
+        artifact_id="report",
+        date="2026-07-30",
+    )
+
+    assert resolved == (
+        governance_workspace
+        / "docs"
+        / "workflow-1"
+        / "run-1"
+        / "plan"
+        / "report-2026-07-30.md"
+    ).resolve()
+
+
+@pytest.mark.parametrize("template", ["", "reports/{{unknown}}.md", "reports/{{runId}}.md{{", "../escape.md", "C:\\escape.md"])
+def test_render_artifact_path_rejects_invalid_templates(
+    governance_workspace: Path,
+    template: str,
+) -> None:
+    with pytest.raises(ValueError):
+        render_artifact_path(
+            governance_workspace,
+            template,
+            run_id="run-1",
+            node_id="plan",
+            workflow_id="workflow-1",
+            artifact_id="report",
+            date="2026-07-30",
+        )
 
 
 @pytest.mark.parametrize("actor", ["verifier", "system"])

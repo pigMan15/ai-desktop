@@ -127,6 +127,77 @@ def test_trusted_human_can_pause_and_resume_an_active_run() -> None:
         expected_revision="1",
     )
 
+
+def artifact_workflow(*, approval: bool = False, gate: bool = False) -> WorkflowDefinition:
+    requirements = (
+        [{"type": "approval", "approvalRole": "tech-lead", "required": True}]
+        if approval
+        else []
+    )
+    return WorkflowDefinition(
+        id="workflow-artifacts",
+        name="Artifact workflow",
+        version="1",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(
+                id="build",
+                name="Build",
+                kind="agent",
+                requires=requirements,
+                gates=["quality"] if gate else [],
+                artifacts={
+                    "outputs": [
+                        {
+                            "id": "report",
+                            "name": "报告",
+                            "type": "report",
+                            "required": True,
+                            "path": "reports/{{runId}}/report.md",
+                        },
+                        {
+                            "id": "notes",
+                            "name": "说明",
+                            "type": "notes",
+                            "required": False,
+                            "path": "reports/{{runId}}/notes.md",
+                        },
+                    ]
+                },
+            )
+        ],
+        edges=[],
+        roles=[],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+
+
+def branching_workflow() -> WorkflowDefinition:
+    return WorkflowDefinition(
+        id="workflow-branching",
+        name="Branching",
+        version="1",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(id="root", name="Root", kind="agent"),
+            WorkflowNode(id="left", name="Left", kind="agent"),
+            WorkflowNode(id="right", name="Right", kind="agent"),
+            WorkflowNode(id="join", name="Join", kind="agent"),
+        ],
+        edges=[
+            WorkflowEdge(id="root-left", from_="root", to="left"),
+            WorkflowEdge(id="root-right", from_="root", to="right"),
+            WorkflowEdge(id="left-join", from_="left", to="join"),
+            WorkflowEdge(id="right-join", from_="right", to="join"),
+        ],
+        roles=[],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+
     assert paused["accepted"] is True
     assert paused["run"].status == "PAUSED"
     assert [(action.eventType, action.nodeId) for action in paused["allowedActions"]] == [
@@ -229,6 +300,7 @@ def test_transition_starts_ready_node_and_advances_revision() -> None:
     assert result["run"].nodeStates["draft"] == "RUNNING"
     assert [action.eventType for action in result["allowedActions"]] == [
         "ARTIFACT_SUBMITTED",
+        "NODE_COMPLETED",
         "RUN_PAUSED",
     ]
 
@@ -361,6 +433,31 @@ def test_human_approval_passes_node_and_readies_next_node() -> None:
     assert result["run"].nodeStates["draft"] == "PASSED"
     assert result["run"].nodeStates["review"] == "READY"
     assert result["run"].currentNodeIds == ["review"]
+
+
+def test_starting_an_approval_node_enters_the_approval_inbox() -> None:
+    events = [
+        event("event-1", "NODE_STARTED", "draft", agent_actor(), "1"),
+        event("event-2", "NODE_COMPLETED", "draft", system_actor(), "2"),
+    ]
+
+    result = transition(
+        "run-1",
+        linear_workflow(),
+        events,
+        event("event-3", "NODE_STARTED", "review", human_actor()),
+        expected_revision="2",
+    )
+
+    assert result["accepted"] is True
+    assert result["run"].status == "REVIEWING"
+    assert result["run"].nodeStates["review"] == "AWAITING_APPROVAL"
+    assert [action.eventType for action in result["allowedActions"]] == [
+        "HUMAN_APPROVED",
+        "HUMAN_REJECTED",
+        "HUMAN_DEFERRED",
+        "RUN_PAUSED",
+    ]
 
 
 def test_human_rejection_blocks_run() -> None:
@@ -554,3 +651,138 @@ def test_node_completed_cannot_be_submitted_externally() -> None:
     assert result["accepted"] is False
     assert result["emittedEvents"] == []
     assert result["blockingReasons"][0].code == "INVALID_TRANSITION"
+
+
+def test_declared_required_artifact_blocks_completion_until_registered() -> None:
+    workflow = artifact_workflow(approval=True)
+    events = [event("event-1", "NODE_STARTED", "build", agent_actor(), "1")]
+
+    completed = transition(
+        "run-1",
+        workflow,
+        events,
+        event("event-2", "NODE_COMPLETED", "build", system_actor()),
+        expected_revision="1",
+    )
+
+    assert completed["accepted"] is True
+    assert completed["run"].nodeStates["build"] == "AWAITING_ARTIFACT"
+    assert completed["blockingReasons"][0].code == "MISSING_REQUIRED_ARTIFACT"
+
+    submitted = transition(
+        "run-1",
+        workflow,
+        [*events, *completed["emittedEvents"]],
+        event(
+            "event-3",
+            "ARTIFACT_SUBMITTED",
+            "build",
+            agent_actor(),
+            payload={
+                "artifactUri": "artifact://report",
+                "artifactType": "report",
+                "artifactSpecId": "report",
+            },
+        ),
+        expected_revision=completed["revision"],
+    )
+
+    assert submitted["accepted"] is True
+    assert submitted["run"].nodeStates["build"] == "AWAITING_APPROVAL"
+
+
+def test_changed_artifact_invalidates_a_completed_approval_decision() -> None:
+    workflow = artifact_workflow(approval=True)
+    events = [
+        event("event-1", "NODE_STARTED", "build", agent_actor(), "1"),
+        event(
+            "event-2", "ARTIFACT_SUBMITTED", "build", agent_actor(), "2",
+            payload={"artifactUri": "artifact://report", "artifactType": "report", "artifactSpecId": "report"},
+        ),
+        event("event-3", "NODE_COMPLETED", "build", system_actor(), "3"),
+        event("event-4", "HUMAN_APPROVED", "build", human_actor(), "4"),
+    ]
+
+    invalidated = transition(
+        "run-1",
+        workflow,
+        events,
+        event(
+            "event-5", "ARTIFACT_INVALIDATED", "build", system_actor(),
+            payload={"reason": "content hash changed", "beforeHashes": ["old"], "afterHashes": ["new"]},
+        ),
+        expected_revision="4",
+    )
+
+    assert invalidated["accepted"] is True
+    assert invalidated["run"].nodeStates["build"] == "AWAITING_APPROVAL"
+
+
+def test_optional_artifact_does_not_block_node_completion() -> None:
+    workflow = artifact_workflow(gate=True)
+    events = [
+        event("event-1", "NODE_STARTED", "build", agent_actor(), "1"),
+        event(
+            "event-2",
+            "ARTIFACT_SUBMITTED",
+            "build",
+            agent_actor(),
+            "2",
+            payload={
+                "artifactUri": "artifact://report",
+                "artifactType": "report",
+                "artifactSpecId": "report",
+            },
+        ),
+    ]
+
+    completed = transition(
+        "run-1",
+        workflow,
+        events,
+        event("event-3", "NODE_COMPLETED", "build", system_actor()),
+        expected_revision="2",
+    )
+
+    assert completed["accepted"] is True
+    assert completed["run"].nodeStates["build"] == "AWAITING_GATE"
+
+
+def test_passing_node_unlocks_all_outgoing_targets_and_join_waits_for_all_predecessors() -> None:
+    workflow = branching_workflow()
+    events = [
+        event("event-1", "NODE_STARTED", "root", agent_actor(), "1"),
+        event("event-2", "NODE_COMPLETED", "root", system_actor(), "2"),
+    ]
+    branched = rebuild_projection("run-1", workflow, events)
+
+    assert branched.nodeStates == {
+        "root": "PASSED",
+        "left": "READY",
+        "right": "READY",
+        "join": "PENDING",
+    }
+
+    after_left = rebuild_projection(
+        "run-1",
+        workflow,
+        [
+            *events,
+            event("event-3", "NODE_STARTED", "left", agent_actor(), "3"),
+            event("event-4", "NODE_COMPLETED", "left", system_actor(), "4"),
+        ],
+    )
+    assert after_left.nodeStates["join"] == "PENDING"
+
+    after_both = rebuild_projection(
+        "run-1",
+        workflow,
+        [
+            *events,
+            event("event-3", "NODE_STARTED", "left", agent_actor(), "3"),
+            event("event-4", "NODE_COMPLETED", "left", system_actor(), "4"),
+            event("event-5", "NODE_STARTED", "right", agent_actor(), "5"),
+            event("event-6", "NODE_COMPLETED", "right", system_actor(), "6"),
+        ],
+    )
+    assert after_both.nodeStates["join"] == "READY"

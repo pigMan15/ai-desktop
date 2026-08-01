@@ -12,24 +12,35 @@ export type TerminalViewportProps = {
   ariaLabel: string;
   output: TerminalViewportOutput[];
   writable?: boolean;
+  localEcho?: boolean;
   onInput?: (data: string) => Promise<void> | void;
+  onResize?: (columns: number, rows: number) => void;
   onInterrupt?: () => void;
   className?: string;
+  resetKey?: string;
 };
 
 export function TerminalViewport({
   ariaLabel,
   output,
   writable = false,
+  localEcho = false,
   onInput,
+  onResize,
   onInterrupt,
   className = "",
+  resetKey,
 }: TerminalViewportProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const onInputRef = useRef(onInput);
+  const onResizeRef = useRef(onResize);
+  const outputRef = useRef(output);
+  const writableRef = useRef(writable);
+  const localEchoRef = useRef(localEcho);
+  const resetKeyRef = useRef(resetKey);
   const renderedSequenceRef = useRef(0);
   const newestSeenSequenceRef = useRef(0);
   const [followOutput, setFollowOutput] = useState(true);
@@ -44,8 +55,26 @@ export function TerminalViewport({
   }, [onInput]);
 
   useEffect(() => {
+    onResizeRef.current = onResize;
+  }, [onResize]);
+
+  useEffect(() => {
+    outputRef.current = output;
+  }, [output]);
+
+  useEffect(() => {
+    writableRef.current = writable;
+    localEchoRef.current = localEcho;
+    if (terminalRef.current) {
+      terminalRef.current.options.disableStdin = !writable;
+      terminalRef.current.options.cursorBlink = writable;
+    }
+  }, [localEcho, writable]);
+
+  useEffect(() => {
     let disposed = false;
     let inputDisposable: { dispose(): void } | null = null;
+    let resizeObserver: ResizeObserver | null = null;
     void Promise.all([
       import("@xterm/xterm"),
       import("@xterm/addon-fit"),
@@ -56,8 +85,8 @@ export function TerminalViewport({
       }
       const terminal = new Terminal({
         convertEol: true,
-        cursorBlink: writable,
-        disableStdin: !writable,
+        cursorBlink: writableRef.current,
+        disableStdin: !writableRef.current,
         scrollback: 2_000,
         fontFamily: '"Cascadia Code", Consolas, monospace',
         fontSize: 13,
@@ -72,26 +101,38 @@ export function TerminalViewport({
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(searchAddon);
       terminal.open(containerRef.current);
-      fitAddon.fit();
+      const fitTerminal = () => {
+        fitAddon.fit();
+        onResizeRef.current?.(terminal.cols, terminal.rows);
+      };
+      fitTerminal();
+      resizeObserver = typeof window.ResizeObserver === "undefined"
+        ? null
+        : new window.ResizeObserver(fitTerminal);
+      resizeObserver?.observe(containerRef.current);
       inputDisposable = terminal.onData((data) => {
-        if (writable) {
+        if (writableRef.current) {
+          if (localEchoRef.current) {
+            terminal.write(localEchoData(data));
+          }
           void onInputRef.current?.(data);
         }
       });
       terminalRef.current = terminal;
       fitAddonRef.current = fitAddon;
       searchAddonRef.current = searchAddon;
-      for (const event of output) {
+      for (const event of outputRef.current) {
         terminal.write(event.data);
         renderedSequenceRef.current = Math.max(renderedSequenceRef.current, event.sequence);
         newestSeenSequenceRef.current = Math.max(newestSeenSequenceRef.current, event.sequence);
       }
-      setVisibleOutput(output);
+      setVisibleOutput(outputRef.current);
       setTerminalReady(true);
     });
     return () => {
       disposed = true;
       inputDisposable?.dispose();
+      resizeObserver?.disconnect();
       terminalRef.current?.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -100,7 +141,7 @@ export function TerminalViewport({
       newestSeenSequenceRef.current = 0;
       setTerminalReady(false);
     };
-  }, [writable]);
+  }, []);
 
   useEffect(() => {
     if (!terminalReady) {
@@ -112,6 +153,28 @@ export function TerminalViewport({
       searchAddonRef.current?.clearDecorations();
     }
   }, [searchQuery, terminalReady]);
+
+  useEffect(() => {
+    if (!terminalReady || resetKeyRef.current === resetKey) {
+      return;
+    }
+    resetKeyRef.current = resetKey;
+    terminalRef.current?.reset();
+    fitAddonRef.current?.fit();
+    if (terminalRef.current) {
+      onResizeRef.current?.(terminalRef.current.cols, terminalRef.current.rows);
+    }
+    renderedSequenceRef.current = 0;
+    newestSeenSequenceRef.current = 0;
+    for (const event of output) {
+      terminalRef.current?.write(event.data);
+      renderedSequenceRef.current = Math.max(renderedSequenceRef.current, event.sequence);
+      newestSeenSequenceRef.current = Math.max(newestSeenSequenceRef.current, event.sequence);
+    }
+    setVisibleOutput(output);
+    setFollowOutput(true);
+    setUnreadCount(0);
+  }, [output, resetKey, terminalReady]);
 
   useEffect(() => {
     const newestSequence = output.reduce((latest, event) => Math.max(latest, event.sequence), 0);
@@ -238,4 +301,17 @@ export function TerminalViewport({
       </pre>
     </section>
   );
+}
+
+function localEchoData(data: string): string {
+  if (data === "\r") {
+    return "\r\n";
+  }
+  if (data === "\u007f") {
+    return "\b \b";
+  }
+  if (data === "\u0003") {
+    return "^C\r\n";
+  }
+  return data;
 }

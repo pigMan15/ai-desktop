@@ -22,6 +22,49 @@ vi.mock("../terminal/TerminalViewport", () => ({
 afterEach(cleanup);
 
 describe("RunDashboard", () => {
+  it("在 Runtime 允许人工完成时显示并触发完成当前节点", () => {
+    const onCompleteNode = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "示例工作流",
+          projection: {
+            runId: "run-complete",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [
+              {
+                id: "complete:plan",
+                label: "完成当前节点",
+                eventType: "NODE_COMPLETED",
+                nodeId: "plan",
+                risk: "low",
+              },
+            ],
+            blockingReasons: [],
+            revision: "2",
+            updatedAt: "2026-07-30T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        onCompleteNode={onCompleteNode}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "完成当前节点" }));
+
+    expect(onCompleteNode).toHaveBeenCalledWith("plan");
+  });
+
   it("引导未初始化工作区先导入项目，而不是展示 Run 操作", () => {
     render(
       <RunDashboard

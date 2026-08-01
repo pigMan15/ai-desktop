@@ -12,6 +12,12 @@ const runtimeApiBaseUrl = `http://127.0.0.1:${runtimePort}`;
 const fixtureProjectPath = path.resolve("runtime/tests/fixtures/harness_project");
 const managedRuntimePort = Number(process.env.PLAYWRIGHT_ELECTRON_MANAGED_RUNTIME_PORT ?? 8877);
 
+async function writeTerminalCommand(window: Page, command: string): Promise<void> {
+  await window.getByLabel("ANSI 终端", { exact: true }).click();
+  await window.keyboard.type(command);
+  await window.keyboard.press("Enter");
+}
+
 async function waitForAppWindow(app: ElectronApplication): Promise<Page> {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     for (const page of app.windows()) {
@@ -89,9 +95,8 @@ test("桌面应用启动受管 Runtime 并运行 Shell 终端会话", async () =
     await window.getByRole("link", { name: "终端" }).click();
     await window.getByLabel("项目根目录").fill(fixtureProjectPath);
     await window.getByRole("button", { name: "创建终端" }).click();
-    await window.getByLabel("终端输入").fill("echo managed-terminal-e2e");
-    await window.getByRole("button", { name: "发送输入" }).click();
-    await expect(window.getByLabel("终端输出", { exact: true })).toContainText("managed-terminal-e2e");
+    await writeTerminalCommand(window, "echo managed-terminal-e2e");
+    await expect(window.getByLabel("ANSI 终端文本", { exact: true })).toContainText("managed-terminal-e2e");
     await window.getByRole("button", { name: "停止终端" }).click();
   } finally {
     await app.close();
@@ -125,12 +130,11 @@ test("桌面应用拒绝危险终端命令并保留中文审计记录", async ()
     await window.getByRole("link", { name: "终端" }).click();
     await window.getByLabel("项目根目录").fill(fixtureProjectPath);
     await window.getByRole("button", { name: "创建终端" }).click();
-    await window.getByLabel("终端输入").fill("del .\\build");
-    await window.getByRole("button", { name: "发送输入" }).click();
+    await writeTerminalCommand(window, "del .\\build");
     await expect(window.getByRole("dialog", { name: "确认危险命令" })).toBeVisible();
     await window.getByRole("button", { name: "取消危险命令" }).click();
     await expect(window.getByText("危险命令已被用户拒绝。")).toBeVisible();
-    await expect(window.getByLabel("终端输出", { exact: true })).not.toContainText("del .\\build");
+    await expect(window.getByLabel("ANSI 终端文本", { exact: true })).not.toContainText("del .\\build");
 
     await window.getByRole("link", { name: "审计" }).click();
     await expect(window.getByText("terminal.command.rejected")).toBeVisible();
@@ -176,9 +180,8 @@ test("桌面应用重启后可清理遗留终端并回放其已持久化输出",
     await window.getByRole("link", { name: "终端" }).click();
     await window.getByLabel("项目根目录").fill(fixtureProjectPath);
     await window.getByRole("button", { name: "创建终端" }).click();
-    await window.getByLabel("终端输入").fill(`echo ${outputMarker}`);
-    await window.getByRole("button", { name: "发送输入" }).click();
-    await expect(window.getByLabel("终端输出", { exact: true })).toContainText(outputMarker);
+    await writeTerminalCommand(window, `echo ${outputMarker}`);
+    await expect(window.getByLabel("ANSI 终端文本", { exact: true })).toContainText(outputMarker);
 
     await app.close();
     app = await launch();
@@ -202,7 +205,7 @@ test("桌面应用重启后可清理遗留终端并回放其已持久化输出",
     const historySessionId = await historyOption.getAttribute("value");
     await window.getByLabel("历史终端会话").selectOption(historySessionId ?? "");
     await window.getByRole("button", { name: "查看历史输出" }).click();
-    await expect(window.getByLabel("终端输出", { exact: true })).toContainText(outputMarker);
+    await expect(window.getByLabel("ANSI 终端文本", { exact: true })).toContainText(outputMarker);
   } finally {
     await app?.close();
     rmSync(temporaryRoot, { recursive: true, force: true });

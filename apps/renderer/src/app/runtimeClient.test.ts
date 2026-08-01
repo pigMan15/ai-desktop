@@ -40,6 +40,26 @@ describe("runtimeClient", () => {
     expect(state.projection).toBeNull();
   });
 
+  it("includes the Runtime error detail when an artifact operation is rejected", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ detail: "ARTIFACT_SPEC_MISMATCH: path does not match" }), {
+          status: 400,
+        }),
+      ),
+    );
+
+    await expect(
+      createRuntimeClient("http://127.0.0.1:8765").scanNodeArtifacts(
+        "run-1",
+        "plan",
+        "1",
+        "2026-07-30T00:00:00Z",
+      ),
+    ).rejects.toThrow("ARTIFACT_SPEC_MISMATCH: path does not match");
+  });
+
   it("uses the configured Runtime address only for health checks during startup", async () => {
     const calls: string[] = [];
     vi.stubGlobal(

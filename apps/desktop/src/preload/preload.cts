@@ -47,6 +47,15 @@ contextBridge.exposeInMainWorld("workflowTerminal", {
     ipcRenderer.invoke("terminal:reject-command", sessionId, approvalId) as Promise<TerminalCommandDecision>,
   read: (sessionId: string, afterSequence: number): Promise<TerminalOutput[]> =>
     ipcRenderer.invoke("terminal:read", sessionId, afterSequence) as Promise<TerminalOutput[]>,
+  onOutput: (sessionId: string, listener: (event: TerminalOutput) => void): (() => void) => {
+    const handler = (_event: unknown, payload: unknown) => {
+      if (!payload || typeof payload !== "object") return;
+      const value = payload as { sessionId?: unknown; event?: TerminalOutput };
+      if (value.sessionId === sessionId && value.event) listener(value.event);
+    };
+    ipcRenderer.on("terminal:output", handler);
+    return () => ipcRenderer.removeListener("terminal:output", handler);
+  },
   resize: (sessionId: string, columns: number, rows: number): Promise<TerminalSession> =>
     ipcRenderer.invoke("terminal:resize", sessionId, columns, rows) as Promise<TerminalSession>,
   interrupt: (sessionId: string): Promise<void> =>

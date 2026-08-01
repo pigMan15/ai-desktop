@@ -6,6 +6,7 @@ import type {
   KnowledgeDocumentReplay,
   KnowledgeSynthesis,
   KnowledgeSynthesisOutputEvent,
+  RunSummary,
 } from "../../app/runtimeClient";
 import { diffArtifactText } from "../artifacts/artifactDiff";
 
@@ -15,6 +16,8 @@ type Props = {
   syntheses?: KnowledgeSynthesis[];
   synthesisOutput?: KnowledgeSynthesisOutputEvent[];
   replay?: KnowledgeDocumentReplay | null;
+  runs?: RunSummary[];
+  activeRunId?: string | null;
   onCreate: (title: string, content: string, source: string) => void;
   onReview: (candidateId: string, decision: "approved" | "rejected") => void;
   onPublish: (candidateId: string) => void;
@@ -42,6 +45,8 @@ export function KnowledgePage({
   syntheses = [],
   synthesisOutput = [],
   replay = null,
+  runs = [],
+  activeRunId = null,
   onCreate,
   onReview,
   onPublish,
@@ -58,18 +63,20 @@ export function KnowledgePage({
 }: Props) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
-  const [source, setSource] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState("");
   const [feedbackBySynthesisId, setFeedbackBySynthesisId] = useState<Record<string, string>>({});
 
   function createCandidate() {
-    if (!title.trim() || !content.trim() || !source.trim()) {
+    const runId = selectedRunId || activeRunId || runs[0]?.id;
+    if (!title.trim() || !content.trim() || !runId) {
       return;
     }
-    onCreate(title.trim(), content.trim(), source.trim());
+    onCreate(title.trim(), content.trim(), `run:${runId}`);
     setTitle("");
     setContent("");
-    setSource("");
   }
+
+  const effectiveRunId = selectedRunId || activeRunId || runs[0]?.id || "";
 
   return (
     <section id="knowledge" className="panel" aria-labelledby="knowledge-title">
@@ -89,8 +96,20 @@ export function KnowledgePage({
           <input value={title} onChange={(event) => setTitle(event.target.value)} />
         </label>
         <label>
-          知识来源
-          <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="例如 run:run-123" />
+          关联 Run
+          <select
+            aria-label="关联 Run"
+            value={effectiveRunId}
+            onChange={(event) => setSelectedRunId(event.target.value)}
+            disabled={runs.length === 0}
+          >
+            {runs.length === 0 ? <option value="">当前项目没有可关联的 Run</option> : null}
+            {runs.map((run) => (
+              <option key={run.id} value={run.id}>
+                {run.title} ({run.status})
+              </option>
+            ))}
+          </select>
         </label>
         <label className="form-wide">
           知识内容
@@ -100,7 +119,7 @@ export function KnowledgePage({
       <div className="button-row">
         <button
           className="quiet-button"
-          disabled={!title.trim() || !content.trim() || !source.trim()}
+          disabled={!title.trim() || !content.trim() || !effectiveRunId}
           onClick={createCandidate}
         >
           创建候选

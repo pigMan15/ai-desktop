@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 
 export type RuntimeHealth = {
   status: "ok";
@@ -179,7 +180,10 @@ export class ManagedRuntime {
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
     if (!response.ok) {
-      throw new Error(`Runtime API ${requestPath} failed with ${response.status}`);
+      const detail = await runtimeErrorDetail(response);
+      throw new Error(
+        `Runtime API ${requestPath} failed with ${response.status}${detail ? `: ${detail}` : ""}`,
+      );
     }
     return (await response.json()) as T;
   }
@@ -235,12 +239,17 @@ export class ManagedRuntime {
   }
 
   private runtimeEnvironment(): NodeJS.ProcessEnv {
-    if (!this.runtimeToken) {
-      return this.env;
-    }
-    return {
+    const environment = {
       ...this.env,
-      WORKFLOW_PLATFORM_RUNTIME_TOKEN: this.runtimeToken,
+      ...(this.runtimeToken ? { WORKFLOW_PLATFORM_RUNTIME_TOKEN: this.runtimeToken } : {}),
+    };
+    if (this.runtimeExecutablePath || !this.cwdValue) {
+      return environment;
+    }
+    const runtimeSourcePath = path.join(this.cwdValue, "runtime", "src");
+    return {
+      ...environment,
+      PYTHONPATH: [runtimeSourcePath, this.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     };
   }
 
@@ -278,6 +287,28 @@ async function fetchRuntimeHealth(url: string): Promise<RuntimeHealth> {
     throw new Error(`Runtime health failed with ${response.status}`);
   }
   return (await response.json()) as RuntimeHealth;
+}
+
+async function runtimeErrorDetail(response: Response): Promise<string | null> {
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    return formatRuntimeErrorDetail(payload.detail);
+  } catch {
+    return null;
+  }
+}
+
+function formatRuntimeErrorDetail(detail: unknown): string | null {
+  if (typeof detail === "string" && detail.trim()) {
+    return detail.trim();
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item && typeof item === "object" && "msg" in item && typeof item.msg === "string" ? item.msg : null))
+      .filter((message): message is string => Boolean(message));
+    return messages.length > 0 ? messages.join("; ") : null;
+  }
+  return null;
 }
 
 function runtimePortFromEnvironment(env: NodeJS.ProcessEnv): number {

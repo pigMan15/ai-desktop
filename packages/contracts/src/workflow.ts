@@ -17,6 +17,37 @@ export type RequirementSpec =
   | { type: "gate"; gateId: string; required: boolean }
   | { type: "evidence"; evidenceType: string; required: boolean };
 
+export type ArtifactOutputSpec = {
+  id: string;
+  name: string;
+  type: string;
+  required: boolean;
+  path: string;
+  templatePath?: string;
+  description?: string;
+};
+
+export type NodeArtifactSpec = {
+  outputs: ArtifactOutputSpec[];
+};
+
+export type AgentContextSpec = {
+  upstream: "none" | "direct" | "ancestors";
+  artifactTypes?: string[];
+  maxArtifacts: number;
+  summaryCharsPerArtifact: number;
+  maxTotalChars: number;
+};
+
+export type NodeAgentSpec = {
+  promptTemplate?: string;
+  context: AgentContextSpec;
+};
+
+export type NodeAdvanceSpec = {
+  mode: "manual" | "auto";
+};
+
 export type WorkflowNode = {
   id: string;
   name: string;
@@ -25,6 +56,9 @@ export type WorkflowNode = {
   description?: string;
   requires?: RequirementSpec[];
   gates?: string[];
+  artifacts?: NodeArtifactSpec;
+  agent?: NodeAgentSpec;
+  advance?: NodeAdvanceSpec;
   metadata?: Record<string, unknown>;
 };
 

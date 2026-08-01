@@ -344,6 +344,55 @@ def migrate(db: sqlite3.Connection) -> None:
     if "archived_at" not in project_columns:
         db.execute("ALTER TABLE projects ADD COLUMN archived_at TEXT")
 
+    artifact_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(artifacts)").fetchall()
+    }
+    artifact_column_definitions = {
+        "artifact_spec_id": "TEXT",
+        "workflow_version_id": "TEXT",
+        "source_agent_job_id": "TEXT",
+        "template_path": "TEXT",
+        "relative_path": "TEXT",
+        "file_size": "INTEGER",
+        "media_type": "TEXT",
+        "status": "TEXT NOT NULL DEFAULT 'verified'",
+        "supersedes_artifact_id": "TEXT",
+        "verified_at": "TEXT",
+    }
+    for column, definition in artifact_column_definitions.items():
+        if column not in artifact_columns:
+            db.execute(f"ALTER TABLE artifacts ADD COLUMN {column} {definition}")
+    db.execute("UPDATE artifacts SET producer_json = '{}' WHERE producer_json IS NULL OR producer_json = ''")
+    db.execute("UPDATE artifacts SET status = 'verified' WHERE status IS NULL")
+    for table_name in ("approvals", "gate_results"):
+        columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        if "artifact_hashes_json" not in columns:
+            db.execute(f"ALTER TABLE {table_name} ADD COLUMN artifact_hashes_json TEXT NOT NULL DEFAULT '[]'")
+        if "invalidated_at" not in columns:
+            db.execute(f"ALTER TABLE {table_name} ADD COLUMN invalidated_at TEXT")
+        if "invalidation_reason" not in columns:
+            db.execute(f"ALTER TABLE {table_name} ADD COLUMN invalidation_reason TEXT")
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS artifact_consumers (
+            id TEXT PRIMARY KEY,
+            artifact_id TEXT NOT NULL,
+            consumer_run_id TEXT NOT NULL,
+            consumer_node_id TEXT NOT NULL,
+            agent_job_id TEXT,
+            context_created_at TEXT NOT NULL,
+            FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_node_spec_status
+            ON artifacts(run_id, node_id, artifact_spec_id, status, created_at, id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_spec_hash
+            ON artifacts(run_id, node_id, artifact_spec_id, content_hash)
+            WHERE artifact_spec_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_artifact_consumers_artifact
+            ON artifact_consumers(artifact_id, context_created_at, id);
+        """
+    )
+
     agent_job_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)").fetchall()
     }

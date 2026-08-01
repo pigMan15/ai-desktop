@@ -110,30 +110,39 @@ export function TerminalPage({
     let timer: number | undefined;
 
     const readOutput = async () => {
-      const events = await bridge.read(session.id, latestSequence);
-      if (disposed) {
-        return;
-      }
-      if (events.length > 0) {
-        setOutput((current) => [...current, ...events].slice(-2_000));
-        if (runId && session.runtimeSessionId && onAppendOutput) {
-          try {
-            await Promise.all(
-              events.map((event) =>
-                onAppendOutput({
-                  runId,
-                  sessionId: session.runtimeSessionId!,
-                  stream: "stdout",
-                  data: event.data,
-                }),
-              ),
-            );
-          } catch (error) {
-            setMessage(`终端输出同步失败：${errorMessage(error)}`);
+      try {
+        const events = await bridge.read(session.id, latestSequence);
+        if (disposed) {
+          return;
+        }
+        if (events.length > 0) {
+          setOutput((current) => [...current, ...events].slice(-2_000));
+          if (runId && session.runtimeSessionId && onAppendOutput) {
+            try {
+              await Promise.all(
+                events.map((event) =>
+                  onAppendOutput({
+                    runId,
+                    sessionId: session.runtimeSessionId!,
+                    stream: "stdout",
+                    data: event.data,
+                  }),
+                ),
+              );
+            } catch (error) {
+              setMessage(`终端输出同步失败：${errorMessage(error)}`);
+            }
           }
         }
+      } catch (error) {
+        if (!disposed) {
+          setMessage(`终端输出读取失败，将自动重试：${errorMessage(error)}`);
+        }
+      } finally {
+        if (!disposed) {
+          timer = window.setTimeout(() => void readOutput(), 500);
+        }
       }
-      timer = window.setTimeout(() => void readOutput(), 500);
     };
 
     void readOutput();
@@ -481,8 +490,10 @@ export function TerminalPage({
       </div>
       <TerminalViewport
         ariaLabel="ANSI 终端"
+        resetKey={session?.id ?? "none"}
         output={output}
         writable={Boolean(session)}
+        localEcho={session?.kind === "shell"}
         onInput={handleTerminalInput}
         onInterrupt={interruptTerminal}
       />

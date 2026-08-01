@@ -97,6 +97,16 @@ EXPECTED_COLUMNS = {
         ("content_hash", "TEXT", True, False),
         ("producer_json", "TEXT", True, False),
         ("created_at", "TEXT", True, False),
+        ("artifact_spec_id", "TEXT", False, False),
+        ("workflow_version_id", "TEXT", False, False),
+        ("source_agent_job_id", "TEXT", False, False),
+        ("template_path", "TEXT", False, False),
+        ("relative_path", "TEXT", False, False),
+        ("file_size", "INTEGER", False, False),
+        ("media_type", "TEXT", False, False),
+        ("status", "TEXT", True, False),
+        ("supersedes_artifact_id", "TEXT", False, False),
+        ("verified_at", "TEXT", False, False),
     ],
     "approvals": [
         ("id", "TEXT", False, True),
@@ -108,6 +118,9 @@ EXPECTED_COLUMNS = {
         ("comment", "TEXT", False, False),
         ("created_at", "TEXT", True, False),
         ("decided_at", "TEXT", False, False),
+        ("artifact_hashes_json", "TEXT", True, False),
+        ("invalidated_at", "TEXT", False, False),
+        ("invalidation_reason", "TEXT", False, False),
     ],
     "gate_results": [
         ("id", "TEXT", False, True),
@@ -118,6 +131,9 @@ EXPECTED_COLUMNS = {
         ("evidence_json", "TEXT", True, False),
         ("actor_json", "TEXT", True, False),
         ("created_at", "TEXT", True, False),
+        ("artifact_hashes_json", "TEXT", True, False),
+        ("invalidated_at", "TEXT", False, False),
+        ("invalidation_reason", "TEXT", False, False),
     ],
     "terminal_sessions": [
         ("id", "TEXT", False, True),
@@ -398,6 +414,37 @@ def test_migrate_adds_project_archive_column_to_existing_database() -> None:
     migrate(db)
 
     assert ("archived_at", "TEXT", False, False) in table_columns(db, "projects")
+
+
+def test_migrate_normalizes_missing_legacy_artifact_producer_metadata() -> None:
+    db = connect(fresh_db_path("legacy_artifact_producer"))
+    db.execute(
+        """
+        CREATE TABLE artifacts (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            uri TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            producer_json TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO artifacts (id, run_id, node_id, type, uri, content_hash, producer_json, created_at)
+        VALUES ('legacy-artifact', 'legacy-run', 'legacy-node', 'report', 'file:///legacy.md', 'legacy-hash', NULL, '2026-07-30T00:00:00Z')
+        """
+    )
+    db.commit()
+
+    migrate(db)
+
+    assert db.execute(
+        "SELECT producer_json FROM artifacts WHERE id = 'legacy-artifact'"
+    ).fetchone()["producer_json"] == "{}"
 
 
 def test_migrate_adds_interactive_agent_columns_and_tables_to_existing_database() -> None:

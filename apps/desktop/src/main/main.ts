@@ -39,6 +39,12 @@ type TerminalIpcMainLike = {
   handle(channel: string, handler: (...args: unknown[]) => unknown): void;
 };
 
+type TerminalIpcEvent = {
+  sender?: {
+    send(channel: string, payload: unknown): void;
+  };
+};
+
 type GitWorkspaceIpcMainLike = {
   handle(channel: string, handler: (...args: unknown[]) => unknown): void;
 };
@@ -119,7 +125,18 @@ export async function createMainWindow(options: {
     }
   });
 
-  await window.loadURL(resolveRendererUrl({ isPackaged, rendererUrl, rendererDistPath }));
+  const resolvedRendererUrl = resolveRendererUrl({ isPackaged, rendererUrl, rendererDistPath });
+  try {
+    await window.loadURL(resolvedRendererUrl);
+  } catch (error) {
+    if (isPackaged || resolvedRendererUrl.startsWith("file:")) {
+      throw error;
+    }
+    await window.loadURL(resolveRendererUrl({
+      isPackaged: true,
+      rendererDistPath,
+    }));
+  }
   return window;
 }
 
@@ -127,9 +144,16 @@ export function registerTerminalHandlers(
   ipcMainLike: TerminalIpcMainLike = ipcMain,
   terminalManager: TerminalManager = defaultTerminalManager,
 ): void {
-  ipcMainLike.handle("terminal:create", (_event, request: unknown) => {
+  ipcMainLike.handle("terminal:create", (event: unknown, request: unknown) => {
     const payload = parseTerminalCreateRequest(request);
-    return terminalManager.create(payload);
+    const session = terminalManager.create(payload);
+    const sender = (event as TerminalIpcEvent | undefined)?.sender;
+    if (sender) {
+      terminalManager.subscribeOutput(session.id, (output) => {
+        sender.send("terminal:output", { sessionId: session.id, event: output });
+      });
+    }
+    return session;
   });
   ipcMainLike.handle(
     "terminal:bind-runtime-session",
@@ -303,6 +327,7 @@ export function bootstrap(options: {
   appLike?: AppLike;
   ipcMainLike?: IpcMainLike;
   runtimeManager?: ManagedRuntime;
+  terminalManager?: Pick<TerminalManager, "stopAll">;
   createWindow?: () => Promise<BrowserWindowLike>;
   getAllWindows?: () => BrowserWindowLike[];
   platform?: NodeJS.Platform;
@@ -311,6 +336,7 @@ export function bootstrap(options: {
     appLike = app,
     ipcMainLike = ipcMain,
     runtimeManager = defaultRuntimeManager,
+    terminalManager = defaultTerminalManager,
     createWindow = createMainWindow,
     getAllWindows = () => BrowserWindow.getAllWindows(),
     platform = process.platform
@@ -337,6 +363,7 @@ export function bootstrap(options: {
     }
   });
   appLike.on("before-quit", async () => {
+    terminalManager.stopAll();
     await runtimeManager.stop();
   });
 }

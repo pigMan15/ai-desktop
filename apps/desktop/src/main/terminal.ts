@@ -70,6 +70,7 @@ type ManagedSession = {
   session: TerminalSession;
   process: PtyProcess;
   output: TerminalOutput[];
+  outputListeners: Set<(event: TerminalOutput) => void>;
   disposeOutput: () => void;
   projectRoot: string;
   pendingCommands: Map<string, PendingCommand>;
@@ -133,16 +134,24 @@ export class TerminalManager {
       rows,
     };
     const output: TerminalOutput[] = [];
+    const outputListeners = new Set<(event: TerminalOutput) => void>();
+    let nextOutputSequence = 1;
     const disposable = process.onData((data) => {
-      output.push({ sequence: output.length + 1, data });
+      const event = { sequence: nextOutputSequence, data };
+      output.push(event);
+      nextOutputSequence += 1;
       if (output.length > 2_000) {
         output.shift();
+      }
+      for (const listener of outputListeners) {
+        listener(event);
       }
     });
     this.sessions.set(session.id, {
       session,
       process,
       output,
+      outputListeners,
       disposeOutput: () => disposable.dispose(),
       projectRoot: path.resolve(options.projectRoot),
       pendingCommands: new Map(),
@@ -262,6 +271,12 @@ export class TerminalManager {
     return this.get(sessionId).output.filter((event) => event.sequence > afterSequence);
   }
 
+  subscribeOutput(sessionId: string, listener: (event: TerminalOutput) => void): () => void {
+    const managed = this.get(sessionId);
+    managed.outputListeners.add(listener);
+    return () => managed.outputListeners.delete(listener);
+  }
+
   interrupt(sessionId: string): void {
     this.get(sessionId).process.write("\u0003");
   }
@@ -269,8 +284,15 @@ export class TerminalManager {
   stop(sessionId: string): void {
     const managed = this.get(sessionId);
     managed.disposeOutput();
+    managed.outputListeners.clear();
     managed.process.kill();
     this.sessions.delete(sessionId);
+  }
+
+  stopAll(): void {
+    for (const sessionId of this.sessions.keys()) {
+      this.stop(sessionId);
+    }
   }
 
   private get(sessionId: string): ManagedSession {
@@ -304,6 +326,7 @@ export class TerminalManager {
 }
 
 function commandFor(kind: TerminalKind, cwd: string, initialPrompt?: string): [string, string[]] {
+  const prompt = commandLinePrompt(initialPrompt);
   if (kind === "codex") {
     return [
       process.platform === "win32" ? "codex.cmd" : "codex",
@@ -312,17 +335,16 @@ function commandFor(kind: TerminalKind, cwd: string, initialPrompt?: string): [s
         "workspace-write",
         "--ask-for-approval",
         "on-request",
-        "--no-alt-screen",
         "--cd",
         cwd,
-        initialPrompt ?? "",
+        prompt ?? "",
       ].filter(Boolean),
     ];
   }
   if (kind === "claude") {
     return [
       process.platform === "win32" ? "claude.cmd" : "claude",
-      ["--ax-screen-reader", "--permission-mode", "acceptEdits", initialPrompt ?? ""].filter(
+      ["--ax-screen-reader", "--permission-mode", "acceptEdits", prompt ?? ""].filter(
         Boolean,
       ),
     ];
@@ -331,6 +353,11 @@ function commandFor(kind: TerminalKind, cwd: string, initialPrompt?: string): [s
     process.platform === "win32" ? "cmd.exe" : "/bin/sh",
     process.platform === "win32" ? ["/d", "/k", "chcp 65001>nul"] : [],
   ];
+}
+
+function commandLinePrompt(initialPrompt?: string): string | undefined {
+  const normalized = initialPrompt?.replace(/\s*[\r\n]+\s*/g, " ").trim();
+  return normalized || undefined;
 }
 
 function terminalEnvironment(): NodeJS.ProcessEnv {

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import pytest
 import sys
+from threading import Lock
 from time import sleep
 import yaml
 
@@ -110,6 +112,69 @@ def test_runtime_api_persists_run_objective_and_parameters(tmp_path) -> None:
     }
 
 
+def test_runtime_api_scans_declared_node_artifacts(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    project_path = copy_harness_project(tmp_path)
+    imported = client.post(
+        "/projects/import",
+        json={"projectPath": str(project_path), "now": NOW},
+    ).json()
+    definition = client.get(f"/workflow-versions/{imported['workflowVersionId']}").json()
+    plan_node = next(node for node in definition["nodes"] if node["id"] == "plan")
+    plan_node["artifacts"] = {
+        "outputs": [
+            {
+                "id": "plan-report",
+                "name": "计划报告",
+                "type": "plan",
+                "required": True,
+                "path": "docs/runs/{{runId}}/{{nodeId}}/plan.md",
+            }
+        ]
+    }
+    saved = client.post(
+        f"/workflow-versions/{imported['workflowVersionId']}/save",
+        json={"definition": definition, "actor": HUMAN_ACTOR, "now": NOW},
+    ).json()
+    run = client.post(
+        "/runs",
+        json={"workflowVersionId": saved["workflowVersionId"], "title": "扫描产物", "now": NOW},
+    ).json()
+    artifact = project_path / "docs" / "runs" / run["runId"] / "plan" / "plan.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("# 计划\n", encoding="utf-8")
+    started = client.post(
+        f"/runs/{run['runId']}/transition",
+        json={
+            "eventType": "NODE_STARTED",
+            "nodeId": "plan",
+            "actor": AGENT_ACTOR,
+            "expectedRevision": run["revision"],
+            "now": NOW,
+        },
+    ).json()
+
+    response = client.post(
+        f"/runs/{run['runId']}/nodes/plan/artifacts/scan",
+        json={"expectedRevision": started["revision"], "now": NOW},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["registered"] == ["plan-report"]
+    assert response.json()["projection"]["nodeStates"]["plan"] == "RUNNING"
+
+    requirements = client.get(
+        f"/runs/{run['runId']}/nodes/plan/artifact-requirements"
+    )
+
+    assert requirements.status_code == 200
+    assert requirements.json()["requirements"][0]["relativePath"].endswith("/plan/plan.md")
+    assert requirements.json()["requirements"][0]["required"] is True
+    assert len(requirements.json()["requirements"][0]["artifacts"]) == 1
+
+
 def start_and_submit_plan(client: TestClient, run: dict, artifact_path) -> dict:
     started = client.post(
         f"/runs/{run['runId']}/transition",
@@ -136,6 +201,43 @@ def start_and_submit_plan(client: TestClient, run: dict, artifact_path) -> dict:
 
 def test_create_app_returns_fastapi_app() -> None:
     assert isinstance(create_app(), FastAPI)
+
+
+def test_runtime_api_serializes_concurrent_database_requests(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    client = TestClient(create_app(service))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    original_get_projection = service.get_projection
+    counter_lock = Lock()
+    active_requests = 0
+    maximum_active_requests = 0
+
+    def delayed_get_projection(run_id: str):
+        nonlocal active_requests, maximum_active_requests
+        with counter_lock:
+            active_requests += 1
+            maximum_active_requests = max(maximum_active_requests, active_requests)
+        try:
+            sleep(0.02)
+            return original_get_projection(run_id)
+        finally:
+            with counter_lock:
+                active_requests -= 1
+
+    service.get_projection = delayed_get_projection  # type: ignore[method-assign]
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        responses = list(
+            executor.map(
+                lambda _index: client.get(f"/runs/{run['runId']}/projection"),
+                range(6),
+            )
+        )
+
+    assert [response.status_code for response in responses] == [200] * 6
+    assert maximum_active_requests == 1
 
 
 def test_runtime_api_rejects_requests_without_configured_local_token() -> None:
@@ -474,7 +576,8 @@ def test_runtime_api_lists_workflow_version_history_and_semantic_diff(tmp_path) 
                 **original_definition["nodes"][0],
                 "name": "更新后的计划",
                 "description": "通过版本比较确认变更",
-            }
+            },
+            *original_definition["nodes"][1:],
         ],
     }
     saved = client.post(
@@ -494,6 +597,9 @@ def test_runtime_api_lists_workflow_version_history_and_semantic_diff(tmp_path) 
         saved["workflowVersionId"],
     ]
     assert history.json()[1]["version"] == saved["definition"]["version"]
+    assert history.json()[0]["nodeCount"] == len(original_definition["nodes"])
+    assert history.json()[0]["edgeCount"] == len(original_definition["edges"])
+    assert history.json()[0]["nodeSummary"]
     assert diff.status_code == 200
     assert diff.json()["fromVersionId"] == imported["workflowVersionId"]
     assert diff.json()["toVersionId"] == saved["workflowVersionId"]

@@ -4,14 +4,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalPage } from "./TerminalPage";
 
 vi.mock("./TerminalViewport", () => ({
-  TerminalViewport: ({ ariaLabel, output, writable, onInput, onInterrupt }: {
+  TerminalViewport: ({ ariaLabel, output, writable, localEcho, onInput, onInterrupt }: {
     ariaLabel: string;
     output: Array<{ sequence: number; data: string }>;
     writable?: boolean;
+    localEcho?: boolean;
     onInput?: (data: string) => void | Promise<void>;
     onInterrupt?: () => void;
   }) => (
-    <section aria-label={ariaLabel} className="terminal-viewport" data-writable={String(Boolean(writable))}>
+    <section
+      aria-label={ariaLabel}
+      className="terminal-viewport"
+      data-local-echo={String(Boolean(localEcho))}
+      data-writable={String(Boolean(writable))}
+    >
       <pre aria-label="mock-terminal-output">{output.map((event) => event.data).join("")}</pre>
       <button type="button" onClick={() => onInput?.("echo hello")}>输入 echo</button>
       <button type="button" onClick={() => onInput?.("del .\\build")}>输入危险命令</button>
@@ -24,6 +30,7 @@ vi.mock("./TerminalViewport", () => ({
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.clearAllMocks();
   delete (window as Window & { workflowTerminal?: unknown }).workflowTerminal;
 });
@@ -65,6 +72,32 @@ describe("TerminalPage", () => {
       pid: 1234,
     });
     expect(screen.queryByLabelText("终端输入")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("ANSI 终端")).toHaveAttribute("data-local-echo", "true");
+  });
+
+  it("终端读取暂时失败后继续轮询后续输出", async () => {
+    vi.useFakeTimers();
+    const bridge = installTerminalBridge({
+      read: vi.fn()
+        .mockRejectedValueOnce(new Error("temporary read failure"))
+        .mockResolvedValueOnce([{ sequence: 1, data: "recovered output\\r\\n" }])
+        .mockResolvedValue([]),
+    });
+
+    render(
+      <TerminalPage
+        runId="run-1"
+        projectPath="G:\\Project\\demo"
+        nodeId="plan"
+        onRegisterSession={vi.fn(async () => ({ id: "runtime-terminal-1" }))}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建终端" }));
+    await vi.waitFor(() => expect(bridge.read).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(screen.getByLabelText("mock-terminal-output")).toHaveTextContent("recovered output");
   });
 
   it("Shell 高风险命令从 xterm 输入后弹出确认，并在批准后执行", async () => {

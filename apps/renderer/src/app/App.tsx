@@ -19,16 +19,23 @@ import {
   type RuntimeLogEntry,
 } from "../features/settings/SettingsPage";
 import { TerminalPage } from "../features/terminal/TerminalPage";
+import type { TerminalViewportOutput } from "../features/terminal/TerminalViewport";
 import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
 import { Navigation } from "./navigation";
 import { normalizeRoute, routeHash } from "./routes";
-import { mergeAgentOutput } from "./agentOutput";
+import {
+  isInteractiveAgentSessionClosedError,
+  isInteractiveAgentOutputLimitError,
+  isTerminalSessionMissingError,
+  mergeAgentOutput,
+} from "./agentOutput";
 import { desktopGitApi } from "./desktopGit";
 import {
   createRuntimeClient,
   loadWorkbenchState,
   restoreWorkbenchState,
   type AgentJobSummary,
+  type AgentOutputSummary,
   type AgentProviderDiagnostic,
   type ArtifactPreview,
   type AuditRecord,
@@ -105,13 +112,60 @@ export function App() {
   const [interactiveAgentTerminals, setInteractiveAgentTerminals] = useState<
     Record<string, InteractiveAgentTerminalBinding>
   >({});
+  const [liveAgentOutput, setLiveAgentOutput] = useState<
+    Record<string, Record<string, TerminalViewportOutput[]>>
+  >({});
   const agentInputBuffersRef = useRef<Record<string, string>>({});
+  const liveAgentOutputPendingRef = useRef<Record<string, Record<string, TerminalViewportOutput[]>>>({});
+  const liveAgentOutputFrameRef = useRef<number | null>(null);
+  const runSwitchInProgressRef = useRef(false);
+
+  function appendLiveAgentOutput(runId: string, jobId: string, event: TerminalViewportOutput) {
+    const pending = liveAgentOutputPendingRef.current;
+    const runOutput = pending[runId] ?? {};
+    pending[runId] = {
+      ...runOutput,
+      [jobId]: [...(runOutput[jobId] ?? []), event],
+    };
+    if (liveAgentOutputFrameRef.current !== null) {
+      return;
+    }
+    liveAgentOutputFrameRef.current = window.requestAnimationFrame(() => {
+      const batch = liveAgentOutputPendingRef.current;
+      liveAgentOutputPendingRef.current = {};
+      liveAgentOutputFrameRef.current = null;
+      setLiveAgentOutput((current) => {
+        const next = { ...current };
+        for (const [nextRunId, jobs] of Object.entries(batch)) {
+          const nextRunOutput = { ...(current[nextRunId] ?? {}) };
+          for (const [nextJobId, events] of Object.entries(jobs)) {
+            nextRunOutput[nextJobId] = [...(nextRunOutput[nextJobId] ?? []), ...events].slice(-2_000);
+          }
+          next[nextRunId] = nextRunOutput;
+        }
+        return next;
+      });
+    });
+  }
+
+  function clearDisplayedAgentTerminal() {
+    setState((current) =>
+      current
+        ? {
+            ...current,
+            agentJobs: [],
+            agentOutput: [],
+          }
+        : current,
+    );
+  }
 
   useEffect(() => {
     let isMounted = true;
 
     const initialLoad = savedSession.runId && apiBaseUrl === savedSession.apiBaseUrl
       ? restoreWorkbenchState({ ...savedSession, runId: savedSession.runId })
+        .catch(() => loadWorkbenchState(apiBaseUrl))
       : loadWorkbenchState(apiBaseUrl);
 
     initialLoad
@@ -286,7 +340,7 @@ export function App() {
       try {
         const runtimeClient = createRuntimeClient(apiBaseUrl);
         const jobs = await runtimeClient.listAgentJobs(activeRunId);
-        if (disposed) {
+        if (disposed || runSwitchInProgressRef.current) {
           return;
         }
 
@@ -305,7 +359,7 @@ export function App() {
 
         const incomingOutput = outputByJob.flat();
         setState((current) => {
-          if (current?.projection?.runId !== activeRunId) {
+          if (runSwitchInProgressRef.current || current?.projection?.runId !== activeRunId) {
             return current;
           }
           return {
@@ -320,6 +374,9 @@ export function App() {
         }
       } catch {
         // 轮询失败不会伪造任务完成；用户可继续查看上一次可信输出。
+        if ((state?.agentJobs ?? []).some((job) => job.status === "QUEUED" || job.status === "RUNNING")) {
+          timer = window.setTimeout(() => void pollAgentActivity(), 1_500);
+        }
       }
     };
 
@@ -352,11 +409,13 @@ export function App() {
 
     let disposed = false;
     let timer: number | undefined;
+    let readingJobId: string | null = null;
 
     const pollInteractiveAgentTerminals = async () => {
       try {
         const runtimeClient = createRuntimeClient(apiBaseUrl);
         for (const job of runningInteractiveJobs) {
+          readingJobId = job.id;
           const binding = interactiveAgentTerminals[job.id];
           if (!binding) {
             continue;
@@ -368,12 +427,28 @@ export function App() {
           if (terminalEvents.length === 0) {
             continue;
           }
-          const recordedOutput = await runtimeClient.appendInteractiveAgentOutput(
-            activeRunId,
-            job.id,
-            terminalEvents.map((event) => ({ data: event.data })),
-            now(),
-          );
+          let recordedOutput: AgentOutputSummary[] = [];
+          let persistenceLimited = Boolean(binding.persistenceLimited);
+          if (!persistenceLimited) {
+            try {
+              recordedOutput = await runtimeClient.appendInteractiveAgentOutput(
+                activeRunId,
+                job.id,
+                terminalEvents.map((event) => ({ data: event.data })),
+                now(),
+              );
+            } catch (error) {
+              if (!isInteractiveAgentOutputLimitError(error)) {
+                throw error;
+              }
+              setOperationMessage("Agent 审计输出已达到上限，实时终端仍可继续使用。");
+              persistenceLimited = true;
+              setInteractiveAgentTerminals((current) => ({
+                ...current,
+                [job.id]: { ...binding, persistenceLimited: true },
+              }));
+            }
+          }
           if (disposed) {
             return;
           }
@@ -383,7 +458,7 @@ export function App() {
           );
           setInteractiveAgentTerminals((current) => ({
             ...current,
-            [job.id]: { ...binding, afterSequence: nextSequence },
+            [job.id]: { ...binding, afterSequence: nextSequence, persistenceLimited },
           }));
           setState((current) => {
             if (current?.projection?.runId !== activeRunId) {
@@ -395,9 +470,49 @@ export function App() {
             };
           });
         }
-        timer = window.setTimeout(() => void pollInteractiveAgentTerminals(), 500);
       } catch (error) {
-        setOperationMessage(`Agent 终端同步失败：${errorMessage(error)}`);
+        if (isTerminalSessionMissingError(error) && readingJobId) {
+          const missingJobId = readingJobId;
+          setInteractiveAgentTerminals((current) => {
+            const next = { ...current };
+            delete next[missingJobId];
+            return next;
+          });
+          delete agentInputBuffersRef.current[missingJobId];
+          setOperationMessage("桌面终端会话已失效，已停止该 Agent 的终端同步。");
+        } else if (isInteractiveAgentSessionClosedError(error)) {
+          const affectedBindings = Object.fromEntries(
+            runningInteractiveJobs
+              .map((job) => [job.id, interactiveAgentTerminals[job.id]])
+              .filter((entry): entry is [string, InteractiveAgentTerminalBinding] => Boolean(entry[1])),
+          );
+          await Promise.all(
+            Object.values(affectedBindings).map((binding) =>
+              terminalBridge.stop(binding.desktopSessionId).catch(() => undefined),
+            ),
+          );
+          setInteractiveAgentTerminals((current) => {
+            const next = { ...current };
+            for (const jobId of Object.keys(affectedBindings)) {
+              delete next[jobId];
+              delete agentInputBuffersRef.current[jobId];
+            }
+            return next;
+          });
+          const jobs = await createRuntimeClient(apiBaseUrl).listAgentJobs(activeRunId).catch(() => null);
+          if (jobs) {
+            setState((current) =>
+              current?.projection?.runId === activeRunId ? { ...current, agentJobs: jobs } : current,
+            );
+          }
+          setOperationMessage("Agent 交互会话已结束，已停止本地终端同步。");
+        } else {
+          // Runtime persistence is best-effort for the live PTY; it must not interrupt TUI input.
+        }
+      } finally {
+        if (!disposed) {
+          timer = window.setTimeout(() => void pollInteractiveAgentTerminals(), 500);
+        }
       }
     };
 
@@ -499,8 +614,8 @@ export function App() {
     ) {
       return;
     }
-    const timer = window.setTimeout(() => void refreshKnowledge(), 1_500);
-    return () => window.clearTimeout(timer);
+    const timer = window.setInterval(() => void refreshKnowledge(), 1_500);
+    return () => window.clearInterval(timer);
   }, [apiBaseUrl, currentRoute, hasActiveKnowledgeSynthesis, state?.connection]);
 
   useEffect(() => {
@@ -729,6 +844,8 @@ export function App() {
 
   async function handleCreateRun(title: string, configuration: RunConfiguration) {
     try {
+      runSwitchInProgressRef.current = true;
+      clearDisplayedAgentTerminal();
       const projection = await client.createRun(
         workflowVersionId,
         title,
@@ -736,6 +853,7 @@ export function App() {
         configuration,
       );
       await refreshRun(projection.runId);
+      runSwitchInProgressRef.current = false;
       await refreshRuns();
       saveWorkspaceSession({
         apiBaseUrl,
@@ -748,6 +866,7 @@ export function App() {
       });
       setOperationMessage(`Run 已创建：${projection.runId}`);
     } catch (error) {
+      runSwitchInProgressRef.current = false;
       setOperationMessage(`创建 Run 失败：${errorMessage(error)}`);
     }
   }
@@ -757,7 +876,10 @@ export function App() {
       return;
     }
     try {
+      runSwitchInProgressRef.current = true;
+      clearDisplayedAgentTerminal();
       await refreshRun(runId);
+      runSwitchInProgressRef.current = false;
       saveWorkspaceSession({
         apiBaseUrl,
         projectPath,
@@ -769,6 +891,7 @@ export function App() {
       });
       setOperationMessage(`已切换到 Run：${runId}`);
     } catch (error) {
+      runSwitchInProgressRef.current = false;
       setOperationMessage(`切换 Run 失败：${errorMessage(error)}`);
     }
   }
@@ -824,7 +947,7 @@ export function App() {
             projectRoot: projectPath,
             columns: 100,
             rows: 30,
-            initialPrompt: prompt,
+            initialPrompt: job.effectivePrompt ?? prompt,
           });
           await client.startInteractiveAgentSession(
             projection.runId,
@@ -833,6 +956,9 @@ export function App() {
             terminalSession.pid,
             now(),
           );
+          terminalBridge.onOutput?.(terminalSession.id, (event) => {
+            appendLiveAgentOutput(projection.runId, job.id, event);
+          });
           setInteractiveAgentTerminals((current) => ({
             ...current,
             [job.id]: {
@@ -901,6 +1027,15 @@ export function App() {
     }
   }
 
+  async function handleAgentTerminalResize(jobId: string, columns: number, rows: number) {
+    const binding = interactiveAgentTerminals[jobId];
+    const terminalBridge = getDesktopTerminalBridge();
+    if (!binding || !terminalBridge || columns < 1 || rows < 1) {
+      return;
+    }
+    await terminalBridge.resize(binding.desktopSessionId, columns, rows).catch(() => undefined);
+  }
+
   async function handleCancelAgent(jobId: string) {
     const runId = state?.projection?.runId;
     if (!runId) {
@@ -912,6 +1047,13 @@ export function App() {
       if (terminalBridge && binding) {
         await terminalBridge.stop(binding.desktopSessionId).catch(() => undefined);
       }
+      setLiveAgentOutput((current) => {
+        const next = { ...current };
+        const runOutput = { ...(next[runId] ?? {}) };
+        delete runOutput[jobId];
+        next[runId] = runOutput;
+        return next;
+      });
       const job = await client.cancelAgentJob(runId, jobId, now());
       setInteractiveAgentTerminals((current) => {
         const next = { ...current };
@@ -1337,6 +1479,7 @@ export function App() {
       setOperationMessage(`工作流新版本已保存：${saved.definition.version}`);
     } catch (error) {
       setOperationMessage(`保存工作流版本失败：${errorMessage(error)}`);
+      throw error;
     }
   }
 
@@ -1365,6 +1508,19 @@ export function App() {
       setOperationMessage("工作流版本差异已加载。");
     } catch (error) {
       setOperationMessage(`读取工作流版本差异失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleRestoreWorkflowVersion(historicalWorkflowVersionId: string) {
+    if (!workflowVersionId) {
+      return;
+    }
+    try {
+      const historicalDefinition = await client.getWorkflowDefinition(historicalWorkflowVersionId);
+      await handleSaveWorkflowDefinition(historicalDefinition);
+      setOperationMessage(`已从历史版本恢复并创建新版本：${historicalDefinition.version}`);
+    } catch (error) {
+      setOperationMessage(`恢复工作流历史版本失败：${errorMessage(error)}`);
     }
   }
 
@@ -1465,14 +1621,41 @@ export function App() {
                 `节点已启动：${selectedNodeId}`,
               )
             }
-            onSubmitArtifact={(selectedNodeId, selectedArtifactPath) =>
+            onCompleteNode={(selectedNodeId) =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.completeNode(runId, selectedNodeId, revision, timestamp),
+                `节点已完成：${selectedNodeId}`,
+              )
+            }
+            onScanNodeArtifacts={(selectedNodeId) =>
+              updateProjection(
+                (runId, revision, timestamp) =>
+                  client.scanNodeArtifacts(runId, selectedNodeId, revision, timestamp)
+                    .then((result) => result.projection),
+                `已检查节点产物：${selectedNodeId}`,
+              )
+            }
+            onLoadNodeArtifactRequirements={(selectedNodeId) => {
+              const runId = state?.projection?.runId;
+              return runId
+                ? client.getNodeArtifactRequirements(runId, selectedNodeId)
+                : Promise.reject(new Error("当前没有可用 Run"));
+            }}
+            onLoadNodeContext={(selectedNodeId) => {
+              const runId = state?.projection?.runId;
+              return runId
+                ? client.getNodeContext(runId, selectedNodeId)
+                : Promise.reject(new Error("当前没有可用 Run"));
+            }}
+            onSubmitArtifact={(selectedNodeId, selectedArtifactPath, selectedArtifactType) =>
               updateProjection(
                 (runId, revision, timestamp) =>
                   client.submitArtifact(
                     runId,
                     selectedNodeId,
                     selectedArtifactPath,
-                    "plan",
+                    selectedArtifactType,
                     revision,
                     timestamp,
                   ),
@@ -1493,7 +1676,7 @@ export function App() {
                 `审批已通过：${selectedNodeId}`,
               )
             }
-            onPassGate={(selectedNodeId, selectedArtifactPath) =>
+            onPassGate={(selectedNodeId, selectedArtifactUri) =>
               updateProjection(
                 (runId, revision, timestamp) =>
                   client.submitGate(
@@ -1501,7 +1684,7 @@ export function App() {
                     selectedNodeId,
                     "plan-ready",
                     "passed",
-                    [`file://${selectedArtifactPath}`],
+                    [selectedArtifactUri],
                     null,
                     revision,
                     timestamp,
@@ -1549,6 +1732,8 @@ export function App() {
             onStartAgent={handleStartAgent}
             onCancelAgent={handleCancelAgent}
             onAgentTerminalInput={handleAgentTerminalInput}
+            onAgentTerminalResize={handleAgentTerminalResize}
+            liveAgentOutput={activeRunId ? liveAgentOutput[activeRunId] ?? {} : {}}
             deployments={deployments}
             deploymentOutput={deploymentOutput}
             onStartDeployment={handleStartDeployment}
@@ -1565,9 +1750,11 @@ export function App() {
               simulation={workflowSimulation}
               history={workflowHistory}
               diff={workflowDiff}
+              workflowVersionId={workflowVersionId}
               onSaveDefinition={handleSaveWorkflowDefinition}
               onSimulate={handleSimulateWorkflowDefinition}
               onCompareVersion={handleCompareWorkflowVersion}
+              onRestoreVersion={handleRestoreWorkflowVersion}
               onExportWorkflow={handleExportWorkflowVersion}
             />
           ) : null}
@@ -1648,6 +1835,21 @@ export function App() {
               onCompareArtifacts={handleCompareArtifacts}
               onDownloadEvidencePackage={handleDownloadEvidencePackage}
               onDownloadReport={handleDownloadRunReport}
+              onConfirmArtifact={(artifact) => {
+                if (!artifact.nodeId) {
+                  return;
+                }
+                void updateProjection(
+                  (runId, revision, timestamp) =>
+                    client.confirmArtifact(runId, artifact.nodeId!, artifact.id, revision, timestamp)
+                      .then((result) => result.projection),
+                  `产物已确认：${artifact.id}`,
+                );
+              }}
+              onLoadArtifactConsumers={(artifactId) => {
+                const runId = state?.projection?.runId;
+                return runId ? client.listArtifactConsumers(runId, artifactId) : Promise.resolve([]);
+              }}
             />
           ) : null}
           {currentRoute === "approvals" ? (
@@ -1660,6 +1862,8 @@ export function App() {
               syntheses={knowledgeSyntheses}
               synthesisOutput={knowledgeSynthesisOutput}
               replay={knowledgeReplay}
+              runs={runs}
+              activeRunId={activeRunId}
               onCreate={handleCreateKnowledgeCandidate}
               onReview={handleReviewKnowledgeCandidate}
               onPublish={handlePublishKnowledgeCandidate}
@@ -1796,6 +2000,15 @@ type DesktopTerminalBridge = {
     rows: number;
   }>;
   read(sessionId: string, afterSequence: number): Promise<Array<{ sequence: number; data: string }>>;
+  resize(
+    sessionId: string,
+    columns: number,
+    rows: number,
+  ): Promise<{ columns: number; rows: number }>;
+  onOutput?(
+    sessionId: string,
+    listener: (event: { sequence: number; data: string }) => void,
+  ): () => void;
   writeInput(sessionId: string, data: string): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
   stop(sessionId: string): Promise<void>;
@@ -1805,6 +2018,7 @@ type InteractiveAgentTerminalBinding = {
   desktopSessionId: string;
   pid: number;
   afterSequence: number;
+  persistenceLimited?: boolean;
 };
 
 function getDesktopRuntimeBridge(): DesktopRuntimeBridge | null {

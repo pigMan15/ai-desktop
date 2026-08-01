@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from shutil import copytree
+from shutil import copytree, rmtree
 import sys
 from threading import Lock
 from time import monotonic, sleep
@@ -11,13 +11,31 @@ from workflow_platform.execution.providers import CliCommand, CodexCliProvider
 from workflow_platform.models import Actor, RunProjection
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
-from workflow_platform.runtime_service import WorkflowRuntimeService
+from workflow_platform.runtime_service import WorkflowRuntimeService, _knowledge_synthesis_prompt
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
 NOW = "2026-07-27T13:00:00Z"
 AGENT_ACTOR = {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False}
 FAKE_CLI = FIXTURES / "fake_cli.py"
+
+
+def test_knowledge_synthesis_prompt_requires_a_reusable_knowledge_entry() -> None:
+    prompt = _knowledge_synthesis_prompt(
+        {
+            "title": "登录页实施报告",
+            "source": "run:run-123",
+            "content": "修复了登录页文案，并通过了自动化测试。",
+        }
+    )
+
+    assert "不要复述原始产物" in prompt
+    assert "## 可复用结论" in prompt
+    assert "## 适用条件" in prompt
+    assert "## 实施步骤" in prompt
+    assert "## 验证清单" in prompt
+    assert "## 风险与边界" in prompt
+    assert "## 来源证据" in prompt
 
 
 class FakeProvider:
@@ -649,20 +667,13 @@ def test_runtime_service_records_authorized_gate_waiver_with_reason(
 
     assert projection.status == "IN_PROGRESS"
     assert projection.nodeStates["plan"] == "PASSED"
-    assert service.list_gate_results(run.runId) == [
-        {
-            "id": f"{run.runId}:gate:plan:plan-ready:5",
-            "runId": run.runId,
-            "nodeId": "plan",
-            "gateId": "plan-ready",
-            "status": "waived",
-            "evidence": [],
-            "waiverReason": "temporary exception approved by verifier",
-            "failureReason": None,
-            "actor": trusted_verifier().model_dump(),
-            "createdAt": NOW,
-        }
-    ]
+    gates = service.list_gate_results(run.runId)
+    assert len(gates) == 1
+    assert gates[0]["id"] == f"{run.runId}:gate:plan:plan-ready:5"
+    assert gates[0]["status"] == "waived"
+    assert gates[0]["waiverReason"] == "temporary exception approved by verifier"
+    assert gates[0]["artifactHashes"]
+    assert gates[0]["invalidatedAt"] is None
 
 
 def test_runtime_service_rejects_empty_gate_waiver_reason_for_passed_status_without_writing_record(
@@ -912,6 +923,270 @@ def test_runtime_service_starts_agent_for_existing_run_node_without_advancing_pr
     assert current.nodeStates == run.nodeStates
 
 
+def test_runtime_service_rejects_saving_workflow_versions_with_compiler_diagnostics(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project = service.import_project(copy_harness_project(tmp_path), now=NOW)
+    definition = service.get_workflow_definition(project["workflowVersionId"])
+    definition["edges"].append(
+        {
+            "id": "cycle",
+            "from": "review",
+            "to": "plan",
+        }
+    )
+
+    with pytest.raises(ValueError, match="WORKFLOW_DIAGNOSTICS_ERROR"):
+        service.save_workflow_version(
+            project["workflowVersionId"],
+            definition=definition,
+            actor=trusted_human().model_dump(),
+            now=NOW,
+        )
+
+
+def test_runtime_service_scans_declared_artifacts_idempotently() -> None:
+    workspace = Path(__file__).parent / ".artifact_scan_runtime"
+    rmtree(workspace, ignore_errors=True)
+    workspace.mkdir(parents=True)
+    try:
+        _assert_runtime_service_scans_declared_artifacts_idempotently(workspace)
+    finally:
+        rmtree(workspace, ignore_errors=True)
+
+
+def _assert_runtime_service_scans_declared_artifacts_idempotently(workspace: Path) -> None:
+    db = connect(workspace / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(workspace)
+    project = service.import_project(project_path, now=NOW)
+    definition = service.get_workflow_definition(project["workflowVersionId"])
+    plan_node = next(node for node in definition["nodes"] if node["id"] == "plan")
+    plan_node["artifacts"] = {
+        "outputs": [
+            {
+                "id": "plan-report",
+                "name": "计划报告",
+                "type": "plan",
+                "required": True,
+                "path": "docs/runs/{{runId}}/{{nodeId}}/plan.md",
+            }
+        ]
+    }
+    saved = service.save_workflow_version(
+        project["workflowVersionId"],
+        definition=definition,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+    run = service.create_run(saved["workflowVersionId"], title="扫描产物", now=NOW)
+    target = project_path / "docs" / "runs" / run.runId / "plan" / "plan.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# 计划\n", encoding="utf-8")
+    started = service.transition_run(
+        run.runId,
+        "NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run.revision,
+        now=NOW,
+    )
+
+    first = service.scan_node_artifacts(
+        run.runId,
+        node_id="plan",
+        expected_revision=started.revision,
+        now=NOW,
+    )
+    second = service.scan_node_artifacts(
+        run.runId,
+        node_id="plan",
+        expected_revision=first["projection"].revision,
+        now=NOW,
+    )
+
+    assert first["registered"] == ["plan-report"]
+    assert second["unchanged"] == ["plan-report"]
+    assert len(service.list_artifacts(run.runId)) == 1
+    assert service.timeline(run.runId)[-1]["payload"]["artifactSpecId"] == "plan-report"
+
+    target.write_text("# 计划\n\n已更新。\n", encoding="utf-8")
+    changed = service.scan_node_artifacts(
+        run.runId,
+        node_id="plan",
+        expected_revision=second["projection"].revision,
+        now="2026-07-28T13:00:00Z",
+    )
+    artifacts = service.list_artifacts(run.runId)
+
+    assert changed["registered"] == ["plan-report"]
+    assert len(artifacts) == 2
+    assert artifacts[0]["status"] == "invalidated"
+    assert artifacts[1]["status"] == "verified"
+    assert artifacts[1]["supersedesArtifactId"] == artifacts[0]["id"]
+
+
+def test_runtime_service_keeps_provisional_artifact_out_of_transition_until_confirmed(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path)
+    project = service.import_project(project_path, now=NOW)
+    definition = service.get_workflow_definition(project["workflowVersionId"])
+    plan_node = next(node for node in definition["nodes"] if node["id"] == "plan")
+    plan_node["artifacts"] = {
+        "outputs": [{
+            "id": "plan-report",
+            "name": "计划报告",
+            "type": "plan",
+            "required": True,
+            "path": "docs/runs/{{runId}}/{{nodeId}}/plan.md",
+        }]
+    }
+    saved = service.save_workflow_version(
+        project["workflowVersionId"], definition=definition, actor=trusted_human().model_dump(), now=NOW
+    )
+    run = service.create_run(saved["workflowVersionId"], title="确认临时产物", now=NOW)
+    target = project_path / "docs" / "runs" / run.runId / "plan" / "plan.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("等待人工确认", encoding="utf-8")
+    started = service.transition_run(
+        run.runId, "NODE_STARTED", node_id="plan", actor=AGENT_ACTOR,
+        expected_revision=run.revision, now=NOW,
+    )
+
+    provisional = service.submit_artifact(
+        run.runId, node_id="plan", artifact_path=target, artifact_type="plan",
+        artifact_status="provisional", actor=AGENT_ACTOR,
+        expected_revision=started.revision, now=NOW,
+    )
+
+    assert provisional.revision == started.revision
+    assert service.timeline(run.runId)[-1]["type"] == "NODE_STARTED"
+    artifact = service.list_artifacts(run.runId)[0]
+    assert artifact["status"] == "provisional"
+
+    confirmed = service.confirm_artifact(
+        run.runId, node_id="plan", artifact_id=artifact["id"],
+        actor=trusted_human().model_dump(), expected_revision=started.revision, now=NOW,
+    )
+
+    assert confirmed["artifact"]["status"] == "verified"
+    assert confirmed["projection"].revision != started.revision
+    assert service.timeline(run.runId)[-1]["type"] == "ARTIFACT_SUBMITTED"
+
+
+def test_runtime_service_injects_passed_upstream_artifacts_into_agent_prompt() -> None:
+    class RecordingProvider(FakeProvider):
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def build_command(self, *, cwd: Path, prompt: str, allowed_tools: list[str]) -> CliCommand:
+            self.prompts.append(prompt)
+            return super().build_command(cwd=cwd, prompt=prompt, allowed_tools=allowed_tools)
+
+    workspace = Path(__file__).parent / ".agent_prompt_runtime"
+    rmtree(workspace, ignore_errors=True)
+    workspace.mkdir(parents=True)
+    try:
+        db = connect(workspace / "workflow.db")
+        migrate(db)
+        provider = RecordingProvider()
+        service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: provider)
+        project_path = copy_harness_project(workspace)
+        project = service.import_project(project_path, now=NOW)
+        definition = service.get_workflow_definition(project["workflowVersionId"])
+        plan_node = next(node for node in definition["nodes"] if node["id"] == "plan")
+        review_node = next(node for node in definition["nodes"] if node["id"] == "review")
+        plan_node["artifacts"] = {
+            "outputs": [
+                {
+                    "id": "plan-report",
+                    "name": "计划报告",
+                    "type": "plan",
+                    "required": True,
+                    "path": "docs/runs/{{runId}}/{{nodeId}}/plan.md",
+                }
+            ]
+        }
+        review_node["kind"] = "agent"
+        review_node["agent"] = {
+            "promptTemplate": "审阅上游计划。",
+            "context": {
+                "upstream": "direct",
+                "artifactTypes": ["plan"],
+                "maxArtifacts": 4,
+                "summaryCharsPerArtifact": 1000,
+                "maxTotalChars": 4000,
+            },
+        }
+        saved = service.save_workflow_version(
+            project["workflowVersionId"],
+            definition=definition,
+            actor=trusted_human().model_dump(),
+            now=NOW,
+        )
+        run = service.create_run(saved["workflowVersionId"], title="上下文注入", now=NOW)
+        target = project_path / "docs" / "runs" / run.runId / "plan" / "plan.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("上游计划正文", encoding="utf-8")
+        started = service.transition_run(run.runId, "NODE_STARTED", node_id="plan", actor=AGENT_ACTOR, expected_revision=run.revision, now=NOW)
+        scanned = service.scan_node_artifacts(run.runId, node_id="plan", expected_revision=started.revision, now=NOW)
+        completed = service.transition_run(
+            run.runId,
+            "NODE_COMPLETED",
+            node_id="plan",
+            actor={"id": "executor", "type": "executor", "source": "runtime", "trusted": True},
+            expected_revision=scanned["projection"].revision,
+            now=NOW,
+        )
+        passed = service.submit_gate_result(
+            run.runId,
+            node_id="plan",
+            gate_id="plan-ready",
+            status="passed",
+            evidence=[target.as_uri()],
+            waiver_reason=None,
+            actor={"id": "verifier", "type": "verifier", "source": "runtime", "trusted": True},
+            expected_revision=completed.revision,
+            now=NOW,
+        )
+
+        job = service.start_agent_job(
+            run.runId,
+            node_id="review",
+            provider="fake",
+            prompt="请给出审阅结论。",
+            actor=AGENT_ACTOR,
+            now=NOW,
+        )
+
+        assert "审阅上游计划。" in provider.prompts[-1]
+        assert "请给出审阅结论。" in provider.prompts[-1]
+        assert "上游计划正文" in provider.prompts[-1]
+        assert job["effectivePrompt"] == provider.prompts[-1]
+        assert job["contextArtifacts"][0]["artifactId"]
+        consumers = service.list_artifact_consumers(run.runId, job["contextArtifacts"][0]["artifactId"])
+        assert consumers[0]["agentJobId"] == job["id"]
+        assert consumers[0]["consumerNodeId"] == "review"
+
+        target.write_text("上游计划正文已修改", encoding="utf-8")
+        rescanned = service.scan_node_artifacts(
+            run.runId,
+            node_id="plan",
+            expected_revision=passed.revision,
+            now="2026-07-28T14:00:00Z",
+        )
+        assert rescanned["projection"].nodeStates["plan"] == "AWAITING_GATE"
+        gate = service.list_gate_results(run.runId)[0]
+        assert gate["artifactHashes"]
+        assert gate["invalidatedAt"] == "2026-07-28T14:00:00Z"
+    finally:
+        rmtree(workspace, ignore_errors=True)
+
+
 def test_runtime_service_starts_agent_in_background_and_allows_cancellation(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)
@@ -979,7 +1254,7 @@ def test_runtime_service_persists_and_resumes_recoverable_agent_checkpoints(tmp_
 
     assert checkpoint["status"] == "recoverable"
     assert checkpoint["provider"] == "fake"
-    assert checkpoint["prompt"] == "保存后恢复这个 Agent 任务"
+    assert checkpoint["prompt"] == "用户任务：\n保存后恢复这个 Agent 任务"
     assert checkpoint["allowedTools"] == ["read"]
     assert checkpoint["timeoutSeconds"] == 45
     assert service.get_recovery_diagnostics(run.runId)["recoverableAgentCheckpointIds"] == [
@@ -1112,7 +1387,7 @@ def test_runtime_service_creates_interactive_agent_and_audits_user_input(tmp_pat
             "sessionId": session["id"],
             "sequence": 1,
             "kind": "initial_prompt",
-            "content": "请先询问目标分支",
+                "content": "用户任务：\n请先询问目标分支",
             "createdAt": NOW,
         },
         recorded,
@@ -1387,7 +1662,45 @@ def test_runtime_service_rejects_an_invalid_interactive_output_batch_atomically(
     assert service.list_agent_output(job["id"]) == []
 
 
-def test_runtime_service_fails_interactive_session_when_output_limit_is_exceeded(tmp_path) -> None:
+def test_runtime_service_sanitizes_unpaired_surrogates_in_interactive_output(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+    service.start_interactive_agent_session(
+        run.runId,
+        job["id"],
+        desktop_session_id="pty-1",
+        pid=1234,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    output = service.append_interactive_agent_output(
+        run.runId,
+        job["id"],
+        events=[{"data": "partial:\ud800"}],
+        now=NOW,
+    )
+
+    assert output[0]["payload"]["text"] == "partial:\ufffd"
+
+
+def test_runtime_service_sanitizes_legacy_interactive_output_on_read(tmp_path) -> None:
+    service, run, job = _create_interactive_agent_job(tmp_path)
+    service._agent_jobs.append_output(
+        id=f"{job['id']}:output:1",
+        job_id=job["id"],
+        sequence=1,
+        kind="terminal_raw",
+        payload={"text": "legacy:\ud800"},
+        created_at=NOW,
+    )
+    service._db.commit()
+
+    output = service.list_agent_output(job["id"])
+
+    assert output[0]["payload"]["text"] == "legacy:\ufffd"
+
+
+def test_runtime_service_keeps_recent_interactive_output_when_persistence_limit_is_exceeded(tmp_path) -> None:
     service, run, job = _create_interactive_agent_job(tmp_path)
     service.start_interactive_agent_session(
         run.runId,
@@ -1403,23 +1716,32 @@ def test_runtime_service_fails_interactive_session_when_output_limit_is_exceeded
     )
     service._db.commit()
 
-    with pytest.raises(ValueError, match="AGENT_OUTPUT_LIMIT"):
-        service.append_interactive_agent_output(
-            run.runId,
-            job["id"],
-            events=[{"data": "超过限制的输出"}],
-            now=NOW,
-        )
+    service.append_interactive_agent_output(
+        run.runId,
+        job["id"],
+        events=[{"data": "old-data"}],
+        now=NOW,
+    )
+    output = service.append_interactive_agent_output(
+        run.runId,
+        job["id"],
+        events=[{"data": "new-data"}],
+        now=NOW,
+    )
 
     session = service._agent_sessions.get_for_job(job["id"])
     assert session is not None
-    assert session["status"] == "FAILED"
-    assert service.get_agent_job(run.runId, job["id"])["error"].startswith("AGENT_OUTPUT_LIMIT")
+    assert session["status"] == "RUNNING"
+    assert service.get_agent_job(run.runId, job["id"])["status"] == "RUNNING"
+    assert output[0]["payload"]["text"] == "new-data"
+    assert [event["payload"]["text"] for event in service.list_agent_output(job["id"])] == [
+        "new-data"
+    ]
     assert (
-        service.list_audit_records(action="agent.interactive.session.failed")[0]["detail"][
+        service.list_audit_records(action="agent.interactive.output.persistence_limited")[0]["detail"][
             "reason"
         ]
-        == "AGENT_OUTPUT_LIMIT"
+        == "AGENT_OUTPUT_HISTORY_TRIMMED"
     )
 
 
@@ -1468,7 +1790,7 @@ def test_runtime_service_continues_interactive_agent_with_history(tmp_path) -> N
     assert continued["parentJobId"] == job["id"]
     assert continued_session is not None
     assert service.list_agent_input(continued_session["id"])[0]["content"].startswith(
-        "历史交互记录："
+        "用户任务：\n历史交互记录："
     )
     assert "请确认发布范围" in service.list_agent_input(continued_session["id"])[0]["content"]
     assert session["id"] != continued_session["id"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 from datetime import datetime, timezone
@@ -7,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Callable
 from secrets import compare_digest
+from threading import Lock
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -64,6 +66,24 @@ class SubmitArtifactRequest(BaseModel):
     nodeId: str
     artifactPath: str
     artifactType: str
+    artifactSpecId: str | None = None
+    actor: dict[str, Any]
+    expectedRevision: str
+    now: str
+
+
+class ScanNodeArtifactsRequest(BaseModel):
+    expectedRevision: str
+    now: str
+
+
+class ConfirmArtifactRequest(BaseModel):
+    actor: dict[str, Any]
+    expectedRevision: str
+    now: str
+
+
+class CompleteNodeRequest(BaseModel):
     actor: dict[str, Any]
     expectedRevision: str
     now: str
@@ -242,6 +262,7 @@ def create_app(
 ) -> FastAPI:
     application = FastAPI(title="AI Workflow Platform Runtime")
     expected_local_token = local_token.strip() if local_token else None
+    runtime_request_lock = Lock()
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -263,7 +284,13 @@ def create_app(
                     status_code=401,
                     content={"detail": "LOCAL_AUTH_REQUIRED: Runtime 本地认证令牌无效或缺失。"},
                 )
-        return await call_next(request)
+        # The Runtime owns one SQLite connection, so one request retains the lock
+        # until its endpoint has completed all repository operations.
+        await asyncio.to_thread(runtime_request_lock.acquire)
+        try:
+            return await call_next(request)
+        finally:
+            runtime_request_lock.release()
 
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(
@@ -664,6 +691,7 @@ def create_app(
                 node_id=request.nodeId,
                 artifact_path=Path(request.artifactPath),
                 artifact_type=request.artifactType,
+                artifact_spec_id=request.artifactSpecId,
                 actor=request.actor,
                 expected_revision=request.expectedRevision,
                 now=request.now,
@@ -672,6 +700,31 @@ def create_app(
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+        except sqlite3.IntegrityError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/nodes/{node_id}/artifacts/scan")
+    def scan_node_artifacts(
+        run_id: str,
+        node_id: str,
+        request: ScanNodeArtifactsRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            result = service.scan_node_artifacts(
+                run_id,
+                node_id=node_id,
+                expected_revision=request.expectedRevision,
+                now=request.now,
+            )
+            return {
+                **result,
+                "projection": result["projection"].model_dump(),
+            }
+        except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise _http_error_from_value_error(error) from error
@@ -701,6 +754,69 @@ def create_app(
             return service.list_artifacts(run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/artifacts/{artifact_id}/consumers")
+    def get_artifact_consumers(run_id: str, artifact_id: str) -> list[dict[str, Any]]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_artifact_consumers(run_id, artifact_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/runs/{run_id}/nodes/{node_id}/artifact-requirements")
+    def get_node_artifact_requirements(run_id: str, node_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_node_artifact_requirements(
+                run_id, node_id=node_id, now=datetime.now(timezone.utc).isoformat()
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/runs/{run_id}/nodes/{node_id}/context")
+    def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_node_context(run_id, node_id=node_id, now=datetime.now(timezone.utc).isoformat())
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/nodes/{node_id}/complete")
+    def complete_node(run_id: str, node_id: str, request: CompleteNodeRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.complete_node(
+                run_id,
+                node_id=node_id,
+                actor=request.actor,
+                expected_revision=request.expectedRevision,
+                now=request.now,
+            ).model_dump()
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/runs/{run_id}/nodes/{node_id}/artifacts/{artifact_id}/confirm")
+    def confirm_artifact(run_id: str, node_id: str, artifact_id: str, request: ConfirmArtifactRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.confirm_artifact(
+                run_id,
+                node_id=node_id,
+                artifact_id=artifact_id,
+                actor=request.actor,
+                expected_revision=request.expectedRevision,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
 
     @application.get("/runs/{run_id}/artifacts/{artifact_id}/preview")
     def preview_artifact(run_id: str, artifact_id: str) -> dict[str, Any]:

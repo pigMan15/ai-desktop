@@ -34,10 +34,10 @@ powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 开发模式：
 
 ```powershell
-npm.cmd run dev:desktop
+npm.cmd run dev
 ```
 
-桌面应用启动后会通过 Electron 管理 Runtime。进入设置或初始化页面后，配置 Runtime endpoint、项目路径和工作流信息；已经保存过工作区会话时，应用会自动恢复上次的项目、工作流版本和 Run。
+该命令会启动 Vite Renderer，并由 Electron 自动管理 Runtime。不要在开发时另行手动启动 `uvicorn`；这样会导致应用连接到过期 Runtime 进程。进入设置或初始化页面后，配置项目路径和工作流信息；已经保存过工作区会话时，应用会自动恢复上次的项目、工作流版本和 Run。
 
 ## Run 模块怎么使用
 
@@ -49,6 +49,22 @@ npm.cmd run dev:desktop
 6. 选择 Agent Provider：`Codex`、`Claude Code` 或测试用 `Fake`。
 7. 选择 Agent 模式。
 8. 点击“启动 Agent”。
+
+## 产物驱动工作流怎么使用
+
+工作流管理员在“工作流”页面为每个节点配置交付物规范：交付物 ID、名称、类型、项目内固定路径、可选模板、说明和必需性；同时配置 Agent 模板、上游上下文范围、类型过滤、摘要上限和推进方式。保存前可模拟，保存时 Runtime 会拒绝无效路径、重复 ID、未知模板变量和不安全的自动推进配置。
+
+创建 Run 后，执行者只需要启动节点和 Agent，不需要手动填写标准 Artifact 的路径或类型。Runtime 会把本节点应生成的文件、固定位置以及上游已通过 Artifact 的路径、哈希和摘要组装为 `effectivePrompt`。Run 页面会显示当前节点的交付物要求和启动前上下文预览。
+
+Agent 完成后，或用户点击“重新检查节点产物”后，Runtime 会扫描声明的固定路径，校验项目边界，计算哈希并登记版本：
+
+- 必需交付物缺失时，节点保持 `AWAITING_ARTIFACT`，不能推进。
+- 可选交付物缺失不会阻塞节点。
+- 相同内容重复扫描不会生成重复版本；文件变化会生成新版本，并保留旧版本用于比较和 Evidence。
+- 失败 Agent 产生的临时交付物会显示为“待确认”。只有可信人工点击“确认正式产物”后，它才会影响节点状态。
+- 下游 Agent 只会读取上游 `PASSED` 节点的正式 Artifact；Artifact 页面可查看每个版本被哪些 Agent 消费。
+
+审批和 Gate 会绑定当时正式 Artifact 的哈希集合。之后重新扫描到内容变化时，Runtime 会使旧审批/Gate 记录失效、写入审计，并让节点重新进入待审批或待 Gate 状态。这样不能用一次旧审批覆盖已经变更的交付物。
 
 Agent 模式说明：
 

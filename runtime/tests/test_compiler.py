@@ -49,6 +49,17 @@ def test_compile_workflow_returns_graph_spec_for_valid_workflow() -> None:
     }
 
 
+def test_compile_workflow_rejects_an_empty_workflow() -> None:
+    result = compile_workflow(_workflow(nodes=[], edges=[]))
+
+    assert result["diagnostics"] == [
+        {
+            "code": "EMPTY_WORKFLOW",
+            "message": "Workflow must define at least one node.",
+        }
+    ]
+
+
 def test_compile_workflow_reports_missing_edge_source_and_target() -> None:
     workflow = _workflow(
         edges=[
@@ -101,3 +112,67 @@ def test_compile_workflow_reports_duplicate_node_ids_without_blocking_graph() ->
         {"id": "task-1", "label": "Implement", "kind": "task"},
         {"id": "task-1", "label": "Implement again", "kind": "agent"},
     ]
+
+
+def test_compile_workflow_rejects_invalid_artifact_contracts_and_agent_limits() -> None:
+    workflow = _workflow(
+        nodes=[
+            WorkflowNode(
+                id="agent-1",
+                name="Agent",
+                kind="agent",
+                artifacts={
+                    "outputs": [
+                        {
+                            "id": "report",
+                            "name": "报告",
+                            "type": "report",
+                            "required": True,
+                            "path": "docs/{{unknown}}/report.md",
+                        },
+                        {
+                            "id": "report",
+                            "name": "重复报告",
+                            "type": "report",
+                            "required": False,
+                            "path": "docs/report.md",
+                        },
+                    ]
+                },
+                agent={
+                    "context": {
+                        "upstream": "direct",
+                        "maxArtifacts": 0,
+                        "summaryCharsPerArtifact": 100,
+                        "maxTotalChars": 50,
+                    }
+                },
+            )
+        ],
+        edges=[],
+    )
+
+    codes = {diagnostic["code"] for diagnostic in compile_workflow(workflow)["diagnostics"]}
+
+    assert codes == {
+        "DUPLICATE_ARTIFACT_SPEC_ID",
+        "UNKNOWN_ARTIFACT_PATH_VARIABLE",
+        "INVALID_AGENT_CONTEXT_LIMIT",
+    }
+
+
+def test_compile_workflow_rejects_cycles_and_unsupported_auto_advance() -> None:
+    workflow = _workflow(
+        nodes=[
+            WorkflowNode(id="approval", name="审批", kind="approval", advance={"mode": "auto"}),
+            WorkflowNode(id="agent", name="Agent", kind="agent"),
+        ],
+        edges=[
+            WorkflowEdge(id="edge-1", from_="approval", to="agent"),
+            WorkflowEdge(id="edge-2", from_="agent", to="approval"),
+        ],
+    )
+
+    codes = {diagnostic["code"] for diagnostic in compile_workflow(workflow)["diagnostics"]}
+
+    assert codes == {"WORKFLOW_CYCLE", "AUTO_ADVANCE_UNSUPPORTED"}
