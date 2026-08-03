@@ -51,9 +51,9 @@ export type RuntimeWorkbenchState = {
 
 type RuntimeImportResult = {
   projectId: string;
-  workflowVersionId: string;
-  workflowId?: string;
-  workflowName?: string;
+  workflowVersionId: string | null;
+  workflowId?: string | null;
+  workflowName?: string | null;
   createdDefaultWorkflow?: boolean;
   workflowBindingStatus: "bound" | "unbound";
 };

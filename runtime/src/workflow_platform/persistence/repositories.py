@@ -16,6 +16,7 @@ class WorkflowVersionRepository:
         id: str,
         project_id: str,
         content_hash: str,
+        workflow_asset_id: str | None = None,
         created_at: str,
         adapter_id: str | None = None,
     ) -> None:
@@ -34,15 +35,17 @@ class WorkflowVersionRepository:
                 version,
                 definition_json,
                 content_hash,
+                workflow_asset_id,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 adapter_id = excluded.adapter_id,
                 name = excluded.name,
                 version = excluded.version,
                 definition_json = excluded.definition_json,
                 content_hash = excluded.content_hash,
+                workflow_asset_id = excluded.workflow_asset_id,
                 created_at = excluded.created_at
             """,
             (
@@ -53,6 +56,7 @@ class WorkflowVersionRepository:
                 definition.version,
                 definition_json,
                 content_hash,
+                workflow_asset_id or definition.id,
                 created_at,
             ),
         )
@@ -75,8 +79,7 @@ class WorkflowVersionRepository:
     def metadata(self, id: str) -> dict | None:
         row = self._db.execute(
             """
-            SELECT id, project_id, adapter_id, name, version, content_hash, created_at,
-                   json_extract(definition_json, '$.id') AS workflow_id
+            SELECT id, project_id, adapter_id, name, version, content_hash, workflow_asset_id, created_at
             FROM workflow_versions
             WHERE id = ?
             """,
@@ -87,7 +90,7 @@ class WorkflowVersionRepository:
     def list_history(self, id: str) -> list[dict]:
         target = self._db.execute(
             """
-            SELECT project_id, definition_json
+            SELECT workflow_asset_id
             FROM workflow_versions
             WHERE id = ?
             """,
@@ -96,32 +99,28 @@ class WorkflowVersionRepository:
         if target is None:
             return []
 
-        workflow_id = WorkflowDefinition.model_validate(
-            json.loads(target["definition_json"])
-        ).id
         rows = self._db.execute(
             """
             SELECT id, name, version, definition_json, content_hash, created_at
             FROM workflow_versions
-            WHERE project_id = ?
+            WHERE workflow_asset_id = ?
             ORDER BY rowid ASC
             """,
-            (target["project_id"],),
+            (target["workflow_asset_id"],),
         ).fetchall()
         history: list[dict] = []
         for row in rows:
             definition = WorkflowDefinition.model_validate(json.loads(row["definition_json"]))
-            if definition.id == workflow_id:
-                history.append(
-                    {
-                        "id": row["id"],
-                        "name": row["name"],
-                        "version": row["version"],
-                        "contentHash": row["content_hash"],
-                        "createdAt": row["created_at"],
-                        "definition": definition,
-                    }
-                )
+            history.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "version": row["version"],
+                    "contentHash": row["content_hash"],
+                    "createdAt": row["created_at"],
+                    "definition": definition,
+                }
+            )
         return history
 
 

@@ -30,6 +30,7 @@ import {
   mergeAgentOutput,
 } from "./agentOutput";
 import { desktopGitApi } from "./desktopGit";
+import { desktopProjectApi } from "./desktopProject";
 import {
   createRuntimeClient,
   loadWorkbenchState,
@@ -69,6 +70,7 @@ export function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(savedSession.apiBaseUrl);
   const [projectPath, setProjectPath] = useState(savedSession.projectPath);
   const [projectId, setProjectId] = useState(savedSession.projectId ?? "");
+  const [projectArchived, setProjectArchived] = useState(false);
   const [workflowVersionId, setWorkflowVersionId] = useState(savedSession.workflowVersionId);
   const [operationMessage, setOperationMessage] = useState("等待操作");
   const [managedRuntime, setManagedRuntime] = useState<ManagedRuntimeStatus | null>(null);
@@ -107,6 +109,7 @@ export function App() {
   const [recoveryDiagnostics, setRecoveryDiagnostics] = useState<RecoveryDiagnostics | null>(null);
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionSummary[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [artifactInventory, setArtifactInventory] = useState<RuntimeWorkbenchState["artifacts"]>([]);
   const [deployments, setDeployments] = useState<DeploymentSummary[]>([]);
   const [deploymentOutput, setDeploymentOutput] = useState<DeploymentOutputEvent[]>([]);
   const [interactiveAgentTerminals, setInteractiveAgentTerminals] = useState<
@@ -119,6 +122,16 @@ export function App() {
   const liveAgentOutputPendingRef = useRef<Record<string, Record<string, TerminalViewportOutput[]>>>({});
   const liveAgentOutputFrameRef = useRef<number | null>(null);
   const runSwitchInProgressRef = useRef(false);
+
+  useEffect(() => {
+    if (currentRoute === "workflow") {
+      const workbench = document.querySelector<HTMLElement>(".workbench");
+      if (workbench) {
+        workbench.scrollTop = 0;
+        workbench.scrollLeft = 0;
+      }
+    }
+  }, [currentRoute]);
 
   function appendLiveAgentOutput(runId: string, jobId: string, event: TerminalViewportOutput) {
     const pending = liveAgentOutputPendingRef.current;
@@ -249,6 +262,19 @@ export function App() {
       isMounted = false;
     };
   }, [apiBaseUrl, state?.connection, workflowVersionId]);
+
+  useEffect(() => {
+    if (currentRoute !== "artifacts" || state?.connection !== "connected") {
+      return;
+    }
+    let isMounted = true;
+    Promise.all(runs.map((run) => createRuntimeClient(apiBaseUrl).listArtifacts(run.id))).then((artifactGroups) => {
+      if (isMounted) setArtifactInventory(artifactGroups.flat());
+    }).catch((error) => {
+      if (isMounted) setOperationMessage(`读取产物列表失败：${errorMessage(error)}`);
+    });
+    return () => { isMounted = false; };
+  }, [apiBaseUrl, currentRoute, runs, state?.connection]);
 
   useEffect(() => {
     if (!workflowVersionId || state?.connection !== "connected") {
@@ -662,10 +688,11 @@ export function App() {
       await client.health();
       const imported = await client.importProject(projectPath, now());
       setProjectId(imported.projectId);
-      setWorkflowVersionId(imported.workflowVersionId);
+      setProjectArchived(false);
+      setWorkflowVersionId(imported.workflowVersionId ?? "");
       setRuns([]);
       const projectName = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? imported.projectId;
-      const workflowName = imported.workflowName ?? imported.workflowId ?? imported.workflowVersionId;
+      const workflowName = imported.workflowName ?? imported.workflowId ?? imported.workflowVersionId ?? "未绑定工作流";
       setState((current) => ({
         ...(current ?? fallbackState()),
         connection: "connected",
@@ -677,15 +704,36 @@ export function App() {
         apiBaseUrl,
         projectPath,
         projectId: imported.projectId,
-        workflowVersionId: imported.workflowVersionId,
+        workflowVersionId: imported.workflowVersionId ?? "",
         projectName,
         workflowName,
         runId: null,
       });
-      setOperationMessage(`导入完成：${workflowName}`);
+      setOperationMessage(
+        imported.createdDefaultWorkflow
+          ? `已为项目创建起步工作流：${workflowName}，可在工作流模块继续编辑。`
+          : `导入完成：${workflowName}`,
+      );
       void refreshGitWorkspace();
     } catch (error) {
       setOperationMessage(`导入失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleSelectProjectDirectory() {
+    const projectDesktopApi = desktopProjectApi();
+    if (!projectDesktopApi) {
+      setOperationMessage("当前运行环境不支持系统目录选择，请手动输入项目路径。");
+      return;
+    }
+    try {
+      const selectedPath = await projectDesktopApi.selectDirectory();
+      if (selectedPath) {
+        setProjectPath(selectedPath);
+        setOperationMessage("已选择项目目录，请确认后导入项目。");
+      }
+    } catch (error) {
+      setOperationMessage(`选择项目目录失败：${errorMessage(error)}`);
     }
   }
 
@@ -746,7 +794,7 @@ export function App() {
     try {
       await git.mergeBack(projectPath, branch);
       await refreshGitWorkspace();
-      setOperationMessage(`已快进合并分支：${branch}`);
+      setOperationMessage(`已合并分支：${branch}`);
     } catch (error) {
       setOperationMessage(`合并分支失败：${errorMessage(error)}`);
     }
@@ -844,6 +892,9 @@ export function App() {
 
   async function handleCreateRun(title: string, configuration: RunConfiguration) {
     try {
+      if (!projectId || !workflowVersionId) {
+        throw new Error("请先为项目绑定工作流");
+      }
       runSwitchInProgressRef.current = true;
       clearDisplayedAgentTerminal();
       const projection = await client.createRun(
@@ -851,6 +902,7 @@ export function App() {
         title,
         now(),
         configuration,
+        projectId,
       );
       await refreshRun(projection.runId);
       runSwitchInProgressRef.current = false;
@@ -920,6 +972,8 @@ export function App() {
     provider: AgentJobSummary["provider"],
     prompt: string,
     mode: "interactive" | "automatic" = "interactive",
+    allowedTools: string[] = [],
+    cwd?: string,
   ) {
     const projection = state?.projection;
     if (!projection) {
@@ -930,6 +984,7 @@ export function App() {
       const canUseInteractiveTerminal =
         mode === "interactive" && terminalBridge && (provider === "codex" || provider === "claude");
       const agentMode = canUseInteractiveTerminal ? "interactive" : "automatic";
+      const executionCwd = cwd || projectPath;
       const job = await client.startAgentJob(
         projection.runId,
         selectedNodeId,
@@ -937,13 +992,15 @@ export function App() {
         prompt,
         now(),
         agentMode,
+        allowedTools,
+        executionCwd,
       );
       if (canUseInteractiveTerminal) {
         let terminalSession: Awaited<ReturnType<DesktopTerminalBridge["create"]>> | null = null;
         try {
           terminalSession = await terminalBridge.create({
             kind: provider,
-            cwd: projectPath,
+            cwd: executionCwd,
             projectRoot: projectPath,
             columns: 100,
             rows: 30,
@@ -1150,6 +1207,31 @@ export function App() {
     }
   }
 
+  async function handleCreateKnowledgeCandidateFromArtifact(
+    runId: string,
+    artifact: RuntimeWorkbenchState["artifacts"][number],
+  ) {
+    try {
+      const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(runId, artifact.id);
+      if (preview.content === null || !preview.content.trim()) {
+        throw new Error("该产物不是可提炼的文本内容，或内容为空。");
+      }
+      const path = artifact.relativePath ?? artifact.uri;
+      const title = artifact.artifactSpecId ?? `${artifact.type} - ${path}`;
+      await createRuntimeClient(apiBaseUrl).createKnowledgeCandidate(
+        title,
+        preview.content,
+        `run:${runId}`,
+        now(),
+      );
+      await refreshKnowledge();
+      setOperationMessage("已从 Run 产物创建知识候选，可继续启动 CLI 合成。");
+    } catch (error) {
+      setOperationMessage(`从 Run 产物创建知识候选失败：${errorMessage(error)}`);
+      throw error;
+    }
+  }
+
   async function handleReviewKnowledgeCandidate(
     candidateId: string,
     decision: "approved" | "rejected",
@@ -1188,6 +1270,22 @@ export function App() {
       setOperationMessage("知识 CLI 合成已开始，将在完成后显示差异稿。");
     } catch (error) {
       setOperationMessage(`启动知识 CLI 合成失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleExtractArtifactsToKnowledge(
+    runId: string,
+    artifactIds: string[],
+    provider: KnowledgeSynthesis["provider"],
+  ) {
+    try {
+      const result = await client.extractArtifactsToKnowledgeSyntheses(runId, artifactIds, provider, now());
+      await refreshKnowledge();
+      setArtifactInventory((current) => [...current]);
+      setOperationMessage(`已启动 ${result.items.length} 项产物的 ${provider === "claude" ? "Claude Code" : "Codex"} CLI 合成，可在知识库查看进度与结果。`);
+    } catch (error) {
+      setOperationMessage(`启动产物 CLI 合成失败：${errorMessage(error)}`);
+      throw error;
     }
   }
 
@@ -1368,11 +1466,7 @@ export function App() {
     }
   }
 
-  async function handlePreviewArtifact(artifactId: string) {
-    const runId = state?.projection?.runId;
-    if (!runId) {
-      return;
-    }
+  async function handlePreviewArtifact(runId: string, artifactId: string) {
     try {
       const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(runId, artifactId);
       setArtifactPreview(preview);
@@ -1384,15 +1478,11 @@ export function App() {
     }
   }
 
-  async function handleCompareArtifacts(beforeArtifactId: string, afterArtifactId: string) {
-    const runId = state?.projection?.runId;
-    if (!runId) {
-      return;
-    }
+  async function handleCompareArtifacts(beforeRunId: string, beforeArtifactId: string, afterRunId: string, afterArtifactId: string) {
     try {
       const [before, after] = await Promise.all([
-        createRuntimeClient(apiBaseUrl).previewArtifact(runId, beforeArtifactId),
-        createRuntimeClient(apiBaseUrl).previewArtifact(runId, afterArtifactId),
+        createRuntimeClient(apiBaseUrl).previewArtifact(beforeRunId, beforeArtifactId),
+        createRuntimeClient(apiBaseUrl).previewArtifact(afterRunId, afterArtifactId),
       ]);
       if (before.integrity !== "verified" || after.integrity !== "verified") {
         throw new Error("产物内容已变更，不能生成可信差异");
@@ -1544,6 +1634,7 @@ export function App() {
     }
     try {
       await client.archiveProject(projectId, now());
+      setProjectArchived(true);
       setOperationMessage("项目已归档；重新导入同一路径即可恢复为活动状态。");
     } catch (error) {
       setOperationMessage(`归档项目失败：${errorMessage(error)}`);
@@ -1589,7 +1680,10 @@ export function App() {
               projectPath={projectPath}
               onProjectPathChange={setProjectPath}
               onImport={handleImportProject}
+              onSelectDirectory={desktopProjectApi() ? () => void handleSelectProjectDirectory() : undefined}
               onArchive={projectId ? handleArchiveProject : undefined}
+              archived={projectArchived}
+              onReimport={projectArchived ? handleImportProject : undefined}
               operationMessage={operationMessage}
               gitPanel={
                 desktopGitApi() ? (
@@ -1608,8 +1702,9 @@ export function App() {
             />
           ) : null}
           {currentRoute === "runs" ? (
-            <RunDashboard
-              state={state}
+          <RunDashboard
+            state={state}
+            workflow={workflowDefinition}
               runs={runs}
               activeRunId={activeRunId}
               onSelectRun={handleSelectRun}
@@ -1730,6 +1825,12 @@ export function App() {
               )
             }
             onStartAgent={handleStartAgent}
+            agentWorkspaces={[
+              { path: gitWorkspaceStatus?.rootPath ?? projectPath, label: `${gitWorkspaceStatus?.branch ?? "main"}（主工作区）` },
+              ...gitWorktrees
+                .filter((worktree) => !worktree.bare && worktree.path !== (gitWorkspaceStatus?.rootPath ?? projectPath))
+                .map((worktree) => ({ path: worktree.path, label: `${worktree.branch ?? "分离 HEAD"}（Worktree）` })),
+            ]}
             onCancelAgent={handleCancelAgent}
             onAgentTerminalInput={handleAgentTerminalInput}
             onAgentTerminalResize={handleAgentTerminalResize}
@@ -1762,6 +1863,7 @@ export function App() {
             <TerminalPage
               runId={state?.projection?.runId ?? null}
               projectPath={projectPath}
+              executionWorkspace={runs.find((run) => run.id === state?.projection?.runId)?.context?.executionWorkspace ?? projectPath}
               nodeId={state?.projection?.currentNodeIds[0] ?? ""}
               historySessions={terminalSessions}
               onRegisterSession={async ({ runId, nodeId, kind, cwd, pid }) => {
@@ -1829,27 +1931,37 @@ export function App() {
           {currentRoute === "artifacts" ? (
             <ArtifactsPage
               state={state}
+              artifacts={artifactInventory}
+              runs={runs}
+              extractionCountsByArtifactId={Object.fromEntries(
+                knowledgeCandidates.reduce((counts, candidate) => {
+                  const matched = /^run:[^:]+:artifact:(.+)$/.exec(candidate.source);
+                  if (matched) counts.set(matched[1], (counts.get(matched[1]) ?? 0) + 1);
+                  return counts;
+                }, new Map<string, number>()),
+              )}
               preview={artifactPreview}
+              onClosePreview={() => setArtifactPreview(null)}
               onPreviewArtifact={handlePreviewArtifact}
               comparison={artifactComparison}
               onCompareArtifacts={handleCompareArtifacts}
               onDownloadEvidencePackage={handleDownloadEvidencePackage}
               onDownloadReport={handleDownloadRunReport}
-              onConfirmArtifact={(artifact) => {
+              onStartKnowledgeExtraction={handleExtractArtifactsToKnowledge}
+              onConfirmArtifact={(runId, artifact) => {
                 if (!artifact.nodeId) {
                   return;
                 }
                 void updateProjection(
-                  (runId, revision, timestamp) =>
-                    client.confirmArtifact(runId, artifact.nodeId!, artifact.id, revision, timestamp)
-                      .then((result) => result.projection),
+                  (activeRunId, revision, timestamp) => {
+                    if (activeRunId !== runId) throw new Error("请先切换到该产物所属 Run 后确认产物。");
+                    return client.confirmArtifact(activeRunId, artifact.nodeId!, artifact.id, revision, timestamp)
+                      .then((result) => result.projection);
+                  },
                   `产物已确认：${artifact.id}`,
                 );
               }}
-              onLoadArtifactConsumers={(artifactId) => {
-                const runId = state?.projection?.runId;
-                return runId ? client.listArtifactConsumers(runId, artifactId) : Promise.resolve([]);
-              }}
+              onLoadArtifactConsumers={(runId, artifactId) => client.listArtifactConsumers(runId, artifactId)}
             />
           ) : null}
           {currentRoute === "approvals" ? (
@@ -1867,7 +1979,6 @@ export function App() {
               onCreate={handleCreateKnowledgeCandidate}
               onReview={handleReviewKnowledgeCandidate}
               onPublish={handlePublishKnowledgeCandidate}
-              onSynthesize={handleStartKnowledgeSynthesis}
               onFeedbackSynthesis={handleRecordKnowledgeSynthesisFeedback}
               onPublishSynthesis={handlePublishKnowledgeSynthesis}
               onReplay={handleReplayKnowledgeDocument}

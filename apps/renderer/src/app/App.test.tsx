@@ -471,7 +471,8 @@ describe("App", () => {
     expect(calls).toContain("/knowledge/documents/document-1/replay");
     expect(screen.getByText("内容可复用")).toBeInTheDocument();
     expect(calls).toContain("/knowledge/syntheses/synthesis-1/output");
-    expect(screen.getByLabelText("合成实时输出：产物归档规范").textContent).toContain(
+    fireEvent.click(screen.getByRole("button", { name: "查看 CLI 执行日志" }));
+    expect(screen.getByLabelText("CLI 执行日志：产物归档规范").textContent).toContain(
       "正在汇总产物归档证据。",
     );
   });
@@ -684,12 +685,15 @@ describe("App", () => {
         const url = new URL(String(input));
         calls.push(url.pathname);
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/workflow-versions/workflow-version-demo/runs") {
+          return jsonResponse([{ id: "run-demo", title: "Demo Run", status: "CREATED", createdAt: "2026-07-28T00:00:00Z" }]);
+        }
         if (url.pathname === "/runs/run-demo/projection") return jsonResponse(projection("run-demo", "1", "CREATED"));
         if (url.pathname === "/runs/run-demo/timeline") return jsonResponse([]);
         if (url.pathname === "/runs/run-demo/artifacts") {
           return jsonResponse([
-            { id: "artifact-1", type: "plan", uri: "file:///plan.md", contentHash: "sha256:plan" },
-            { id: "artifact-2", type: "report", uri: "file:///report.md", contentHash: "sha256:report" },
+            { id: "artifact-1", runId: "run-demo", type: "plan", uri: "file:///plan.md", contentHash: "sha256:plan" },
+            { id: "artifact-2", runId: "run-demo", type: "report", uri: "file:///report.md", contentHash: "sha256:report" },
           ]);
         }
         if (url.pathname === "/runs/run-demo/artifacts/artifact-1/preview") {
@@ -742,7 +746,9 @@ describe("App", () => {
 
     fireEvent.change(await screen.findByLabelText("基准产物"), { target: { value: "artifact-1" } });
     fireEvent.change(screen.getByLabelText("对比产物"), { target: { value: "artifact-2" } });
-    fireEvent.click(screen.getByRole("button", { name: "比较产物" }));
+    const compareButton = screen.getByRole("button", { name: "比较产物" });
+    await waitFor(() => expect(compareButton).toBeEnabled());
+    fireEvent.click(compareButton);
 
     expect((await screen.findByLabelText("产物差异内容")).textContent).toContain("- 旧步骤");
     expect(calls).toContain("/runs/run-demo/artifacts/artifact-1/preview");
@@ -811,7 +817,7 @@ describe("App", () => {
               type: "plan",
               required: true,
               relativePath: "docs/plan.md",
-              artifacts: [],
+              artifacts: [{ id: "artifact-1", runId: "run-demo", nodeId: "plan", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test", status: "verified" }],
             }],
           });
         }
@@ -920,6 +926,10 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "创建 Run" }));
     expect(await screen.findByText("Run 已创建：run-demo")).toBeInTheDocument();
+    expect(calls.find((call) => call.path === "/runs")?.body).toMatchObject({
+      projectId: "project-demo",
+      workflowVersionId: "workflow-version-demo",
+    });
     fireEvent.click(screen.getByRole("button", { name: "启动节点" }));
     expect(await screen.findByText("节点已启动：plan")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Artifact 路径"), {
@@ -932,9 +942,13 @@ describe("App", () => {
     expect(await screen.findByText("Artifact 已提交：plan")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "人工批准" }));
     expect(await screen.findByText("审批已通过：plan")).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "通过 Gate" }));
+    const passGateButton = await screen.findByRole("button", { name: "通过 Gate" });
+    await waitFor(() => expect(passGateButton).toBeEnabled());
+    fireEvent.click(passGateButton);
     expect(await screen.findByText("GATE_PASSED：plan")).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "完成当前节点" }));
+    const completeButton = await screen.findByRole("button", { name: "完成当前节点" });
+    await waitFor(() => expect(completeButton).toBeEnabled());
+    fireEvent.click(completeButton);
     expect(await screen.findByText("节点已完成：plan")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Agent 提示词"), {
@@ -1186,6 +1200,11 @@ function projection(runId: string, revision: string, status: "CREATED" | "IN_PRO
       nodeState: "RUNNING",
       action: { id: "complete", label: "完成当前节点", eventType: "NODE_COMPLETED", nodeId: "plan", risk: "low" },
       blockingReason: { code: "READY_TO_COMPLETE", message: "节点可以完成", nodeId: "plan" },
+    },
+    "6": {
+      nodeState: "PASSED",
+      action: { id: "start", label: "启动节点", eventType: "NODE_STARTED", nodeId: "plan", risk: "low" },
+      blockingReason: { code: "NONE", message: "无阻塞", nodeId: "plan" },
     },
   }[revision] ?? {
     nodeState: "PASSED",

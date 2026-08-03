@@ -22,6 +22,7 @@ def migrate(db: sqlite3.Connection) -> None:
             version TEXT NOT NULL,
             definition_json TEXT NOT NULL,
             content_hash TEXT NOT NULL,
+            workflow_asset_id TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -344,6 +345,12 @@ def migrate(db: sqlite3.Connection) -> None:
     if "archived_at" not in project_columns:
         db.execute("ALTER TABLE projects ADD COLUMN archived_at TEXT")
 
+    workflow_version_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(workflow_versions)").fetchall()
+    }
+    if "workflow_asset_id" not in workflow_version_columns:
+        db.execute("ALTER TABLE workflow_versions ADD COLUMN workflow_asset_id TEXT")
+
     artifact_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(artifacts)").fetchall()
     }
@@ -421,75 +428,71 @@ def migrate(db: sqlite3.Connection) -> None:
         """
     )
 
-    # Existing workflow versions predate workflow_assets. Treat every historic
-    # workflow definition as a regular asset so existing projects remain usable.
+    # Existing workflow versions predate workflow assets. Give each project its
+    # own asset, except the shared library project whose assets are global.
     db.execute(
         """
         INSERT OR IGNORE INTO workflow_assets (
             id, name, is_builtin, archived_at, created_by_json,
             created_at, updated_at, current_workflow_version_id
         )
-        SELECT
-            'workflow-asset:' || project_id || ':' || json_extract(definition_json, '$.id'),
-            name,
-            0,
-            NULL,
-            '{}',
-            created_at,
-            created_at,
-            id
-        FROM workflow_versions
-        WHERE json_extract(definition_json, '$.id') IS NOT NULL
-        GROUP BY project_id, json_extract(definition_json, '$.id')
+        SELECT workflow_asset_id, name, 0, NULL, '{}', created_at, created_at, id
+        FROM (
+            SELECT
+                CASE WHEN project_id = 'project-workflow-library' THEN json_extract(definition_json, '$.id')
+                     ELSE 'workflow-asset:' || project_id || ':' || json_extract(definition_json, '$.id') END AS workflow_asset_id,
+                name, created_at, id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY project_id, json_extract(definition_json, '$.id')
+                    ORDER BY created_at DESC, rowid DESC
+                ) AS version_rank
+            FROM workflow_versions
+            WHERE json_extract(definition_json, '$.id') IS NOT NULL
+        )
+        WHERE version_rank = 1
+        """
+    )
+    db.execute(
+        """
+        UPDATE workflow_versions
+        SET workflow_asset_id = CASE WHEN project_id = 'project-workflow-library' THEN json_extract(definition_json, '$.id')
+                                     ELSE 'workflow-asset:' || project_id || ':' || json_extract(definition_json, '$.id') END
+        WHERE workflow_asset_id IS NULL
         """
     )
     db.execute(
         """
         UPDATE workflow_assets
         SET current_workflow_version_id = (
-            SELECT versions.id
-            FROM workflow_versions AS versions
-            WHERE workflow_assets.id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
-            ORDER BY versions.rowid DESC
-            LIMIT 1
+            SELECT versions.id FROM workflow_versions AS versions
+            WHERE versions.workflow_asset_id = workflow_assets.id
+            ORDER BY versions.created_at DESC, versions.rowid DESC LIMIT 1
         )
-        WHERE current_workflow_version_id IS NULL
+        WHERE EXISTS (SELECT 1 FROM workflow_versions AS versions WHERE versions.workflow_asset_id = workflow_assets.id)
         """
     )
     db.execute(
         """
         UPDATE project_workflow_bindings
-        SET workflow_id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
+        SET workflow_id = versions.workflow_asset_id
         FROM workflow_versions AS versions
         WHERE project_workflow_bindings.workflow_version_id = versions.id
-          AND project_workflow_bindings.workflow_id <> 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
-          AND EXISTS (
-              SELECT 1 FROM workflow_assets assets
-              WHERE assets.id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
-          )
+          AND project_workflow_bindings.workflow_id <> versions.workflow_asset_id
         """
     )
     db.execute(
         """
-        INSERT INTO project_workflow_bindings (
-            project_id, workflow_id, workflow_version_id, actor_json, bound_at
-        )
-        SELECT project_id, workflow_id, workflow_version_id, '{"id":"migration","type":"system","source":"runtime","trusted":true}', bound_at
+        INSERT INTO project_workflow_bindings (project_id, workflow_id, workflow_version_id, actor_json, bound_at)
+        SELECT project_id, workflow_asset_id, id,
+               '{"id":"migration","type":"system","source":"runtime","trusted":true}', created_at
         FROM (
-            SELECT
-                versions.project_id,
-                'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id') AS workflow_id,
-                versions.id AS workflow_version_id,
-                versions.created_at AS bound_at,
-                ROW_NUMBER() OVER (
-                    PARTITION BY versions.project_id, json_extract(versions.definition_json, '$.id')
-                    ORDER BY versions.rowid DESC
-                ) AS version_rank
+            SELECT versions.*, ROW_NUMBER() OVER (
+                PARTITION BY project_id ORDER BY created_at DESC, rowid DESC
+            ) AS project_rank
             FROM workflow_versions AS versions
-            JOIN workflow_assets AS assets
-              ON assets.id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
+            WHERE project_id <> 'project-workflow-library'
         )
-        WHERE version_rank = 1
+        WHERE project_rank = 1
         ON CONFLICT(project_id) DO NOTHING
         """
     )

@@ -295,7 +295,7 @@ def test_runs_use_the_requested_project_binding_and_reject_versions_from_another
 
     assert [row["project_id"] for row in rows] == [imported_one["projectId"], imported_two["projectId"]]
     assert run_one.runId != run_two.runId
-    with pytest.raises(ValueError, match="PROJECT_WORKFLOW_VERSION_PROJECT_MISMATCH"):
+    with pytest.raises(ValueError, match="PROJECT_WORKFLOW_BINDING_MISMATCH"):
         service.create_run(
             imported_one["projectId"],
             imported_two["workflowVersionId"],
@@ -321,6 +321,36 @@ def test_migration_backfills_project_scoped_assets_and_bindings(tmp_path: Path) 
     assert binding is not None
     assert binding["workflowVersionId"] == imported["workflowVersionId"]
     assert run.status == "CREATED"
+
+
+def test_migration_binds_the_latest_version_when_a_legacy_project_has_multiple_workflows(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    imported = service.import_project(copy_harness_project(tmp_path / "legacy-multiple"), now=NOW)
+    first = service.get_workflow_definition(imported["workflowVersionId"])
+    second = WorkflowDefinition.model_validate({**first, "id": "legacy-second", "name": "Second workflow"})
+    second_version_id = "workflow-version-legacy-second"
+    service._workflow_versions.save(
+        second,
+        id=second_version_id,
+        project_id=imported["projectId"],
+        content_hash="legacy-second",
+        created_at="2026-07-28T00:00:00Z",
+    )
+    db.execute("UPDATE workflow_versions SET workflow_asset_id = NULL")
+    db.execute("DROP TABLE project_workflow_bindings")
+    db.execute("DROP TABLE workflow_assets")
+    db.commit()
+
+    migrate(db)
+
+    binding = service.get_project_workflow_binding(imported["projectId"])
+    assert binding is not None
+    assert binding["workflowVersionId"] == second_version_id
+    assert binding["workflowId"].endswith(":legacy-second")
+
+
 def trusted_human() -> Actor:
     return Actor(id="human-1", type="human", source="renderer", trusted=True)
 

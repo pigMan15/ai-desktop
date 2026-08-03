@@ -576,7 +576,7 @@ describe("runtimeClient", () => {
     const client = createRuntimeClient("http://127.0.0.1:8765");
     const imported = await client.importProject("G:\\Project\\demo", "2026-07-28T00:00:00Z");
     const created = await client.createRun(
-      imported.workflowVersionId,
+      imported.workflowVersionId!,
       "中文 Run",
       "2026-07-28T00:00:00Z",
       undefined,

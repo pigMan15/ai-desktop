@@ -121,6 +121,7 @@ class WorkflowRuntimeService:
                         id=workflow_version_id,
                         project_id=project_id,
                         content_hash=content_hash,
+                        workflow_asset_id=_project_workflow_asset_id(project_id, workflow.id),
                         created_at=now,
                         adapter_id=detection["adapterId"] if isinstance(detection, dict) else detection.adapter_id,
                     )
@@ -165,6 +166,35 @@ class WorkflowRuntimeService:
         execution_workspace: str | None = None,
         now: str,
     ) -> RunProjection:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                result = self._create_run_in_transaction(
+                    project_id,
+                    workflow_version_id,
+                    title=title,
+                    task_goal=task_goal,
+                    parameters=parameters,
+                    execution_workspace=execution_workspace,
+                    now=now,
+                )
+                self._db.commit()
+                return result
+            except Exception:
+                self._db.rollback()
+                raise
+
+    def _create_run_in_transaction(
+        self,
+        project_id: str,
+        workflow_version_id: str | None = None,
+        *,
+        title: str,
+        task_goal: str | None = None,
+        parameters: dict[str, Any] | None = None,
+        execution_workspace: str | None = None,
+        now: str,
+    ) -> RunProjection:
         # Keep direct service callers from older integrations working while all
         # API callers must provide projectId. The fallback resolves the version's
         # owning project, never a global binding.
@@ -194,11 +224,8 @@ class WorkflowRuntimeService:
             raise ValueError("WORKFLOW_ASSET_NOT_FOUND: 工作流资产不存在")
         if asset["archived_at"] is not None:
             raise ValueError("WORKFLOW_ARCHIVED: 工作流已归档，无法创建新的 Run")
-        asset_definition = self._workflow_versions.get(asset["current_workflow_version_id"])
-        if asset_definition is None or asset_definition.id != workflow.id:
+        if version["workflow_asset_id"] != binding["workflow_id"]:
             raise ValueError("PROJECT_WORKFLOW_BINDING_MISMATCH: 工作流版本不属于项目绑定资产")
-        if version["project_id"] not in {project_id, "project-workflow-library"}:
-            raise ValueError("PROJECT_WORKFLOW_VERSION_PROJECT_MISMATCH: 工作流版本属于其他项目")
         project_root_row = self._db.execute(
             "SELECT root_path FROM projects WHERE id = ?", (project_id,)
         ).fetchone()
@@ -230,26 +257,19 @@ class WorkflowRuntimeService:
         )
         projection = rebuild_projection(run_id, workflow, [created_event])
 
-        with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            try:
-                if self._projects.is_archived(project_id):
-                    raise ValueError("PROJECT_ARCHIVED: 项目已归档，无法创建新的 Run")
-                self._runs.save(
-                    id=run_id,
-                    project_id=project_id,
-                    workflow_version_id=workflow_version_id,
-                    title=title,
-                    status=projection.status,
-                    context=context,
-                    now=now,
-                )
-                self._events.append(created_event, 1)
-                self._projections.save(projection)
-                self._db.commit()
-            except Exception:
-                self._db.rollback()
-                raise
+        if self._projects.is_archived(project_id):
+            raise ValueError("PROJECT_ARCHIVED: 项目已归档，无法创建新的 Run")
+        self._runs.save(
+            id=run_id,
+            project_id=project_id,
+            workflow_version_id=workflow_version_id,
+            title=title,
+            status=projection.status,
+            context=context,
+            now=now,
+        )
+        self._events.append(created_event, 1)
+        self._projections.save(projection)
 
         return projection
 
@@ -293,6 +313,7 @@ class WorkflowRuntimeService:
                     id=version_id,
                     project_id=library_project_id,
                     content_hash=content_hash,
+                    workflow_asset_id=workflow.id,
                     created_at=now,
                     adapter_id="workflow-library",
                 )
@@ -380,11 +401,8 @@ class WorkflowRuntimeService:
         version = self._workflow_versions.metadata(workflow_version_id)
         if version is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
-        asset_definition = self._workflow_versions.get(asset["current_workflow_version_id"])
-        if asset_definition is None or version["workflow_id"] != asset_definition.id:
+        if version["workflow_asset_id"] != workflow_id:
             raise ValueError("WORKFLOW_VERSION_OWNERSHIP_INVALID: 工作流版本不属于指定工作流")
-        if version["project_id"] not in {project_id, "project-workflow-library"}:
-            raise ValueError("WORKFLOW_VERSION_PROJECT_MISMATCH: 工作流版本属于其他项目")
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -537,11 +555,9 @@ class WorkflowRuntimeService:
         if base is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
         version_metadata = self._workflow_versions.metadata(workflow_version_id)
-        asset = self._workflow_assets.get(
-            _project_workflow_asset_id(version_metadata["project_id"], base.id)
-            if version_metadata and version_metadata["project_id"] != "project-workflow-library"
-            else base.id
-        )
+        asset = self._workflow_assets.get(version_metadata["workflow_asset_id"]) if version_metadata else None
+        if asset is None:
+            raise ValueError("WORKFLOW_ASSET_NOT_FOUND: 工作流资产不存在")
         if asset is not None and asset["is_builtin"]:
             raise ValueError("BUILTIN_WORKFLOW_READ_ONLY: 内置模板只能复制后编辑")
         editor = require_trusted_human(actor, operation="保存工作流版本")
@@ -579,6 +595,7 @@ class WorkflowRuntimeService:
                     id=new_version_id,
                     project_id=row["project_id"],
                     content_hash=content_hash,
+                    workflow_asset_id=asset["id"],
                     created_at=now,
                     adapter_id=row["adapter_id"],
                 )
