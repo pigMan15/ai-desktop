@@ -72,6 +72,18 @@ class WorkflowVersionRepository:
 
         return WorkflowDefinition.model_validate(json.loads(row["definition_json"]))
 
+    def metadata(self, id: str) -> dict | None:
+        row = self._db.execute(
+            """
+            SELECT id, project_id, adapter_id, name, version, content_hash, created_at,
+                   json_extract(definition_json, '$.id') AS workflow_id
+            FROM workflow_versions
+            WHERE id = ?
+            """,
+            (id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_history(self, id: str) -> list[dict]:
         target = self._db.execute(
             """
@@ -182,6 +194,123 @@ class ProjectRepository:
         )
 
 
+class WorkflowAssetRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def save(
+        self,
+        *,
+        id: str,
+        name: str,
+        is_builtin: bool,
+        actor: dict,
+        now: str,
+        workflow_version_id: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO workflow_assets (
+                id, name, is_builtin, archived_at, created_by_json,
+                created_at, updated_at, current_workflow_version_id
+            ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                updated_at = excluded.updated_at,
+                current_workflow_version_id = excluded.current_workflow_version_id
+            """,
+            (id, name, int(is_builtin), json.dumps(actor, separators=(",", ":")), now, now, workflow_version_id),
+        )
+
+    def get(self, workflow_id: str) -> dict | None:
+        row = self._db.execute("SELECT * FROM workflow_assets WHERE id = ?", (workflow_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def list(self) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT assets.id AS workflow_id, assets.name, assets.is_builtin,
+                   assets.archived_at, assets.updated_at,
+                   assets.current_workflow_version_id,
+                   versions.version AS current_version,
+                   json_array_length(json_extract(versions.definition_json, '$.nodes')) AS node_count,
+                   (
+                       SELECT COUNT(*) FROM project_workflow_bindings bindings
+                       WHERE bindings.workflow_id = assets.id
+                   ) AS bound_project_count
+            FROM workflow_assets AS assets
+            LEFT JOIN workflow_versions AS versions ON versions.id = assets.current_workflow_version_id
+            ORDER BY assets.archived_at IS NOT NULL, assets.updated_at DESC, assets.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def archive(self, workflow_id: str, *, now: str) -> bool:
+        cursor = self._db.execute(
+            "UPDATE workflow_assets SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL",
+            (now, now, workflow_id),
+        )
+        if cursor.rowcount:
+            return True
+        if self.get(workflow_id) is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        return False
+
+    def update_current_version(self, workflow_id: str, workflow_version_id: str, *, now: str) -> None:
+        self._db.execute(
+            "UPDATE workflow_assets SET current_workflow_version_id = ?, updated_at = ? WHERE id = ?",
+            (workflow_version_id, now, workflow_id),
+        )
+
+
+class ProjectWorkflowBindingRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def get(self, project_id: str) -> dict | None:
+        row = self._db.execute(
+            """
+            SELECT project_id, workflow_id, workflow_version_id, actor_json, bound_at
+            FROM project_workflow_bindings WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["actor"] = json.loads(result.pop("actor_json"))
+        return result
+
+    def bind(
+        self, *, project_id: str, workflow_id: str, workflow_version_id: str, actor: dict, now: str
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO project_workflow_bindings (project_id, workflow_id, workflow_version_id, actor_json, bound_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                workflow_id = excluded.workflow_id,
+                workflow_version_id = excluded.workflow_version_id,
+                actor_json = excluded.actor_json,
+                bound_at = excluded.bound_at
+            """,
+            (project_id, workflow_id, workflow_version_id, json.dumps(actor, separators=(",", ":")), now),
+        )
+
+    def first_for_workflow(self, workflow_id: str) -> dict | None:
+        row = self._db.execute(
+            """
+            SELECT bindings.project_id, bindings.workflow_id, bindings.workflow_version_id
+            FROM project_workflow_bindings AS bindings
+            WHERE bindings.workflow_id = ?
+            ORDER BY bindings.bound_at DESC
+            LIMIT 1
+            """,
+            (workflow_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
 class RunRepository:
     def __init__(self, db: sqlite3.Connection) -> None:
         self._db = db
@@ -251,6 +380,16 @@ class RunRepository:
             raise KeyError(f"Run not found: {run_id}")
         return Path(row["root_path"])
 
+    def execution_workspace_for_run(self, run_id: str) -> Path:
+        row = self._db.execute(
+            "SELECT context_json FROM runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Run not found: {run_id}")
+        context = _run_context(json.loads(row["context_json"]))
+        return Path(context.get("executionWorkspace") or self.project_root_for_run(run_id))
+
     def project_id_for_run(self, run_id: str) -> str:
         row = self._db.execute(
             """
@@ -265,6 +404,19 @@ class RunRepository:
         return str(row["project_id"])
 
     def list_for_workflow_version(self, workflow_version_id: str) -> list[dict]:
+        target = self._db.execute(
+            """
+            SELECT project_id, definition_json
+            FROM workflow_versions
+            WHERE id = ?
+            """,
+            (workflow_version_id,),
+        ).fetchone()
+        if target is None:
+            return []
+        workflow_id = WorkflowDefinition.model_validate(
+            json.loads(target["definition_json"])
+        ).id
         rows = self._db.execute(
             """
             SELECT
@@ -275,11 +427,13 @@ class RunRepository:
                 runs.created_at,
                 COALESCE(run_projections.updated_at, runs.updated_at) AS updated_at
             FROM runs
+            JOIN workflow_versions ON workflow_versions.id = runs.workflow_version_id
             LEFT JOIN run_projections ON run_projections.run_id = runs.id
-            WHERE runs.workflow_version_id = ?
+            WHERE workflow_versions.project_id = ?
+              AND json_extract(workflow_versions.definition_json, '$.id') = ?
             ORDER BY updated_at DESC, runs.id DESC
             """,
-            (workflow_version_id,),
+            (target["project_id"], workflow_id),
         ).fetchall()
         return [
             {
@@ -298,10 +452,14 @@ def _run_context(value: object) -> dict:
     context = value if isinstance(value, dict) else {}
     task_goal = context.get("taskGoal")
     parameters = context.get("parameters")
-    return {
+    execution_workspace = context.get("executionWorkspace")
+    result = {
         "taskGoal": task_goal if isinstance(task_goal, str) else "",
         "parameters": parameters if isinstance(parameters, dict) else {},
     }
+    if isinstance(execution_workspace, str) and execution_workspace:
+        result["executionWorkspace"] = execution_workspace
+    return result
 
 
 class RunEventRepository:

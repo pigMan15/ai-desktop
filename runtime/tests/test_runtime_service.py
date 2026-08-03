@@ -8,10 +8,14 @@ from time import monotonic, sleep
 import pytest
 
 from workflow_platform.execution.providers import CliCommand, CodexCliProvider
-from workflow_platform.models import Actor, RunProjection
+from workflow_platform.models import Actor, Role, RunProjection, WorkflowDefinition, WorkflowNode
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
-from workflow_platform.runtime_service import WorkflowRuntimeService, _knowledge_synthesis_prompt
+from workflow_platform.runtime_service import (
+    WorkflowRuntimeService,
+    _build_effective_agent_prompt,
+    _knowledge_synthesis_prompt,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -36,6 +40,143 @@ def test_knowledge_synthesis_prompt_requires_a_reusable_knowledge_entry() -> Non
     assert "## 验证清单" in prompt
     assert "## 风险与边界" in prompt
     assert "## 来源证据" in prompt
+
+
+def test_effective_agent_prompt_includes_bound_role_before_node_prompt() -> None:
+    workflow = WorkflowDefinition(
+        id="workflow-1",
+        name="Prompt workflow",
+        version="v1",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(
+                id="agent-1",
+                name="Implement",
+                kind="agent",
+                agent={"roleId": "engineer", "promptTemplate": "实现并验证变更。"},
+            )
+        ],
+        edges=[],
+        roles=[
+            Role(
+                id="engineer",
+                name="实现工程师",
+                description="负责交付可维护的代码。",
+                instructions="只修改任务范围内的文件，并运行相关测试。",
+            )
+        ],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+
+    prompt, artifacts = _build_effective_agent_prompt(
+        workflow=workflow,
+        run_id="run-1",
+        node_id="agent-1",
+        user_prompt="修复登录流程。",
+        node_states={},
+        artifacts=[],
+        project_root=Path.cwd(),
+        now=NOW,
+    )
+
+    assert prompt == (
+        "角色定义：\n"
+        "角色名：实现工程师\n"
+        "说明：负责交付可维护的代码。\n"
+        "职责与边界：只修改任务范围内的文件，并运行相关测试。\n\n"
+        "节点执行要求：\n实现并验证变更。\n\n"
+        "用户任务：\n修复登录流程。"
+    )
+    assert artifacts == []
+
+
+def test_effective_agent_prompt_without_role_id_preserves_existing_format() -> None:
+    workflow = WorkflowDefinition(
+        id="workflow-1",
+        name="Prompt workflow",
+        version="v1",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(
+                id="agent-1",
+                name="Implement",
+                kind="agent",
+                agent={"promptTemplate": "实现并验证变更。"},
+            )
+        ],
+        edges=[],
+        roles=[],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+
+    prompt, artifacts = _build_effective_agent_prompt(
+        workflow=workflow,
+        run_id="run-1",
+        node_id="agent-1",
+        user_prompt="修复登录流程。",
+        node_states={},
+        artifacts=[],
+        project_root=Path.cwd(),
+        now=NOW,
+    )
+
+    assert prompt == "节点执行要求：\n实现并验证变更。\n\n用户任务：\n修复登录流程。"
+    assert artifacts == []
+
+
+def test_effective_agent_prompt_uses_agent_role_id_not_business_node_role() -> None:
+    workflow = WorkflowDefinition(
+        id="workflow-1",
+        name="Prompt workflow",
+        version="v1",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(
+                id="agent-1",
+                name="Implement",
+                kind="agent",
+                role="business-role",
+                agent={"roleId": "engineer"},
+            )
+        ],
+        edges=[],
+        roles=[
+            Role(
+                id="business-role",
+                name="业务审批角色",
+                instructions="此业务角色定义不得出现在执行提示中。",
+            ),
+            Role(
+                id="engineer",
+                name="实现工程师",
+                instructions="交付并验证任务范围内的代码。",
+            ),
+        ],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+
+    prompt, artifacts = _build_effective_agent_prompt(
+        workflow=workflow,
+        run_id="run-1",
+        node_id="agent-1",
+        user_prompt="",
+        node_states={},
+        artifacts=[],
+        project_root=Path.cwd(),
+        now=NOW,
+    )
+
+    assert "角色名：实现工程师" in prompt
+    assert "交付并验证任务范围内的代码。" in prompt
+    assert "业务审批角色" not in prompt
+    assert "此业务角色定义不得出现在执行提示中。" not in prompt
+    assert artifacts == []
 
 
 class FakeProvider:
@@ -106,6 +247,23 @@ def copy_fixture_project(tmp_path: Path, fixture_name: str) -> Path:
     project_path = tmp_path / fixture_name
     copytree(FIXTURES / fixture_name, project_path)
     return project_path
+
+
+def test_import_project_without_workflow_succeeds_without_a_default_workflow(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = tmp_path / "empty_project"
+    project_path.mkdir()
+
+    imported = service.import_project(project_path, now=NOW)
+    assert imported["workflowBindingStatus"] == "unbound"
+    assert imported["workflowVersionId"] is None
+    assert imported["workflowId"] is None
+    assert imported["createdDefaultWorkflow"] is False
+    assert service.get_project_workflow_binding(imported["projectId"]) is None
+    assert not (project_path / "workflow.yaml").exists()
+    assert not (project_path / ".harness").exists()
 
 
 def trusted_human() -> Actor:
@@ -923,6 +1081,29 @@ def test_runtime_service_starts_agent_for_existing_run_node_without_advancing_pr
     assert current.nodeStates == run.nodeStates
 
 
+def test_runtime_service_starts_an_agent_in_a_project_worktree(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project_path = copy_harness_project(tmp_path)
+    project = service.import_project(project_path, now=NOW)
+    run = service.create_run(project["workflowVersionId"], title="Worktree Agent Run", now=NOW)
+    worktree = project_path / ".workflow-platform" / "worktrees" / "dev"
+    worktree.mkdir(parents=True)
+
+    job = service.start_agent_job(
+        run.runId,
+        node_id="plan",
+        provider="fake",
+        prompt="在 dev worktree 中实现变更",
+        actor=AGENT_ACTOR,
+        cwd=str(worktree),
+        now=NOW,
+    )
+
+    assert job["cwd"] == str(worktree.resolve())
+
+
 def test_runtime_service_rejects_saving_workflow_versions_with_compiler_diagnostics(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)
@@ -1338,6 +1519,35 @@ def test_runtime_service_rejects_agent_for_unknown_node(tmp_path) -> None:
             actor=AGENT_ACTOR,
             now=NOW,
         )
+
+
+def test_run_execution_workspace_is_reused_by_default_agent_jobs(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project_path = copy_harness_project(tmp_path)
+    worktree = project_path / ".workflow-platform" / "worktrees" / "dev"
+    worktree.mkdir(parents=True)
+    project = service.import_project(project_path, now=NOW)
+
+    run = service.create_run(
+        project["workflowVersionId"],
+        title="Worktree Run",
+        execution_workspace=str(worktree),
+        now=NOW,
+    )
+    job = service.start_agent_job(
+        run.runId,
+        node_id="plan",
+        provider="fake",
+        prompt="在工作树中修改文件",
+        actor=AGENT_ACTOR,
+        mode="automatic",
+        now=NOW,
+    )
+
+    assert service.list_runs_for_workflow_version(project["workflowVersionId"])[0]["context"]["executionWorkspace"] == str(worktree)
+    assert job["cwd"] == str(worktree)
 
 
 def _create_interactive_agent_job(

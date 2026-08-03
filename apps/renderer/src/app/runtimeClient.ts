@@ -9,6 +9,7 @@ export type RuntimeWorkbenchState = {
   timeline: Array<{ id: string; type: string; nodeId?: string; createdAt: string }>;
   artifacts: Array<{
     id: string;
+    runId?: string;
     nodeId?: string;
     type: string;
     uri: string;
@@ -50,9 +51,38 @@ export type RuntimeWorkbenchState = {
 
 type RuntimeImportResult = {
   projectId: string;
-  workflowVersionId: string;
+  workflowVersionId?: string;
   workflowId?: string;
   workflowName?: string;
+  createdDefaultWorkflow?: boolean;
+  workflowBindingStatus: "bound" | "unbound";
+};
+
+export type WorkflowLibraryItem = {
+  workflowId: string;
+  name: string;
+  isBuiltin: boolean;
+  archivedAt: string | null;
+  updatedAt: string;
+  workflowVersionId: string | null;
+  currentVersion: string | null;
+  nodeCount: number;
+  boundProjectCount: number;
+};
+
+export type ProjectWorkflowBinding = {
+  projectId: string;
+  workflowId: string;
+  workflowVersionId: string;
+  actor: Record<string, unknown>;
+  boundAt: string;
+  workflowBindingStatus: "bound";
+};
+
+export type WorkflowCreateResult = {
+  workflowId: string;
+  workflowVersionId: string;
+  isBuiltin: boolean;
 };
 
 export type AgentJobSummary = {
@@ -216,6 +246,7 @@ export type WorkflowDefinitionSummary = {
     id: string;
     name: string;
     kind: string;
+    role?: string;
     description?: string;
     artifacts?: {
       outputs: Array<{
@@ -229,6 +260,7 @@ export type WorkflowDefinitionSummary = {
       }>;
     };
     agent?: {
+      roleId?: string;
       promptTemplate?: string;
       context?: {
         upstream: "none" | "direct" | "ancestors";
@@ -241,7 +273,7 @@ export type WorkflowDefinitionSummary = {
     advance?: { mode: "manual" | "auto" };
   }>;
   edges: Array<{ id: string; from: string; to: string }>;
-  roles: Array<{ id: string; name: string }>;
+  roles: WorkflowRoleSummary[];
   gates: Array<{
     id: string;
     name: string;
@@ -249,7 +281,28 @@ export type WorkflowDefinitionSummary = {
     metadata?: Record<string, unknown>;
   }>;
   policies: Record<string, unknown>;
-  metadata: Record<string, unknown>;
+  metadata: Record<string, unknown> & {
+    canvas?: {
+      nodes?: Record<string, { x: number; y: number }>;
+    };
+  };
+};
+
+export type WorkflowRoleSummary = {
+  id: string;
+  name: string;
+  purpose?: string;
+  description?: string;
+  instructions?: string;
+  inputRequirements?: string;
+  outputRequirements?: string;
+  acceptanceCriteria?: string;
+  forbiddenActions?: string;
+  provider?: "codex" | "claude";
+  model?: string;
+  allowedTools?: string[];
+  disabled?: boolean;
+  metadata?: Record<string, unknown>;
 };
 
 export type CompiledWorkflowSummary = {
@@ -355,6 +408,7 @@ export type RunSummary = {
 export type RunConfiguration = {
   taskGoal: string;
   parameters: Record<string, unknown>;
+  executionWorkspace?: string;
 };
 
 export type DeploymentSummary = {
@@ -668,6 +722,37 @@ export function createRuntimeClient(apiBaseUrl: string) {
         actor: HUMAN_ACTOR,
         now,
       }),
+    listWorkflows: () => request<WorkflowLibraryItem[]>(apiBaseUrl, "/workflows"),
+    createWorkflow: (definition: WorkflowDefinitionSummary, isBuiltin: boolean, now: string) =>
+      request<WorkflowCreateResult>(apiBaseUrl, "/workflows", {
+        definition,
+        isBuiltin,
+        actor: HUMAN_ACTOR,
+        now,
+      }),
+    copyWorkflowTemplate: (workflowId: string, name: string, now: string) =>
+      request<WorkflowCreateResult>(apiBaseUrl, `/workflows/${encodeURIComponent(workflowId)}/copy`, {
+        name,
+        actor: HUMAN_ACTOR,
+        now,
+      }),
+    archiveWorkflow: (workflowId: string, now: string) =>
+      request<{ workflowId: string; archived: boolean; archivedAt: string | null }>(
+        apiBaseUrl,
+        `/workflows/${encodeURIComponent(workflowId)}/archive`,
+        { actor: HUMAN_ACTOR, now },
+      ),
+    getProjectWorkflowBinding: (projectId: string) =>
+      request<ProjectWorkflowBinding | null>(
+        apiBaseUrl,
+        `/projects/${encodeURIComponent(projectId)}/workflow-binding`,
+      ),
+    bindProjectWorkflow: (projectId: string, workflowId: string, workflowVersionId: string, now: string) =>
+      request<ProjectWorkflowBinding>(
+        apiBaseUrl,
+        `/projects/${encodeURIComponent(projectId)}/workflow-binding`,
+        { workflowId, workflowVersionId, actor: HUMAN_ACTOR, now },
+      ),
     createRun: (
       workflowVersionId: string,
       title: string,
@@ -679,6 +764,7 @@ export function createRuntimeClient(apiBaseUrl: string) {
         title,
         taskGoal: configuration.taskGoal,
         parameters: configuration.parameters,
+        executionWorkspace: configuration.executionWorkspace,
         now,
       }),
     listRunsForWorkflowVersion: (workflowVersionId: string) =>
@@ -788,6 +874,17 @@ export function createRuntimeClient(apiBaseUrl: string) {
       request<RuntimeWorkbenchState["timeline"]>(apiBaseUrl, `/runs/${runId}/timeline`),
     listArtifacts: (runId: string) =>
       request<RuntimeWorkbenchState["artifacts"]>(apiBaseUrl, `/runs/${runId}/artifacts`),
+    extractArtifactsToKnowledgeSyntheses: (
+      runId: string,
+      artifactIds: string[],
+      provider: KnowledgeSynthesis["provider"],
+      now: string,
+    ) =>
+      request<{ runId: string; items: Array<{ artifactId: string; candidateId: string; synthesisId: string; status: KnowledgeSynthesis["status"] }> }>(
+        apiBaseUrl,
+        `/runs/${runId}/artifacts/knowledge-syntheses`,
+        { artifactIds, provider, actor: HUMAN_ACTOR, now },
+      ),
     getNodeArtifactRequirements: (runId: string, nodeId: string) =>
       request<NodeArtifactRequirements>(
         apiBaseUrl,
@@ -901,13 +998,16 @@ export function createRuntimeClient(apiBaseUrl: string) {
       prompt: string,
       now: string,
       mode: "automatic" | "interactive" = "automatic",
+      allowedTools: string[] = [],
+      cwd?: string,
     ) =>
       request<AgentStartResult>(apiBaseUrl, `/runs/${runId}/agents`, {
         nodeId,
         provider,
         prompt,
         actor: mode === "interactive" ? HUMAN_ACTOR : AGENT_ACTOR,
-        allowedTools: [],
+        allowedTools,
+        cwd,
         timeoutSeconds: 300,
         maxOutputBytes: 1_000_000,
         mode,

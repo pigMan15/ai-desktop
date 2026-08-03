@@ -34,11 +34,13 @@ from workflow_platform.persistence.repositories import (
     KnowledgeSynthesisRepository,
     KnowledgeSynthesisOutputRepository,
     ProjectRepository,
+    ProjectWorkflowBindingRepository,
     ProjectionRepository,
     RunEventRepository,
     RunRepository,
     TerminalSessionRepository,
     WorkflowVersionRepository,
+    WorkflowAssetRepository,
 )
 
 
@@ -52,6 +54,8 @@ class WorkflowRuntimeService:
         self._db = db
         self._projects = ProjectRepository(db)
         self._workflow_versions = WorkflowVersionRepository(db)
+        self._workflow_assets = WorkflowAssetRepository(db)
+        self._workflow_bindings = ProjectWorkflowBindingRepository(db)
         self._runs = RunRepository(db)
         self._events = RunEventRepository(db)
         self._projections = ProjectionRepository(db)
@@ -79,17 +83,21 @@ class WorkflowRuntimeService:
         project_path = project_path.resolve()
         detections = self._adapter_registry.detect(project_path)
         if not detections:
-            raise ValueError("ADAPTER_UNSUPPORTED: 未检测到支持的 workflow")
-
-        detection = detections[0]
-        adapter = self._adapter_registry.adapter_for(detection.adapter_id)
-        workflow = adapter.import_workflow(project_path)
-        _require_valid_workflow(workflow)
+            detection = {
+                "adapterId": None,
+                "name": "No workflow detected",
+                "score": 0,
+                "diagnostics": ["未检测到工作流定义，请在工作流库中创建或选择工作流后绑定项目"],
+            }
+            workflow = None
+        else:
+            detection = detections[0]
+            adapter = self._adapter_registry.adapter_for(detection.adapter_id)
+            workflow = adapter.import_workflow(project_path)
+        if workflow is not None:
+            _require_valid_workflow(workflow)
         project_id = _stable_id("project", project_path.as_posix())
-        workflow_version_id = _stable_id("workflow-version", f"{project_id}:{workflow.id}:{workflow.version}")
-        content_hash = hashlib.sha256(
-            workflow.model_dump_json(by_alias=True).encode("utf-8")
-        ).hexdigest()
+        workflow_version_id = None
 
         with self._lock:
             try:
@@ -98,17 +106,39 @@ class WorkflowRuntimeService:
                     id=project_id,
                     name=project_path.name,
                     root_path=project_path,
-                    active_protocol=detection.adapter_id,
+                    active_protocol=detection["adapterId"] if isinstance(detection, dict) else detection.adapter_id,
                     now=now,
                 )
-                self._workflow_versions.save(
-                    workflow,
-                    id=workflow_version_id,
-                    project_id=project_id,
-                    content_hash=content_hash,
-                    created_at=now,
-                    adapter_id=detection.adapter_id,
-                )
+                if workflow is not None:
+                    workflow_version_id = _stable_id(
+                        "workflow-version", f"{project_id}:{workflow.id}:{workflow.version}"
+                    )
+                    content_hash = hashlib.sha256(
+                        workflow.model_dump_json(by_alias=True).encode("utf-8")
+                    ).hexdigest()
+                    self._workflow_versions.save(
+                        workflow,
+                        id=workflow_version_id,
+                        project_id=project_id,
+                        content_hash=content_hash,
+                        created_at=now,
+                        adapter_id=detection["adapterId"] if isinstance(detection, dict) else detection.adapter_id,
+                    )
+                    self._workflow_assets.save(
+                        id=workflow.id,
+                        name=workflow.name,
+                        is_builtin=False,
+                        actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
+                        now=now,
+                        workflow_version_id=workflow_version_id,
+                    )
+                    self._workflow_bindings.bind(
+                        project_id=project_id,
+                        workflow_id=workflow.id,
+                        workflow_version_id=workflow_version_id,
+                        actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
+                        now=now,
+                    )
                 self._db.commit()
             except Exception:
                 self._db.rollback()
@@ -117,7 +147,11 @@ class WorkflowRuntimeService:
         return {
             "projectId": project_id,
             "workflowVersionId": workflow_version_id,
-            **detection.model_dump(by_alias=True),
+            "workflowId": workflow.id if workflow is not None else None,
+            "workflowName": workflow.name if workflow is not None else None,
+            "createdDefaultWorkflow": False,
+            "workflowBindingStatus": "bound" if workflow is not None else "unbound",
+            **(detection if isinstance(detection, dict) else detection.model_dump(by_alias=True)),
         }
 
     def create_run(
@@ -127,6 +161,7 @@ class WorkflowRuntimeService:
         title: str,
         task_goal: str | None = None,
         parameters: dict[str, Any] | None = None,
+        execution_workspace: str | None = None,
         now: str,
     ) -> RunProjection:
         workflow = self._workflow_versions.get(workflow_version_id)
@@ -135,18 +170,37 @@ class WorkflowRuntimeService:
 
         _require_valid_workflow(workflow)
 
-        row = self._db.execute(
-            "SELECT project_id FROM workflow_versions WHERE id = ?",
-            (workflow_version_id,),
-        ).fetchone()
-        if row is None:
+        version = self._workflow_versions.metadata(workflow_version_id)
+        if version is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
-        project_id = row["project_id"]
+        workflow_id = version["workflow_id"]
+        asset = self._workflow_assets.get(workflow_id)
+        if asset is None:
+            raise ValueError("WORKFLOW_ASSET_NOT_FOUND: 工作流资产不存在")
+        if asset["archived_at"] is not None:
+            raise ValueError("WORKFLOW_ARCHIVED: 工作流已归档，无法创建新的 Run")
+        binding = self._workflow_bindings.first_for_workflow(workflow_id)
+        if binding is None:
+            raise ValueError("PROJECT_WORKFLOW_UNBOUND: 请先为项目绑定工作流后再创建 Run")
+        # Explicit historical versions remain compatible, but they must belong to
+        # the same bound workflow asset and cannot be borrowed from another asset.
+        if binding["workflow_id"] != workflow_id:
+            raise ValueError("PROJECT_WORKFLOW_BINDING_MISMATCH: 工作流版本不属于项目绑定资产")
+        project_id = binding["project_id"]
+        project_root_row = self._db.execute(
+            "SELECT root_path FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if project_root_row is None:
+            raise KeyError(f"Project not found: {project_id}")
+        workspace = validate_safe_path(project_root_row["root_path"], execution_workspace or ".")
+        if not workspace.is_dir():
+            raise ValueError(f"RUN_WORKSPACE_INVALID: 执行工作区不存在：{workspace}")
         run_id = _stable_id("run", f"{workflow_version_id}:{title}:{now}")
         actor = Actor(id="runtime", type="system", source="runtime", trusted=True)
         context = {
             "taskGoal": (task_goal or "").strip(),
             "parameters": dict(parameters or {}),
+            "executionWorkspace": str(workspace) if execution_workspace else "",
         }
         created_event = RunEvent(
             id=f"{run_id}:event:1",
@@ -186,6 +240,146 @@ class WorkflowRuntimeService:
                 raise
 
         return projection
+
+    def list_workflows(self) -> list[dict]:
+        return [
+            {
+                "workflowId": item["workflow_id"],
+                "name": item["name"],
+                "isBuiltin": bool(item["is_builtin"]),
+                "archivedAt": item["archived_at"],
+                "updatedAt": item["updated_at"],
+                "workflowVersionId": item["current_workflow_version_id"],
+                "currentVersion": item["current_version"],
+                "nodeCount": item["node_count"] or 0,
+                "boundProjectCount": item["bound_project_count"],
+            }
+            for item in self._workflow_assets.list()
+        ]
+
+    def create_workflow(self, *, definition: dict, is_builtin: bool, actor: dict, now: str) -> dict:
+        creator = require_trusted_human(actor, operation="创建工作流")
+        workflow = WorkflowDefinition.model_validate(definition)
+        _require_valid_workflow(workflow)
+        if self._workflow_assets.get(workflow.id) is not None:
+            raise ValueError(f"WORKFLOW_ALREADY_EXISTS: 工作流已存在：{workflow.id}")
+        content_hash = hashlib.sha256(workflow.model_dump_json(by_alias=True).encode("utf-8")).hexdigest()
+        version_id = _stable_id("workflow-version", f"workflow-library:{workflow.id}:{content_hash}:{now}")
+        library_project_id = "project-workflow-library"
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._projects.save(
+                    id=library_project_id,
+                    name="Workflow Library",
+                    root_path=Path.cwd(),
+                    active_protocol="workflow-library",
+                    now=now,
+                )
+                self._workflow_versions.save(
+                    workflow,
+                    id=version_id,
+                    project_id=library_project_id,
+                    content_hash=content_hash,
+                    created_at=now,
+                    adapter_id="workflow-library",
+                )
+                self._workflow_assets.save(
+                    id=workflow.id,
+                    name=workflow.name,
+                    is_builtin=is_builtin,
+                    actor=creator.model_dump(by_alias=True),
+                    now=now,
+                    workflow_version_id=version_id,
+                )
+                self._audit.record(
+                    actor=creator,
+                    action="workflow.created",
+                    resource=f"workflow:{workflow.id}",
+                    detail={"workflowVersionId": version_id, "isBuiltin": is_builtin},
+                    created_at=now,
+                )
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"workflowId": workflow.id, "workflowVersionId": version_id, "isBuiltin": is_builtin}
+
+    def copy_workflow_template(self, workflow_id: str, *, name: str, actor: dict, now: str) -> dict:
+        copier = require_trusted_human(actor, operation="复制工作流模板")
+        source = self._workflow_assets.get(workflow_id)
+        if source is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        if source["archived_at"] is not None:
+            raise ValueError("WORKFLOW_ARCHIVED: 已归档工作流不能复制")
+        source_definition = self._workflow_versions.get(source["current_workflow_version_id"])
+        if source_definition is None:
+            raise KeyError(f"Workflow version not found: {source['current_workflow_version_id']}")
+        copied = source_definition.model_copy(
+            update={"id": f"workflow-{uuid4()}", "name": name.strip() or f"{source_definition.name} 副本", "version": "1"}
+        )
+        return self.create_workflow(
+            definition=copied.model_dump(by_alias=True),
+            is_builtin=False,
+            actor=copier.model_dump(by_alias=True),
+            now=now,
+        )
+
+    def archive_workflow(self, workflow_id: str, *, actor: dict, now: str) -> dict:
+        archivist = require_trusted_human(actor, operation="归档工作流")
+        asset = self._workflow_assets.get(workflow_id)
+        if asset is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        if asset["is_builtin"]:
+            raise ValueError("BUILTIN_WORKFLOW_READ_ONLY: 内置模板不可归档")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                archived = self._workflow_assets.archive(workflow_id, now=now)
+                if archived:
+                    self._audit.record(actor=archivist, action="workflow.archived", resource=f"workflow:{workflow_id}", detail={}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"workflowId": workflow_id, "archived": archived, "archivedAt": now if archived else asset["archived_at"]}
+
+    def get_project_workflow_binding(self, project_id: str) -> dict | None:
+        if not self._projects.exists(project_id):
+            raise KeyError(f"Project not found: {project_id}")
+        binding = self._workflow_bindings.get(project_id)
+        if binding is None:
+            return None
+        return {
+            "projectId": binding["project_id"], "workflowId": binding["workflow_id"],
+            "workflowVersionId": binding["workflow_version_id"], "actor": binding["actor"],
+            "boundAt": binding["bound_at"], "workflowBindingStatus": "bound",
+        }
+
+    def bind_project_workflow(self, project_id: str, *, workflow_id: str, workflow_version_id: str, actor: dict, now: str) -> dict:
+        binder = require_trusted_human(actor, operation="绑定项目工作流")
+        if not self._projects.exists(project_id):
+            raise KeyError(f"Project not found: {project_id}")
+        asset = self._workflow_assets.get(workflow_id)
+        if asset is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        if asset["archived_at"] is not None:
+            raise ValueError("WORKFLOW_ARCHIVED: 已归档工作流不能绑定项目")
+        version = self._workflow_versions.metadata(workflow_version_id)
+        if version is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        if version["workflow_id"] != workflow_id:
+            raise ValueError("WORKFLOW_VERSION_OWNERSHIP_INVALID: 工作流版本不属于指定工作流")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._workflow_bindings.bind(project_id=project_id, workflow_id=workflow_id, workflow_version_id=workflow_version_id, actor=binder.model_dump(by_alias=True), now=now)
+                self._audit.record(actor=binder, action="project.workflow.bound", resource=f"project:{project_id}", detail={"workflowId": workflow_id, "workflowVersionId": workflow_version_id}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return self.get_project_workflow_binding(project_id) or {}
 
     def archive_project(self, project_id: str, *, actor: dict, now: str) -> dict:
         archivist = require_trusted_human(actor, operation="归档项目")
@@ -327,6 +521,9 @@ class WorkflowRuntimeService:
         base = self._workflow_versions.get(workflow_version_id)
         if base is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        asset = self._workflow_assets.get(base.id)
+        if asset is not None and asset["is_builtin"]:
+            raise ValueError("BUILTIN_WORKFLOW_READ_ONLY: 内置模板只能复制后编辑")
         editor = require_trusted_human(actor, operation="保存工作流版本")
         candidate = WorkflowDefinition.model_validate(definition)
         _require_valid_workflow(candidate)
@@ -365,6 +562,7 @@ class WorkflowRuntimeService:
                     created_at=now,
                     adapter_id=row["adapter_id"],
                 )
+                self._workflow_assets.update_current_version(saved_definition.id, new_version_id, now=now)
                 self._audit.record(
                     actor=editor,
                     action="workflow.version.created",
@@ -406,14 +604,15 @@ class WorkflowRuntimeService:
             raise ValueError(f"ARTIFACT_STATUS_INVALID: unsupported artifact status {artifact_status}")
         workflow = self._runs.workflow_for_run(run_id)
         project_root = self._runs.project_root_for_run(run_id)
-        safe_path = validate_safe_path(project_root, artifact_path)
+        execution_workspace = self._runs.execution_workspace_for_run(run_id)
+        safe_path = validate_safe_path(execution_workspace, artifact_path)
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
         if node is None:
             raise ValueError(f"ARTIFACT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
         if node.artifacts.outputs:
             artifact_spec_id = artifact_spec_id or _matching_artifact_spec_id(
                 workflow=workflow,
-                project_root=project_root,
+                project_root=execution_workspace,
                 run_id=run_id,
                 node_id=node_id,
                 artifact_path=safe_path,
@@ -441,7 +640,7 @@ class WorkflowRuntimeService:
                 (output.templatePath for output in node.artifacts.outputs if output.id == artifact_spec_id),
                 None,
             ),
-            "relative_path": safe_path.relative_to(project_root.resolve()).as_posix(),
+            "relative_path": safe_path.relative_to(execution_workspace.resolve()).as_posix(),
             "file_size": safe_path.stat().st_size,
             "media_type": _artifact_media_type(safe_path),
         }
@@ -512,7 +711,7 @@ class WorkflowRuntimeService:
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
         if node is None:
             raise ValueError(f"ARTIFACT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
-        project_root = self._runs.project_root_for_run(run_id)
+        project_root = self._runs.execution_workspace_for_run(run_id)
         projection = self.get_projection(run_id)
         if projection.revision != expected_revision:
             raise ValueError("REVISION_CONFLICT: Expected revision does not match current revision")
@@ -763,7 +962,7 @@ class WorkflowRuntimeService:
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
         if node is None:
             raise ValueError(f"ARTIFACT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
-        project_root = self._runs.project_root_for_run(run_id)
+        project_root = self._runs.execution_workspace_for_run(run_id)
         artifacts = self._artifacts.list_for_run(run_id)
         requirements = []
         for output in node.artifacts.outputs:
@@ -789,7 +988,7 @@ class WorkflowRuntimeService:
 
     def get_node_context(self, run_id: str, *, node_id: str, now: str) -> dict:
         workflow = self._runs.workflow_for_run(run_id)
-        project_root = self._runs.project_root_for_run(run_id)
+        project_root = self._runs.execution_workspace_for_run(run_id)
         context = AgentContextBuilder().build(
             workflow=workflow,
             node_id=node_id,
@@ -876,7 +1075,7 @@ class WorkflowRuntimeService:
     def preview_artifact(self, run_id: str, artifact_id: str) -> dict:
         with self._lock:
             artifact = self._artifacts.get_for_run(run_id, artifact_id)
-            project_root = self._runs.project_root_for_run(run_id)
+            project_root = self._runs.execution_workspace_for_run(run_id)
             safe_path = validate_safe_path(project_root, _file_uri_to_path(artifact["uri"]))
             size_bytes = safe_path.stat().st_size
             raw_content = safe_path.read_bytes()
@@ -902,6 +1101,67 @@ class WorkflowRuntimeService:
                 "truncated": truncated,
                 "content": content,
             }
+
+    def extract_artifacts_to_knowledge_syntheses(
+        self,
+        run_id: str,
+        *,
+        artifact_ids: list[str],
+        provider: str,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        reviewer = require_trusted_human(actor, operation="从产物启动知识 CLI 合成")
+        if not artifact_ids or any(not isinstance(artifact_id, str) or not artifact_id.strip() for artifact_id in artifact_ids):
+            raise ValueError("KNOWLEDGE_EXTRACTION_INPUT_INVALID: 至少选择一个有效产物。")
+        if len(set(artifact_ids)) != len(artifact_ids):
+            raise ValueError("KNOWLEDGE_EXTRACTION_INPUT_INVALID: 不能重复选择同一个产物。")
+
+        prepared: list[tuple[dict, dict]] = []
+        for artifact_id in artifact_ids:
+            artifact = self._artifacts.get_for_run(run_id, artifact_id)
+            if artifact["status"] != "verified":
+                raise ValueError(f"KNOWLEDGE_EXTRACTION_ARTIFACT_INVALID: 产物未完成验证：{artifact_id}")
+            preview = self.preview_artifact(run_id, artifact_id)
+            if preview["integrity"] != "verified":
+                raise ValueError(f"KNOWLEDGE_EXTRACTION_ARTIFACT_CHANGED: 产物内容已变化：{artifact_id}")
+            if preview["truncated"]:
+                raise ValueError(f"KNOWLEDGE_EXTRACTION_ARTIFACT_TRUNCATED: 产物超过可合成大小：{artifact_id}")
+            if preview["content"] is None or not preview["content"].strip():
+                raise ValueError(f"KNOWLEDGE_EXTRACTION_ARTIFACT_TEXT_REQUIRED: 产物必须是非空 UTF-8 文本：{artifact_id}")
+            prepared.append((artifact, preview))
+
+        items: list[dict] = []
+        for artifact, preview in prepared:
+            path = artifact.get("relativePath") or artifact["uri"]
+            candidate = self._knowledge.create_candidate(
+                title=artifact.get("artifactSpecId") or f"{artifact['type']} - {path}",
+                content=preview["content"],
+                source=f"run:{run_id}:artifact:{artifact['id']}",
+                actor=reviewer.model_dump(),
+                now=now,
+            )
+            self._knowledge.review_candidate(
+                candidate["id"],
+                decision="approved",
+                actor=reviewer.model_dump(),
+                comment="已验证产物由人工发起 CLI 提取；合成结果仍需人工审核后发布。",
+                now=now,
+            )
+            synthesis = self.start_knowledge_synthesis(
+                candidate["id"],
+                provider=provider,
+                actor=reviewer.model_dump(),
+                now=now,
+            )
+            items.append({
+                "artifactId": artifact["id"],
+                "candidateId": candidate["id"],
+                "synthesisId": synthesis["id"],
+                "status": synthesis["status"],
+            })
+
+        return {"runId": run_id, "items": items}
 
     def get_evidence_package(self, run_id: str) -> dict:
         projection = self.get_projection(run_id)
@@ -1017,7 +1277,7 @@ class WorkflowRuntimeService:
             workflow = self._runs.workflow_for_run(run_id)
             if node_id not in {node.id for node in workflow.nodes}:
                 raise ValueError(f"TERMINAL_UNKNOWN_NODE: Node not found in workflow: {node_id}")
-            project_root = self._runs.project_root_for_run(run_id)
+            project_root = self._runs.execution_workspace_for_run(run_id)
             safe_cwd = validate_safe_path(project_root, cwd)
             session_id = f"terminal-session-{uuid4()}"
             project_id = self._runs.project_id_for_run(run_id)
@@ -1196,7 +1456,7 @@ class WorkflowRuntimeService:
 
             first_sequence = output[0]["sequence"]
             last_sequence = output[-1]["sequence"]
-            project_root = self._runs.project_root_for_run(run_id)
+            project_root = self._runs.execution_workspace_for_run(run_id)
             evidence_path = validate_safe_path(
                 project_root,
                 Path(".workflow-platform")
@@ -1549,6 +1809,7 @@ class WorkflowRuntimeService:
         node_id: str,
         provider: str,
         prompt: str,
+        cwd: str | None = None,
         actor: dict,
         now: str,
         allowed_tools: list[str] | None = None,
@@ -1569,6 +1830,10 @@ class WorkflowRuntimeService:
             raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
 
         project_root = self._runs.project_root_for_run(run_id)
+        configured_workspace = self._runs.execution_workspace_for_run(run_id)
+        execution_cwd = validate_safe_path(project_root, cwd or configured_workspace)
+        if not execution_cwd.is_dir():
+            raise ValueError(f"AGENT_CWD_INVALID: Agent 工作目录不存在：{execution_cwd}")
         job_id = f"agent-job-{uuid4()}"
         effective_prompt, context_artifacts = _build_effective_agent_prompt(
             workflow=workflow,
@@ -1577,13 +1842,13 @@ class WorkflowRuntimeService:
             user_prompt=prompt,
             node_states=self.get_projection(run_id).nodeStates,
             artifacts=self._artifacts.list_for_run(run_id),
-            project_root=project_root,
+            project_root=configured_workspace,
             now=now,
         )
         cli_provider = self._agent_provider_factory(provider)
         safe_allowed_tools = allowed_tools or []
         command = cli_provider.build_command(
-            cwd=project_root,
+            cwd=execution_cwd,
             prompt=effective_prompt,
             allowed_tools=safe_allowed_tools,
         )
@@ -1617,7 +1882,7 @@ class WorkflowRuntimeService:
                     if mode == "interactive"
                     else [command.executable, *command.args]
                 ),
-                cwd=str(project_root),
+                cwd=str(execution_cwd),
                 created_at=now,
                 mode=mode,
                 session_id=session_id,
@@ -1642,7 +1907,7 @@ class WorkflowRuntimeService:
                     run_id=run_id,
                     job_id=job_id,
                     provider=provider,
-                    cwd=str(project_root),
+                    cwd=str(execution_cwd),
                     max_output_bytes=max_output_bytes,
                     created_at=now,
                 )
@@ -1724,7 +1989,7 @@ class WorkflowRuntimeService:
                 result = executor.run(
                     job_id=job_id,
                     prompt=effective_prompt,
-                    cwd=project_root,
+                    cwd=execution_cwd,
                     project_root=project_root,
                     timeout_seconds=timeout_seconds,
                     max_output_bytes=max_output_bytes,
@@ -2048,6 +2313,7 @@ class WorkflowRuntimeService:
             node_id=job["nodeId"],
             provider=job["provider"],
             prompt="历史交互记录：\n" + "\n".join(history_lines),
+            cwd=job["cwd"],
             actor=actor,
             now=now,
             mode="interactive",
@@ -2278,7 +2544,8 @@ class WorkflowRuntimeService:
             raise ValueError(f"DEPLOY_NODE_KIND_INVALID: 节点 {node_id} 不是 deploy 节点。")
 
         project_root = self._runs.project_root_for_run(run_id)
-        command, cwd, timeout_seconds, max_output_bytes = _deployment_configuration(node, project_root)
+        execution_workspace = self._runs.execution_workspace_for_run(run_id)
+        command, cwd, timeout_seconds, max_output_bytes = _deployment_configuration(node, execution_workspace)
         deployment_id = f"deployment-{uuid4()}"
         output_sequence = 0
 
@@ -2345,7 +2612,7 @@ class WorkflowRuntimeService:
 
             try:
                 log_path = validate_safe_path(
-                    project_root,
+                    execution_workspace,
                     Path(".workflow-platform") / "deployments" / f"{deployment_id}.log",
                 )
                 log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2915,7 +3182,10 @@ class WorkflowRuntimeService:
     def _project_root_for_knowledge_source(self, source: str) -> Path:
         if not source.startswith("run:") or not source.removeprefix("run:").strip():
             raise ValueError("KNOWLEDGE_SYNTHESIS_SOURCE_INVALID: 知识候选必须关联有效 Run 才能启动 CLI 合成。")
-        return self._runs.project_root_for_run(source.removeprefix("run:").strip())
+        run_id = source.removeprefix("run:").split(":", 1)[0].strip()
+        if not run_id:
+            raise ValueError("KNOWLEDGE_SYNTHESIS_SOURCE_INVALID: 知识候选必须关联有效 Run 才能启动 CLI 合成。")
+        return self._runs.execution_workspace_for_run(run_id)
 
 
 def _added_items(before: list, after: list) -> list[dict]:
@@ -2990,6 +3260,64 @@ def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}-{uuid5(NAMESPACE_URL, value)}"
 
 
+def _default_workflow_for_project(project_path: Path) -> WorkflowDefinition:
+    project_name = project_path.name or "新项目"
+    return WorkflowDefinition.model_validate(
+        {
+            "id": _stable_id("workflow", project_path.as_posix()),
+            "name": f"{project_name} 工作流",
+            "version": "1",
+            "sourceAdapter": "platform-default",
+            "nodes": [
+                {
+                    "id": "understand",
+                    "name": "需求澄清",
+                    "kind": "task",
+                    "description": "明确目标、范围、约束与验收标准。",
+                },
+                {
+                    "id": "plan",
+                    "name": "方案设计",
+                    "kind": "task",
+                    "description": "产出可执行的实施方案和验证计划。",
+                },
+                {
+                    "id": "implement",
+                    "name": "实施交付",
+                    "kind": "task",
+                    "description": "完成实现并记录交付内容。",
+                },
+                {
+                    "id": "verify",
+                    "name": "验收验证",
+                    "kind": "task",
+                    "description": "验证结果符合既定验收标准。",
+                },
+            ],
+            "edges": [
+                {"id": "understand-plan", "from": "understand", "to": "plan"},
+                {"id": "plan-implement", "from": "plan", "to": "implement"},
+                {"id": "implement-verify", "from": "implement", "to": "verify"},
+            ],
+            "roles": [],
+            "gates": [],
+            "policies": {},
+            "metadata": {
+                "generated": True,
+                "generatedForProject": project_path.as_posix(),
+                "canvas": {
+                    "nodes": {
+                        "understand": {"x": 0, "y": 0},
+                        "plan": {"x": 260, "y": 0},
+                        "implement": {"x": 520, "y": 0},
+                        "verify": {"x": 780, "y": 0},
+                    }
+                },
+            },
+        }
+    )
+
+
 def _workflow_node_summary(workflow: WorkflowDefinition) -> str:
     names = [node.name for node in workflow.nodes[:3]]
     if len(workflow.nodes) > 3:
@@ -3021,6 +3349,25 @@ def _build_effective_agent_prompt(
         raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
 
     sections: list[str] = []
+    if node.agent.roleId:
+        role = next((candidate for candidate in workflow.roles if candidate.id == node.agent.roleId), None)
+        if role is not None:
+            role_lines = ["角色定义：", f"角色名：{role.name}"]
+            if role.purpose and role.purpose.strip():
+                role_lines.append(f"角色目标：{role.purpose.strip()}")
+            if role.description and role.description.strip():
+                role_lines.append(f"说明：{role.description.strip()}")
+            if role.instructions and role.instructions.strip():
+                role_lines.append(f"职责与边界：{role.instructions.strip()}")
+            if role.inputRequirements and role.inputRequirements.strip():
+                role_lines.append(f"输入上下文要求：{role.inputRequirements.strip()}")
+            if role.outputRequirements and role.outputRequirements.strip():
+                role_lines.append(f"输出与交付要求：{role.outputRequirements.strip()}")
+            if role.acceptanceCriteria and role.acceptanceCriteria.strip():
+                role_lines.append(f"验收标准：{role.acceptanceCriteria.strip()}")
+            if role.forbiddenActions and role.forbiddenActions.strip():
+                role_lines.append(f"禁止行为：{role.forbiddenActions.strip()}")
+            sections.append("\n".join(role_lines))
     if node.agent.promptTemplate and node.agent.promptTemplate.strip():
         sections.append(f"节点执行要求：\n{node.agent.promptTemplate.strip()}")
 

@@ -374,6 +374,34 @@ def migrate(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE {table_name} ADD COLUMN invalidation_reason TEXT")
     db.executescript(
         """
+        CREATE TABLE IF NOT EXISTS workflow_assets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_builtin INTEGER NOT NULL DEFAULT 0,
+            archived_at TEXT,
+            created_by_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            current_workflow_version_id TEXT,
+            FOREIGN KEY (current_workflow_version_id) REFERENCES workflow_versions(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_workflow_bindings (
+            project_id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            workflow_version_id TEXT NOT NULL,
+            actor_json TEXT NOT NULL,
+            bound_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (workflow_id) REFERENCES workflow_assets(id),
+            FOREIGN KEY (workflow_version_id) REFERENCES workflow_versions(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_assets_active_updated
+            ON workflow_assets(archived_at, updated_at DESC, id);
+        CREATE INDEX IF NOT EXISTS idx_project_workflow_bindings_workflow
+            ON project_workflow_bindings(workflow_id, workflow_version_id);
+
         CREATE TABLE IF NOT EXISTS artifact_consumers (
             id TEXT PRIMARY KEY,
             artifact_id TEXT NOT NULL,
@@ -390,6 +418,41 @@ def migrate(db: sqlite3.Connection) -> None:
             WHERE artifact_spec_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_artifact_consumers_artifact
             ON artifact_consumers(artifact_id, context_created_at, id);
+        """
+    )
+
+    # Existing workflow versions predate workflow_assets. Treat every historic
+    # workflow definition as a regular asset so existing projects remain usable.
+    db.execute(
+        """
+        INSERT OR IGNORE INTO workflow_assets (
+            id, name, is_builtin, archived_at, created_by_json,
+            created_at, updated_at, current_workflow_version_id
+        )
+        SELECT
+            json_extract(definition_json, '$.id'),
+            name,
+            0,
+            NULL,
+            '{}',
+            created_at,
+            created_at,
+            id
+        FROM workflow_versions
+        WHERE json_extract(definition_json, '$.id') IS NOT NULL
+        """
+    )
+    db.execute(
+        """
+        UPDATE workflow_assets
+        SET current_workflow_version_id = (
+            SELECT versions.id
+            FROM workflow_versions AS versions
+            WHERE json_extract(versions.definition_json, '$.id') = workflow_assets.id
+            ORDER BY versions.rowid DESC
+            LIMIT 1
+        )
+        WHERE current_workflow_version_id IS NULL
         """
     )
 

@@ -44,11 +44,37 @@ class CreateRunRequest(BaseModel):
     title: str
     taskGoal: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
+    executionWorkspace: str | None = None
     now: str
 
 
 class SaveWorkflowVersionRequest(BaseModel):
     definition: dict[str, Any]
+    actor: dict[str, Any]
+    now: str
+
+
+class CreateWorkflowRequest(BaseModel):
+    definition: dict[str, Any]
+    isBuiltin: bool = False
+    actor: dict[str, Any]
+    now: str
+
+
+class CopyWorkflowRequest(BaseModel):
+    name: str
+    actor: dict[str, Any]
+    now: str
+
+
+class ArchiveWorkflowRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
+class BindProjectWorkflowRequest(BaseModel):
+    workflowId: str
+    workflowVersionId: str
     actor: dict[str, Any]
     now: str
 
@@ -153,6 +179,7 @@ class StartAgentJobRequest(BaseModel):
     nodeId: str
     provider: str
     prompt: str
+    cwd: str | None = None
     actor: dict[str, Any]
     mode: str = "automatic"
     allowedTools: list[str] = Field(default_factory=list)
@@ -235,6 +262,13 @@ class PublishKnowledgeCandidateRequest(BaseModel):
 
 
 class StartKnowledgeSynthesisRequest(BaseModel):
+    provider: str
+    actor: dict[str, Any]
+    now: str
+
+
+class ExtractArtifactKnowledgeSynthesisRequest(BaseModel):
+    artifactIds: list[str] = Field(min_length=1)
     provider: str
     actor: dict[str, Any]
     now: str
@@ -555,6 +589,67 @@ def create_app(
         except ValueError as error:
             raise _http_error_from_value_error(error) from error
 
+    @application.get("/projects/{project_id}/workflow-binding")
+    def get_project_workflow_binding(project_id: str) -> dict[str, Any] | None:
+        service = _require_service(runtime_service)
+        try:
+            return service.get_project_workflow_binding(project_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.put("/projects/{project_id}/workflow-binding")
+    def bind_project_workflow(project_id: str, request: BindProjectWorkflowRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.bind_project_workflow(
+                project_id,
+                workflow_id=request.workflowId,
+                workflow_version_id=request.workflowVersionId,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/workflows")
+    def list_workflows() -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_workflows()
+
+    @application.post("/workflows")
+    def create_workflow(request: CreateWorkflowRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.create_workflow(
+                definition=request.definition,
+                is_builtin=request.isBuiltin,
+                actor=request.actor,
+                now=request.now,
+            )
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/workflows/{workflow_id}/copy")
+    def copy_workflow_template(workflow_id: str, request: CopyWorkflowRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.copy_workflow_template(workflow_id, name=request.name, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/workflows/{workflow_id}/archive")
+    def archive_workflow(workflow_id: str, request: ArchiveWorkflowRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.archive_workflow(workflow_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
     @application.get("/workflow-versions/{workflow_version_id}")
     def get_workflow_definition(workflow_version_id: str) -> dict[str, Any]:
         service = _require_service(runtime_service)
@@ -643,6 +738,7 @@ def create_app(
                 title=request.title,
                 task_goal=request.taskGoal,
                 parameters=request.parameters,
+                execution_workspace=request.executionWorkspace,
                 now=request.now,
             )
             return projection.model_dump()
@@ -754,6 +850,25 @@ def create_app(
             return service.list_artifacts(run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/runs/{run_id}/artifacts/knowledge-syntheses")
+    def extract_artifacts_to_knowledge_syntheses(
+        run_id: str,
+        request: ExtractArtifactKnowledgeSynthesisRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.extract_artifacts_to_knowledge_syntheses(
+                run_id,
+                artifact_ids=request.artifactIds,
+                provider=request.provider,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
 
     @application.get("/runs/{run_id}/artifacts/{artifact_id}/consumers")
     def get_artifact_consumers(run_id: str, artifact_id: str) -> list[dict[str, Any]]:
@@ -1076,6 +1191,7 @@ def create_app(
                 node_id=request.nodeId,
                 provider=request.provider,
                 prompt=request.prompt,
+                cwd=request.cwd,
                 actor=request.actor,
                 allowed_tools=request.allowedTools,
                 timeout_seconds=request.timeoutSeconds,

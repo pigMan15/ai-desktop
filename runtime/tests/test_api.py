@@ -12,9 +12,11 @@ from time import sleep
 import yaml
 
 from workflow_platform.adapters.generic_yaml import GenericYamlAdapter
+from workflow_platform.artifacts.service import hash_artifact
 from workflow_platform.execution.providers import CliCommand, CodexCliProvider
 from workflow_platform.api.app import app, create_app, create_runtime_app
 from workflow_platform.main import health, run
+from workflow_platform.models import Actor
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
 from workflow_platform.runtime_service import WorkflowRuntimeService
@@ -384,6 +386,67 @@ def test_runtime_app_factory_configures_service(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.json()["workflowVersionId"].startswith("workflow-version-")
+
+
+def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    project_path = tmp_path / "empty-project"
+    project_path.mkdir()
+    imported = client.post(
+        "/projects/import",
+        json={"projectPath": str(project_path), "now": NOW},
+    ).json()
+
+    assert imported["workflowBindingStatus"] == "unbound"
+    assert imported["workflowVersionId"] is None
+    assert client.post(
+        "/runs",
+        json={"workflowVersionId": "missing", "title": "unbound", "now": NOW},
+    ).status_code == 404
+
+    definition = yaml.safe_load(
+        (FIXTURES / "harness_project" / ".harness" / "workflow.yaml").read_text(encoding="utf-8")
+    )
+    definition["sourceAdapter"] = "workflow-library"
+    definition["metadata"] = {}
+    template = client.post(
+        "/workflows",
+        json={"definition": definition, "isBuiltin": True, "actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert template.status_code == 200, template.text
+    template_id = template.json()["workflowId"]
+    assert client.get("/workflows").json()[0]["isBuiltin"] is True
+    assert client.post(
+        f"/workflow-versions/{template.json()['workflowVersionId']}/save",
+        json={"definition": definition, "actor": HUMAN_ACTOR, "now": "2026-08-04T00:01:00Z"},
+    ).status_code == 400
+
+    copied = client.post(
+        f"/workflows/{template_id}/copy",
+        json={"name": "项目实施流程", "actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert copied.status_code == 200
+    assert copied.json()["isBuiltin"] is False
+    assert copied.json()["workflowId"] != template_id
+
+    bound = client.put(
+        f"/projects/{imported['projectId']}/workflow-binding",
+        json={
+            "workflowId": copied.json()["workflowId"],
+            "workflowVersionId": copied.json()["workflowVersionId"],
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert bound.status_code == 200
+    assert bound.json()["workflowBindingStatus"] == "bound"
+    assert client.get(f"/projects/{imported['projectId']}/workflow-binding").json()["workflowId"] == copied.json()["workflowId"]
+    assert client.post(
+        "/runs",
+        json={"workflowVersionId": template.json()["workflowVersionId"], "title": "cross asset", "now": NOW},
+    ).status_code == 400
 
 
 def test_runtime_api_returns_workflow_definition_and_compile_diagnostics(tmp_path) -> None:
@@ -1427,9 +1490,8 @@ def test_runtime_api_records_audited_knowledge_git_publication(tmp_path) -> None
 def test_runtime_api_synthesizes_approved_knowledge_with_cli_progress_feedback_and_publish(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)
-    client = TestClient(
-        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
-    )
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    client = TestClient(create_app(service))
     _project_path, run = import_project_and_create_run(client, tmp_path)
     candidate = client.post(
         "/knowledge/candidates",
@@ -1486,6 +1548,58 @@ def test_runtime_api_synthesizes_approved_knowledge_with_cli_progress_feedback_a
     assert feedback.json()["feedback"] == "保留 Gate 和回滚证据的措辞。"
     assert published.status_code == 200
     assert published.json()["content"] == "fake-cli: completed"
+
+
+def test_runtime_api_extracts_verified_artifacts_to_repeatable_knowledge_syntheses(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    client = TestClient(create_app(service))
+    project_path, run = import_project_and_create_run(client, tmp_path)
+    first_path = project_path / "first.md"
+    second_path = project_path / "second.md"
+    first_path.write_text("# First artifact\n\nReusable deployment guidance.", encoding="utf-8")
+    second_path.write_text("# Second artifact\n\nVerification checklist.", encoding="utf-8")
+    first = start_and_submit_plan(client, run, first_path)
+    service._artifacts.save(
+        id=f"{run['runId']}:artifact:report:1",
+        run_id=run["runId"],
+        node_id="plan",
+        type="report",
+        uri=second_path.as_uri(),
+        content_hash=hash_artifact(second_path),
+        producer=Actor.model_validate(AGENT_ACTOR),
+        created_at=NOW,
+    )
+    db.commit()
+    artifacts = client.get(f"/runs/{run['runId']}/artifacts").json()
+
+    extracted = client.post(
+        f"/runs/{run['runId']}/artifacts/knowledge-syntheses",
+        json={
+            "artifactIds": [artifact["id"] for artifact in artifacts],
+            "provider": "fake",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    extracted_again = client.post(
+        f"/runs/{run['runId']}/artifacts/knowledge-syntheses",
+        json={
+            "artifactIds": [artifacts[0]["id"]],
+            "provider": "fake",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert extracted.status_code == 200
+    assert len(extracted.json()["items"]) == 2
+    assert all(item["status"] == "QUEUED" for item in extracted.json()["items"])
+    assert extracted_again.status_code == 200
+    candidates = client.get("/knowledge/candidates").json()
+    assert len(candidates) == 3
+    assert sum(candidate["source"] == f"run:{run['runId']}:artifact:{artifacts[0]['id']}" for candidate in candidates) == 2
 
 
 def test_runtime_api_get_run_and_rebuild_projection_match_current_events(tmp_path) -> None:
@@ -1555,6 +1669,36 @@ def test_runtime_api_lists_multiple_runs_for_one_workflow_version(tmp_path) -> N
             "updatedAt": "2026-07-27T13:00:00Z",
         },
     ]
+
+
+def test_runtime_api_lists_runs_from_previous_versions_of_the_same_workflow(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    imported = client.post(
+        "/projects/import",
+        json={"projectPath": str(copy_harness_project(tmp_path)), "now": NOW},
+    ).json()
+    run = client.post(
+        "/runs",
+        json={
+            "workflowVersionId": imported["workflowVersionId"],
+            "title": "已完成的历史 Run",
+            "now": "2026-07-27T13:00:00Z",
+        },
+    ).json()
+    definition = client.get(f"/workflow-versions/{imported['workflowVersionId']}").json()
+    definition["nodes"][0]["name"] = "保存后的工作流版本"
+    saved = client.post(
+        f"/workflow-versions/{imported['workflowVersionId']}/save",
+        json={"definition": definition, "actor": HUMAN_ACTOR, "now": "2026-07-27T13:01:00Z"},
+    ).json()
+
+    response = client.get(f"/workflow-versions/{saved['workflowVersionId']}/runs")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == [run["runId"]]
+    assert response.json()[0]["title"] == "已完成的历史 Run"
 
 
 def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
