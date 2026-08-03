@@ -430,7 +430,7 @@ def migrate(db: sqlite3.Connection) -> None:
             created_at, updated_at, current_workflow_version_id
         )
         SELECT
-            json_extract(definition_json, '$.id'),
+            'workflow-asset:' || project_id || ':' || json_extract(definition_json, '$.id'),
             name,
             0,
             NULL,
@@ -440,6 +440,7 @@ def migrate(db: sqlite3.Connection) -> None:
             id
         FROM workflow_versions
         WHERE json_extract(definition_json, '$.id') IS NOT NULL
+        GROUP BY project_id, json_extract(definition_json, '$.id')
         """
     )
     db.execute(
@@ -448,11 +449,48 @@ def migrate(db: sqlite3.Connection) -> None:
         SET current_workflow_version_id = (
             SELECT versions.id
             FROM workflow_versions AS versions
-            WHERE json_extract(versions.definition_json, '$.id') = workflow_assets.id
+            WHERE workflow_assets.id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
             ORDER BY versions.rowid DESC
             LIMIT 1
         )
         WHERE current_workflow_version_id IS NULL
+        """
+    )
+    db.execute(
+        """
+        UPDATE project_workflow_bindings
+        SET workflow_id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
+        FROM workflow_versions AS versions
+        WHERE project_workflow_bindings.workflow_version_id = versions.id
+          AND project_workflow_bindings.workflow_id <> 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
+          AND EXISTS (
+              SELECT 1 FROM workflow_assets assets
+              WHERE assets.id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
+          )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO project_workflow_bindings (
+            project_id, workflow_id, workflow_version_id, actor_json, bound_at
+        )
+        SELECT project_id, workflow_id, workflow_version_id, '{"id":"migration","type":"system","source":"runtime","trusted":true}', bound_at
+        FROM (
+            SELECT
+                versions.project_id,
+                'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id') AS workflow_id,
+                versions.id AS workflow_version_id,
+                versions.created_at AS bound_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY versions.project_id, json_extract(versions.definition_json, '$.id')
+                    ORDER BY versions.rowid DESC
+                ) AS version_rank
+            FROM workflow_versions AS versions
+            JOIN workflow_assets AS assets
+              ON assets.id = 'workflow-asset:' || versions.project_id || ':' || json_extract(versions.definition_json, '$.id')
+        )
+        WHERE version_rank = 1
+        ON CONFLICT(project_id) DO NOTHING
         """
     )
 

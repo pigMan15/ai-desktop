@@ -8,6 +8,22 @@ afterEach(() => {
 });
 
 describe("runtimeClient", () => {
+  it("binds a project workflow with POST", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ workflowBindingStatus: "bound" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRuntimeClient("http://127.0.0.1:8765").bindProjectWorkflow(
+      "project-demo",
+      "workflow-demo",
+      "workflow-version-demo",
+      "2026-08-04T00:00:00Z",
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8765/projects/project-demo/workflow-binding");
+    expect(init.method).toBe("POST");
+  });
+
   it("在桌面环境通过 preload 代理调用 Runtime，避免 Renderer 持有本地令牌", async () => {
     const request = vi.fn(async () => ({ status: "ok", service: "workflow-runtime" }));
     const fetchMock = vi.fn();
@@ -563,6 +579,8 @@ describe("runtimeClient", () => {
       imported.workflowVersionId,
       "中文 Run",
       "2026-07-28T00:00:00Z",
+      undefined,
+      imported.projectId,
     );
     await client.startNode(created.runId, "plan", created.revision, "2026-07-28T00:00:00Z");
     await client.submitArtifact(
@@ -643,6 +661,10 @@ describe("runtimeClient", () => {
       provider: "fake",
       prompt: "请实现剩余内容",
       allowedTools: [],
+    });
+    expect(calls[1].body).toMatchObject({
+      projectId: "project-demo",
+      workflowVersionId: "workflow-version-demo",
     });
     expect(calls[5].body).toMatchObject({
       status: "waived",

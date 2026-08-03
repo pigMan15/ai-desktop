@@ -76,6 +76,7 @@ def import_project_and_create_run(client: TestClient, tmp_path, *, title: str = 
     run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": title,
             "now": NOW,
@@ -97,6 +98,7 @@ def test_runtime_api_persists_run_objective_and_parameters(tmp_path) -> None:
     created = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "生产发布准备",
             "taskGoal": "验证发布流程并生成可审计报告",
@@ -142,7 +144,7 @@ def test_runtime_api_scans_declared_node_artifacts(tmp_path) -> None:
     ).json()
     run = client.post(
         "/runs",
-        json={"workflowVersionId": saved["workflowVersionId"], "title": "扫描产物", "now": NOW},
+        json={"projectId": imported["projectId"], "workflowVersionId": saved["workflowVersionId"], "title": "扫描产物", "now": NOW},
     ).json()
     artifact = project_path / "docs" / "runs" / run["runId"] / "plan" / "plan.md"
     artifact.parent.mkdir(parents=True)
@@ -401,10 +403,11 @@ def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp
 
     assert imported["workflowBindingStatus"] == "unbound"
     assert imported["workflowVersionId"] is None
+    assert client.post("/runs", json={"title": "missing project", "now": NOW}).status_code == 400
     assert client.post(
         "/runs",
-        json={"workflowVersionId": "missing", "title": "unbound", "now": NOW},
-    ).status_code == 404
+        json={"projectId": imported["projectId"], "title": "unbound", "now": NOW},
+    ).status_code == 400
 
     definition = yaml.safe_load(
         (FIXTURES / "harness_project" / ".harness" / "workflow.yaml").read_text(encoding="utf-8")
@@ -431,7 +434,7 @@ def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp
     assert copied.json()["isBuiltin"] is False
     assert copied.json()["workflowId"] != template_id
 
-    bound = client.put(
+    bound = client.post(
         f"/projects/{imported['projectId']}/workflow-binding",
         json={
             "workflowId": copied.json()["workflowId"],
@@ -445,7 +448,11 @@ def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp
     assert client.get(f"/projects/{imported['projectId']}/workflow-binding").json()["workflowId"] == copied.json()["workflowId"]
     assert client.post(
         "/runs",
-        json={"workflowVersionId": template.json()["workflowVersionId"], "title": "cross asset", "now": NOW},
+        json={"projectId": imported["projectId"], "title": "bound default", "now": NOW},
+    ).status_code == 200
+    assert client.post(
+        "/runs",
+        json={"projectId": imported["projectId"], "workflowVersionId": template.json()["workflowVersionId"], "title": "cross asset", "now": NOW},
     ).status_code == 400
 
 
@@ -531,6 +538,7 @@ def test_runtime_api_project_archive_and_reimport_reactivates_it(tmp_path) -> No
     historical_run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "归档前历史 Run",
             "now": NOW,
@@ -545,6 +553,7 @@ def test_runtime_api_project_archive_and_reimport_reactivates_it(tmp_path) -> No
     rejected_run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "归档后不应创建",
             "now": NOW,
@@ -557,6 +566,7 @@ def test_runtime_api_project_archive_and_reimport_reactivates_it(tmp_path) -> No
     restored_run = client.post(
         "/runs",
         json={
+            "projectId": reimported.json()["projectId"],
             "workflowVersionId": reimported.json()["workflowVersionId"],
             "title": "重导入后创建",
             "now": "2026-07-28T00:00:00Z",
@@ -692,6 +702,7 @@ def test_runtime_api_returns_recovery_diagnostics_for_a_run(tmp_path) -> None:
     run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "恢复诊断",
             "now": NOW,
@@ -858,6 +869,7 @@ def test_runtime_api_cleans_orphan_agent_jobs_during_recovery(tmp_path) -> None:
     run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "清理遗留 Agent",
             "now": NOW,
@@ -927,6 +939,7 @@ def test_runtime_api_imports_project_creates_run_and_transitions(tmp_path) -> No
     run = client.post(
         "/runs",
         json={
+            "projectId": imported.json()["projectId"],
             "workflowVersionId": imported.json()["workflowVersionId"],
             "title": "API 纵向验证",
             "now": "2026-07-27T13:00:00Z",
@@ -973,6 +986,7 @@ def test_runtime_api_rejects_direct_artifact_transition_and_maps_conflicts(tmp_p
         json={"projectPath": str(project_path), "now": "2026-07-27T13:00:00Z"},
     )
     run_payload = {
+        "projectId": imported.json()["projectId"],
         "workflowVersionId": imported.json()["workflowVersionId"],
         "title": "重复 Run",
         "now": "2026-07-27T13:00:00Z",
@@ -1084,6 +1098,7 @@ def test_runtime_api_automatically_passes_configured_gate_with_artifact_evidence
     run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": saved["workflowVersionId"],
             "title": "自动 Gate 验收",
             "now": NOW,
@@ -1634,6 +1649,7 @@ def test_runtime_api_lists_multiple_runs_for_one_workflow_version(tmp_path) -> N
     first = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "第一个并发 Run",
             "now": "2026-07-27T13:00:00Z",
@@ -1642,6 +1658,7 @@ def test_runtime_api_lists_multiple_runs_for_one_workflow_version(tmp_path) -> N
     second = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "第二个并发 Run",
             "now": "2026-07-27T13:01:00Z",
@@ -1682,6 +1699,7 @@ def test_runtime_api_lists_runs_from_previous_versions_of_the_same_workflow(tmp_
     run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "已完成的历史 Run",
             "now": "2026-07-27T13:00:00Z",
@@ -1938,6 +1956,7 @@ def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp
     run = client.post(
         "/runs",
         json={
+            "projectId": imported["projectId"],
             "workflowVersionId": saved["workflowVersionId"],
             "title": "部署验收",
             "now": NOW,

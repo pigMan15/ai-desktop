@@ -125,7 +125,7 @@ class WorkflowRuntimeService:
                         adapter_id=detection["adapterId"] if isinstance(detection, dict) else detection.adapter_id,
                     )
                     self._workflow_assets.save(
-                        id=workflow.id,
+                        id=_project_workflow_asset_id(project_id, workflow.id),
                         name=workflow.name,
                         is_builtin=False,
                         actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
@@ -134,7 +134,7 @@ class WorkflowRuntimeService:
                     )
                     self._workflow_bindings.bind(
                         project_id=project_id,
-                        workflow_id=workflow.id,
+                        workflow_id=_project_workflow_asset_id(project_id, workflow.id),
                         workflow_version_id=workflow_version_id,
                         actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
                         now=now,
@@ -147,7 +147,7 @@ class WorkflowRuntimeService:
         return {
             "projectId": project_id,
             "workflowVersionId": workflow_version_id,
-            "workflowId": workflow.id if workflow is not None else None,
+            "workflowId": _project_workflow_asset_id(project_id, workflow.id) if workflow is not None else None,
             "workflowName": workflow.name if workflow is not None else None,
             "createdDefaultWorkflow": False,
             "workflowBindingStatus": "bound" if workflow is not None else "unbound",
@@ -156,7 +156,8 @@ class WorkflowRuntimeService:
 
     def create_run(
         self,
-        workflow_version_id: str,
+        project_id: str,
+        workflow_version_id: str | None = None,
         *,
         title: str,
         task_goal: str | None = None,
@@ -164,29 +165,40 @@ class WorkflowRuntimeService:
         execution_workspace: str | None = None,
         now: str,
     ) -> RunProjection:
-        workflow = self._workflow_versions.get(workflow_version_id)
-        if workflow is None:
-            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        # Keep direct service callers from older integrations working while all
+        # API callers must provide projectId. The fallback resolves the version's
+        # owning project, never a global binding.
+        if workflow_version_id is None and project_id.startswith("workflow-version-"):
+            legacy_version = self._workflow_versions.metadata(project_id)
+            if legacy_version is None:
+                raise KeyError(f"Workflow version not found: {project_id}")
+            workflow_version_id = project_id
+            project_id = legacy_version["project_id"]
+        if not self._projects.exists(project_id):
+            raise KeyError(f"Project not found: {project_id}")
+        binding = self._workflow_bindings.get(project_id)
+        if binding is None:
+            raise ValueError("PROJECT_WORKFLOW_UNBOUND: 请先为项目绑定工作流后再创建 Run")
 
-        _require_valid_workflow(workflow)
-
+        workflow_version_id = workflow_version_id or binding["workflow_version_id"]
         version = self._workflow_versions.metadata(workflow_version_id)
         if version is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
-        workflow_id = version["workflow_id"]
-        asset = self._workflow_assets.get(workflow_id)
+        workflow = self._workflow_versions.get(workflow_version_id)
+        if workflow is None:
+            raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        _require_valid_workflow(workflow)
+
+        asset = self._workflow_assets.get(binding["workflow_id"])
         if asset is None:
             raise ValueError("WORKFLOW_ASSET_NOT_FOUND: 工作流资产不存在")
         if asset["archived_at"] is not None:
             raise ValueError("WORKFLOW_ARCHIVED: 工作流已归档，无法创建新的 Run")
-        binding = self._workflow_bindings.first_for_workflow(workflow_id)
-        if binding is None:
-            raise ValueError("PROJECT_WORKFLOW_UNBOUND: 请先为项目绑定工作流后再创建 Run")
-        # Explicit historical versions remain compatible, but they must belong to
-        # the same bound workflow asset and cannot be borrowed from another asset.
-        if binding["workflow_id"] != workflow_id:
+        asset_definition = self._workflow_versions.get(asset["current_workflow_version_id"])
+        if asset_definition is None or asset_definition.id != workflow.id:
             raise ValueError("PROJECT_WORKFLOW_BINDING_MISMATCH: 工作流版本不属于项目绑定资产")
-        project_id = binding["project_id"]
+        if version["project_id"] not in {project_id, "project-workflow-library"}:
+            raise ValueError("PROJECT_WORKFLOW_VERSION_PROJECT_MISMATCH: 工作流版本属于其他项目")
         project_root_row = self._db.execute(
             "SELECT root_path FROM projects WHERE id = ?", (project_id,)
         ).fetchone()
@@ -368,8 +380,11 @@ class WorkflowRuntimeService:
         version = self._workflow_versions.metadata(workflow_version_id)
         if version is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
-        if version["workflow_id"] != workflow_id:
+        asset_definition = self._workflow_versions.get(asset["current_workflow_version_id"])
+        if asset_definition is None or version["workflow_id"] != asset_definition.id:
             raise ValueError("WORKFLOW_VERSION_OWNERSHIP_INVALID: 工作流版本不属于指定工作流")
+        if version["project_id"] not in {project_id, "project-workflow-library"}:
+            raise ValueError("WORKFLOW_VERSION_PROJECT_MISMATCH: 工作流版本属于其他项目")
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -521,7 +536,12 @@ class WorkflowRuntimeService:
         base = self._workflow_versions.get(workflow_version_id)
         if base is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
-        asset = self._workflow_assets.get(base.id)
+        version_metadata = self._workflow_versions.metadata(workflow_version_id)
+        asset = self._workflow_assets.get(
+            _project_workflow_asset_id(version_metadata["project_id"], base.id)
+            if version_metadata and version_metadata["project_id"] != "project-workflow-library"
+            else base.id
+        )
         if asset is not None and asset["is_builtin"]:
             raise ValueError("BUILTIN_WORKFLOW_READ_ONLY: 内置模板只能复制后编辑")
         editor = require_trusted_human(actor, operation="保存工作流版本")
@@ -562,7 +582,7 @@ class WorkflowRuntimeService:
                     created_at=now,
                     adapter_id=row["adapter_id"],
                 )
-                self._workflow_assets.update_current_version(saved_definition.id, new_version_id, now=now)
+                self._workflow_assets.update_current_version(asset["id"], new_version_id, now=now)
                 self._audit.record(
                     actor=editor,
                     action="workflow.version.created",
@@ -3258,6 +3278,10 @@ def _deployment_configuration(node, project_root: Path) -> tuple[list[str], Path
 
 def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}-{uuid5(NAMESPACE_URL, value)}"
+
+
+def _project_workflow_asset_id(project_id: str, workflow_id: str) -> str:
+    return f"workflow-asset:{project_id}:{workflow_id}"
 
 
 def _default_workflow_for_project(project_path: Path) -> WorkflowDefinition:

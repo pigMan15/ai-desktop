@@ -40,7 +40,8 @@ class ArchiveProjectRequest(BaseModel):
 
 
 class CreateRunRequest(BaseModel):
-    workflowVersionId: str
+    projectId: str
+    workflowVersionId: str | None = None
     title: str
     taskGoal: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -597,7 +598,7 @@ def create_app(
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
-    @application.put("/projects/{project_id}/workflow-binding")
+    @application.post("/projects/{project_id}/workflow-binding")
     def bind_project_workflow(project_id: str, request: BindProjectWorkflowRequest) -> dict[str, Any]:
         service = _require_service(runtime_service)
         try:
@@ -734,6 +735,7 @@ def create_app(
         service = _require_service(runtime_service)
         try:
             projection = service.create_run(
+                request.projectId,
                 request.workflowVersionId,
                 title=request.title,
                 task_goal=request.taskGoal,

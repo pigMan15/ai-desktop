@@ -266,6 +266,61 @@ def test_import_project_without_workflow_succeeds_without_a_default_workflow(tmp
     assert not (project_path / ".harness").exists()
 
 
+def test_runs_use_the_requested_project_binding_and_reject_versions_from_another_project(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    imported_one = service.import_project(copy_harness_project(tmp_path / "one"), now=NOW)
+    imported_two = service.import_project(copy_harness_project(tmp_path / "two"), now=NOW)
+    definition = service.get_workflow_definition(imported_one["workflowVersionId"])
+    library = service.create_workflow(
+        definition=definition,
+        is_builtin=True,
+        actor=trusted_human().model_dump(),
+        now=NOW,
+    )
+
+    for imported in (imported_one, imported_two):
+        service.bind_project_workflow(
+            imported["projectId"],
+            workflow_id=library["workflowId"],
+            workflow_version_id=library["workflowVersionId"],
+            actor=trusted_human().model_dump(),
+            now=NOW,
+        )
+
+    run_one = service.create_run(imported_one["projectId"], title="one", now=NOW)
+    run_two = service.create_run(imported_two["projectId"], title="two", now="2026-08-04T00:01:00Z")
+    rows = db.execute("SELECT id, project_id FROM runs ORDER BY created_at").fetchall()
+
+    assert [row["project_id"] for row in rows] == [imported_one["projectId"], imported_two["projectId"]]
+    assert run_one.runId != run_two.runId
+    with pytest.raises(ValueError, match="PROJECT_WORKFLOW_VERSION_PROJECT_MISMATCH"):
+        service.create_run(
+            imported_one["projectId"],
+            imported_two["workflowVersionId"],
+            title="cross-project",
+            now="2026-08-04T00:02:00Z",
+        )
+
+
+def test_migration_backfills_project_scoped_assets_and_bindings(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    imported = service.import_project(copy_harness_project(tmp_path / "legacy"), now=NOW)
+
+    db.execute("DROP TABLE project_workflow_bindings")
+    db.execute("DROP TABLE workflow_assets")
+    db.commit()
+    migrate(db)
+
+    binding = service.get_project_workflow_binding(imported["projectId"])
+    run = service.create_run(imported["projectId"], title="legacy migration", now=NOW)
+
+    assert binding is not None
+    assert binding["workflowVersionId"] == imported["workflowVersionId"]
+    assert run.status == "CREATED"
 def trusted_human() -> Actor:
     return Actor(id="human-1", type="human", source="renderer", trusted=True)
 

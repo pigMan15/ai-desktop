@@ -297,20 +297,6 @@ class ProjectWorkflowBindingRepository:
             (project_id, workflow_id, workflow_version_id, json.dumps(actor, separators=(",", ":")), now),
         )
 
-    def first_for_workflow(self, workflow_id: str) -> dict | None:
-        row = self._db.execute(
-            """
-            SELECT bindings.project_id, bindings.workflow_id, bindings.workflow_version_id
-            FROM project_workflow_bindings AS bindings
-            WHERE bindings.workflow_id = ?
-            ORDER BY bindings.bound_at DESC
-            LIMIT 1
-            """,
-            (workflow_id,),
-        ).fetchone()
-        return dict(row) if row is not None else None
-
-
 class RunRepository:
     def __init__(self, db: sqlite3.Connection) -> None:
         self._db = db

@@ -51,7 +51,7 @@ export type RuntimeWorkbenchState = {
 
 type RuntimeImportResult = {
   projectId: string;
-  workflowVersionId?: string;
+  workflowVersionId: string;
   workflowId?: string;
   workflowName?: string;
   createdDefaultWorkflow?: boolean;
@@ -758,8 +758,10 @@ export function createRuntimeClient(apiBaseUrl: string) {
       title: string,
       now: string,
       configuration: RunConfiguration = { taskGoal: "", parameters: {} },
+      projectId = "",
     ) =>
       request<RunProjection>(apiBaseUrl, "/runs", {
+        projectId,
         workflowVersionId,
         title,
         taskGoal: configuration.taskGoal,
