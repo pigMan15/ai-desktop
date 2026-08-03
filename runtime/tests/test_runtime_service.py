@@ -310,9 +310,11 @@ def test_migration_backfills_project_scoped_assets_and_bindings(tmp_path: Path) 
     service = WorkflowRuntimeService(db)
     imported = service.import_project(copy_harness_project(tmp_path / "legacy"), now=NOW)
 
+    db.execute("PRAGMA foreign_keys = OFF")
     db.execute("DROP TABLE project_workflow_bindings")
     db.execute("DROP TABLE workflow_assets")
     db.commit()
+    db.execute("PRAGMA foreign_keys = ON")
     migrate(db)
 
     binding = service.get_project_workflow_binding(imported["projectId"])
@@ -331,16 +333,24 @@ def test_migration_binds_the_latest_version_when_a_legacy_project_has_multiple_w
     first = service.get_workflow_definition(imported["workflowVersionId"])
     second = WorkflowDefinition.model_validate({**first, "id": "legacy-second", "name": "Second workflow"})
     second_version_id = "workflow-version-legacy-second"
+    second_asset_id = f"workflow-asset:{imported['projectId']}:legacy-second"
+    service._workflow_assets.save(
+        id=second_asset_id,
+        name=second.name,
+        is_builtin=False,
+        actor=trusted_human().model_dump(),
+        now="2026-07-28T00:00:00Z",
+        workflow_version_id=None,
+    )
     service._workflow_versions.save(
         second,
         id=second_version_id,
         project_id=imported["projectId"],
         content_hash="legacy-second",
+        workflow_asset_id=second_asset_id,
         created_at="2026-07-28T00:00:00Z",
     )
-    db.execute("UPDATE workflow_versions SET workflow_asset_id = NULL")
     db.execute("DROP TABLE project_workflow_bindings")
-    db.execute("DROP TABLE workflow_assets")
     db.commit()
 
     migrate(db)
@@ -348,7 +358,55 @@ def test_migration_binds_the_latest_version_when_a_legacy_project_has_multiple_w
     binding = service.get_project_workflow_binding(imported["projectId"])
     assert binding is not None
     assert binding["workflowVersionId"] == second_version_id
-    assert binding["workflowId"].endswith(":legacy-second")
+    assert binding["workflowId"] == second_asset_id
+
+
+def test_workflow_version_id_cannot_mutate_its_asset_ownership(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    imported = service.import_project(copy_harness_project(tmp_path / "immutable-version"), now=NOW)
+    version_id = imported["workflowVersionId"]
+    metadata = service._workflow_versions.metadata(version_id)
+    definition = service._workflow_versions.get(version_id)
+
+    assert metadata is not None and definition is not None
+    service._workflow_versions.save(
+        definition,
+        id=version_id,
+        project_id=metadata["project_id"],
+        content_hash=metadata["content_hash"],
+        workflow_asset_id=metadata["workflow_asset_id"],
+        created_at=metadata["created_at"],
+        adapter_id=metadata["adapter_id"],
+    )
+    with pytest.raises(ValueError, match="WORKFLOW_VERSION_IMMUTABLE"):
+        service._workflow_versions.save(
+            definition,
+            id=version_id,
+            project_id=metadata["project_id"],
+            content_hash="different-content",
+            workflow_asset_id="workflow-asset:other:workflow",
+            created_at=metadata["created_at"],
+            adapter_id=metadata["adapter_id"],
+        )
+
+
+def test_binding_rejects_an_archived_project_inside_the_binding_transaction(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project = service.import_project(copy_harness_project(tmp_path / "binding-archive"), now=NOW)
+    service.archive_project(project["projectId"], actor=trusted_human().model_dump(), now=NOW)
+
+    with pytest.raises(ValueError, match="PROJECT_ARCHIVED"):
+        service.bind_project_workflow(
+            project["projectId"],
+            workflow_id=project["workflowId"],
+            workflow_version_id=project["workflowVersionId"],
+            actor=trusted_human().model_dump(),
+            now="2026-08-05T00:00:00Z",
+        )
 
 
 def trusted_human() -> Actor:

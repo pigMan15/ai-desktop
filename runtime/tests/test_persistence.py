@@ -55,6 +55,7 @@ EXPECTED_COLUMNS = {
         ("version", "TEXT", True, False),
         ("definition_json", "TEXT", True, False),
         ("content_hash", "TEXT", True, False),
+        ("workflow_asset_id", "TEXT", True, False),
         ("created_at", "TEXT", True, False),
     ],
     "runs": [
@@ -314,6 +315,7 @@ def insert_project(db: sqlite3.Connection) -> None:
 
 def insert_run(db: sqlite3.Connection) -> None:
     insert_project(db)
+    insert_workflow_asset(db)
     db.execute(
         """
         INSERT INTO workflow_versions (
@@ -324,9 +326,10 @@ def insert_run(db: sqlite3.Connection) -> None:
             version,
             definition_json,
             content_hash,
+            workflow_asset_id,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "workflow-version-1",
@@ -336,6 +339,7 @@ def insert_run(db: sqlite3.Connection) -> None:
             "1",
             "{}",
             "sha256:workflow-1",
+            "workflow-asset-1",
             "2026-07-27T13:00:00Z",
         ),
     )
@@ -408,6 +412,19 @@ def test_migrate_adds_project_archive_column_to_existing_database() -> None:
             updated_at TEXT NOT NULL
         )
         """
+    )
+    db.commit()
+
+
+def insert_workflow_asset(db: sqlite3.Connection, asset_id: str = "workflow-asset-1") -> None:
+    db.execute(
+        """
+        INSERT OR IGNORE INTO workflow_assets (
+            id, name, is_builtin, archived_at, created_by_json,
+            created_at, updated_at, current_workflow_version_id
+        ) VALUES (?, ?, 0, NULL, '{}', ?, ?, NULL)
+        """,
+        (asset_id, "Demo workflow", "2026-07-27T13:00:00Z", "2026-07-27T13:00:00Z"),
     )
     db.commit()
 
@@ -620,6 +637,7 @@ def test_workflow_version_repository_round_trips_definition_json_aliases() -> No
     db = connect(fresh_db_path("workflow_versions"))
     migrate(db)
     insert_project(db)
+    insert_workflow_asset(db)
     repository = WorkflowVersionRepository(db)
     definition = workflow_definition()
 
@@ -628,6 +646,7 @@ def test_workflow_version_repository_round_trips_definition_json_aliases() -> No
         id="workflow-version-1",
         project_id="project-1",
         content_hash="sha256:workflow-1",
+        workflow_asset_id="workflow-asset-1",
         created_at="2026-07-27T13:00:00Z",
     )
     saved = db.execute(
@@ -652,10 +671,11 @@ def test_workflow_version_repository_round_trips_definition_json_aliases() -> No
     assert loaded == definition
 
 
-def test_workflow_version_repository_upserts_duplicate_id_for_reimport() -> None:
+def test_workflow_version_repository_allows_only_idempotent_duplicate_id_retry() -> None:
     db = connect(fresh_db_path("workflow_versions_duplicate"))
     migrate(db)
     insert_project(db)
+    insert_workflow_asset(db)
     repository = WorkflowVersionRepository(db)
     definition = workflow_definition()
 
@@ -664,25 +684,35 @@ def test_workflow_version_repository_upserts_duplicate_id_for_reimport() -> None
         id="workflow-version-1",
         project_id="project-1",
         content_hash="sha256:workflow-1",
+        workflow_asset_id="workflow-asset-1",
         created_at="2026-07-27T13:00:00Z",
     )
 
-    updated = workflow_definition().model_copy(update={"name": "Updated workflow"})
-
     repository.save(
-        updated,
+        definition,
         id="workflow-version-1",
         project_id="project-1",
-        content_hash="sha256:workflow-2",
+        content_hash="sha256:workflow-1",
+        workflow_asset_id="workflow-asset-1",
         created_at="2026-07-27T14:00:00Z",
     )
+    updated = workflow_definition().model_copy(update={"name": "Updated workflow"})
+    with pytest.raises(ValueError, match="WORKFLOW_VERSION_IMMUTABLE"):
+        repository.save(
+            updated,
+            id="workflow-version-1",
+            project_id="project-1",
+            content_hash="sha256:workflow-2",
+            workflow_asset_id="workflow-asset-1",
+            created_at="2026-07-27T14:00:00Z",
+        )
     row = db.execute(
         "SELECT name, content_hash FROM workflow_versions WHERE id = ?",
         ("workflow-version-1",),
     ).fetchone()
 
-    assert row["name"] == "Updated workflow"
-    assert row["content_hash"] == "sha256:workflow-2"
+    assert row["name"] == definition.name
+    assert row["content_hash"] == "sha256:workflow-1"
 
 
 def test_agent_job_models_accept_camel_case_alias_payloads() -> None:

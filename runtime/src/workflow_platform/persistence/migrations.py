@@ -22,7 +22,7 @@ def migrate(db: sqlite3.Connection) -> None:
             version TEXT NOT NULL,
             definition_json TEXT NOT NULL,
             content_hash TEXT NOT NULL,
-            workflow_asset_id TEXT,
+            workflow_asset_id TEXT NOT NULL REFERENCES workflow_assets(id),
             created_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -494,6 +494,29 @@ def migrate(db: sqlite3.Connection) -> None:
         )
         WHERE project_rank = 1
         ON CONFLICT(project_id) DO NOTHING
+        """
+    )
+    db.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS workflow_versions_asset_id_immutable
+        BEFORE UPDATE OF workflow_asset_id ON workflow_versions
+        WHEN OLD.workflow_asset_id IS NOT NULL
+         AND NEW.workflow_asset_id IS NOT OLD.workflow_asset_id
+        BEGIN
+            SELECT RAISE(ABORT, 'WORKFLOW_VERSION_ASSET_IMMUTABLE');
+        END;
+        CREATE TRIGGER IF NOT EXISTS workflow_versions_asset_id_required_insert
+        BEFORE INSERT ON workflow_versions
+        WHEN NEW.workflow_asset_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'WORKFLOW_VERSION_ASSET_REQUIRED');
+        END;
+        CREATE TRIGGER IF NOT EXISTS workflow_versions_asset_id_required_update
+        BEFORE UPDATE OF workflow_asset_id ON workflow_versions
+        WHEN NEW.workflow_asset_id IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'WORKFLOW_VERSION_ASSET_REQUIRED');
+        END;
         """
     )
 

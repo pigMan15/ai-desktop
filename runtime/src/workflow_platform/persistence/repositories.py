@@ -16,7 +16,7 @@ class WorkflowVersionRepository:
         id: str,
         project_id: str,
         content_hash: str,
-        workflow_asset_id: str | None = None,
+        workflow_asset_id: str,
         created_at: str,
         adapter_id: str | None = None,
     ) -> None:
@@ -25,6 +25,27 @@ class WorkflowVersionRepository:
             separators=(",", ":"),
             sort_keys=True,
         )
+        existing = self._db.execute(
+            """
+            SELECT project_id, adapter_id, name, version, definition_json, content_hash,
+                   workflow_asset_id, created_at
+            FROM workflow_versions WHERE id = ?
+            """,
+            (id,),
+        ).fetchone()
+        if existing is not None:
+            candidate = {
+                "project_id": project_id,
+                "adapter_id": adapter_id or definition.sourceAdapter,
+                "name": definition.name,
+                "version": definition.version,
+                "definition_json": definition_json,
+                "content_hash": content_hash,
+                "workflow_asset_id": workflow_asset_id,
+            }
+            if all(existing[key] == value for key, value in candidate.items()):
+                return
+            raise ValueError(f"WORKFLOW_VERSION_IMMUTABLE: 版本标识已存在且内容或资产归属不同：{id}")
         self._db.execute(
             """
             INSERT INTO workflow_versions (
@@ -39,14 +60,6 @@ class WorkflowVersionRepository:
                 created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                adapter_id = excluded.adapter_id,
-                name = excluded.name,
-                version = excluded.version,
-                definition_json = excluded.definition_json,
-                content_hash = excluded.content_hash,
-                workflow_asset_id = excluded.workflow_asset_id,
-                created_at = excluded.created_at
             """,
             (
                 id,
@@ -56,7 +69,7 @@ class WorkflowVersionRepository:
                 definition.version,
                 definition_json,
                 content_hash,
-                workflow_asset_id or definition.id,
+                workflow_asset_id,
                 created_at,
             ),
         )
@@ -205,7 +218,7 @@ class WorkflowAssetRepository:
         is_builtin: bool,
         actor: dict,
         now: str,
-        workflow_version_id: str,
+        workflow_version_id: str | None,
     ) -> None:
         self._db.execute(
             """

@@ -116,26 +116,28 @@ class WorkflowRuntimeService:
                     content_hash = hashlib.sha256(
                         workflow.model_dump_json(by_alias=True).encode("utf-8")
                     ).hexdigest()
+                    workflow_asset_id = _project_workflow_asset_id(project_id, workflow.id)
+                    self._workflow_assets.save(
+                        id=workflow_asset_id,
+                        name=workflow.name,
+                        is_builtin=False,
+                        actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
+                        now=now,
+                        workflow_version_id=None,
+                    )
                     self._workflow_versions.save(
                         workflow,
                         id=workflow_version_id,
                         project_id=project_id,
                         content_hash=content_hash,
-                        workflow_asset_id=_project_workflow_asset_id(project_id, workflow.id),
+                        workflow_asset_id=workflow_asset_id,
                         created_at=now,
                         adapter_id=detection["adapterId"] if isinstance(detection, dict) else detection.adapter_id,
                     )
-                    self._workflow_assets.save(
-                        id=_project_workflow_asset_id(project_id, workflow.id),
-                        name=workflow.name,
-                        is_builtin=False,
-                        actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
-                        now=now,
-                        workflow_version_id=workflow_version_id,
-                    )
+                    self._workflow_assets.update_current_version(workflow_asset_id, workflow_version_id, now=now)
                     self._workflow_bindings.bind(
                         project_id=project_id,
-                        workflow_id=_project_workflow_asset_id(project_id, workflow.id),
+                        workflow_id=workflow_asset_id,
                         workflow_version_id=workflow_version_id,
                         actor={"id": "adapter", "type": "adapter", "source": "adapter", "trusted": True},
                         now=now,
@@ -308,6 +310,14 @@ class WorkflowRuntimeService:
                     active_protocol="workflow-library",
                     now=now,
                 )
+                self._workflow_assets.save(
+                    id=workflow.id,
+                    name=workflow.name,
+                    is_builtin=is_builtin,
+                    actor=creator.model_dump(by_alias=True),
+                    now=now,
+                    workflow_version_id=None,
+                )
                 self._workflow_versions.save(
                     workflow,
                     id=version_id,
@@ -317,14 +327,7 @@ class WorkflowRuntimeService:
                     created_at=now,
                     adapter_id="workflow-library",
                 )
-                self._workflow_assets.save(
-                    id=workflow.id,
-                    name=workflow.name,
-                    is_builtin=is_builtin,
-                    actor=creator.model_dump(by_alias=True),
-                    now=now,
-                    workflow_version_id=version_id,
-                )
+                self._workflow_assets.update_current_version(workflow.id, version_id, now=now)
                 self._audit.record(
                     actor=creator,
                     action="workflow.created",
@@ -391,21 +394,23 @@ class WorkflowRuntimeService:
 
     def bind_project_workflow(self, project_id: str, *, workflow_id: str, workflow_version_id: str, actor: dict, now: str) -> dict:
         binder = require_trusted_human(actor, operation="绑定项目工作流")
-        if not self._projects.exists(project_id):
-            raise KeyError(f"Project not found: {project_id}")
-        asset = self._workflow_assets.get(workflow_id)
-        if asset is None:
-            raise KeyError(f"Workflow not found: {workflow_id}")
-        if asset["archived_at"] is not None:
-            raise ValueError("WORKFLOW_ARCHIVED: 已归档工作流不能绑定项目")
-        version = self._workflow_versions.metadata(workflow_version_id)
-        if version is None:
-            raise KeyError(f"Workflow version not found: {workflow_version_id}")
-        if version["workflow_asset_id"] != workflow_id:
-            raise ValueError("WORKFLOW_VERSION_OWNERSHIP_INVALID: 工作流版本不属于指定工作流")
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                if not self._projects.exists(project_id):
+                    raise KeyError(f"Project not found: {project_id}")
+                if self._projects.is_archived(project_id):
+                    raise ValueError("PROJECT_ARCHIVED: 项目已归档，不能绑定工作流")
+                asset = self._workflow_assets.get(workflow_id)
+                if asset is None:
+                    raise KeyError(f"Workflow not found: {workflow_id}")
+                if asset["archived_at"] is not None:
+                    raise ValueError("WORKFLOW_ARCHIVED: 已归档工作流不能绑定项目")
+                version = self._workflow_versions.metadata(workflow_version_id)
+                if version is None:
+                    raise KeyError(f"Workflow version not found: {workflow_version_id}")
+                if version["workflow_asset_id"] != workflow_id:
+                    raise ValueError("WORKFLOW_VERSION_OWNERSHIP_INVALID: 工作流版本不属于指定工作流")
                 self._workflow_bindings.bind(project_id=project_id, workflow_id=workflow_id, workflow_version_id=workflow_version_id, actor=binder.model_dump(by_alias=True), now=now)
                 self._audit.record(actor=binder, action="project.workflow.bound", resource=f"project:{project_id}", detail={"workflowId": workflow_id, "workflowVersionId": workflow_version_id}, created_at=now)
                 self._db.commit()
@@ -811,19 +816,20 @@ class WorkflowRuntimeService:
             registered.append(output.id)
             timeline = self.timeline(run_id)
 
-        self._audit.record(
-            actor=scanner_actor,
-            action="artifact.node.scanned",
-            resource=f"run:{run_id}:node:{node_id}",
-            detail={
-                "registered": registered,
-                "unchanged": unchanged,
-                "missing": missing,
-                "invalid": invalid,
-            },
-            created_at=now,
-        )
-        self._db.commit()
+        with self._lock:
+            self._audit.record(
+                actor=scanner_actor,
+                action="artifact.node.scanned",
+                resource=f"run:{run_id}:node:{node_id}",
+                detail={
+                    "registered": registered,
+                    "unchanged": unchanged,
+                    "missing": missing,
+                    "invalid": invalid,
+                },
+                created_at=now,
+            )
+            self._db.commit()
         return {
             "runId": run_id,
             "nodeId": node_id,
