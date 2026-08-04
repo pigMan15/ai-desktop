@@ -9,6 +9,9 @@ import type {
   WorkflowVersionDiff,
   WorkflowVersionSummary,
 } from "../../app/runtimeClient";
+import { WorkflowCanvas } from "./WorkflowCanvas";
+import { RoleLibrary } from "./RoleLibrary";
+import { applyNodePositions, autoLayoutPositions } from "./workflowCanvasModel";
 
 type Props = {
   state: RuntimeWorkbenchState | null;
@@ -23,6 +26,7 @@ type Props = {
   onCompareVersion?: (workflowVersionId: string) => void;
   onRestoreVersion?: (workflowVersionId: string) => void;
   onExportWorkflow?: (format: WorkflowExportFormat) => void;
+  onBack?: () => void;
 };
 
 export function WorkflowViewer({
@@ -38,6 +42,7 @@ export function WorkflowViewer({
   onCompareVersion,
   onRestoreVersion,
   onExportWorkflow,
+  onBack,
 }: Props) {
   const projection = state?.projection;
   const [draft, setDraft] = useState("");
@@ -45,20 +50,29 @@ export function WorkflowViewer({
   const [newNodeId, setNewNodeId] = useState("");
   const [newNodeName, setNewNodeName] = useState("");
   const [newNodeKind, setNewNodeKind] = useState("task");
-  const [edgeFrom, setEdgeFrom] = useState("");
-  const [edgeTo, setEdgeTo] = useState("");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedHistoryVersionId, setSelectedHistoryVersionId] = useState("");
   const [exportFormat, setExportFormat] = useState<WorkflowExportFormat>("canonical-json");
+  const [canvasViewResetKey, setCanvasViewResetKey] = useState(0);
+  const [activeCanvasPanel, setActiveCanvasPanel] = useState<"nodes" | "roles" | "workflow" | "simulation" | null>(null);
   const editableWorkflow = parseWorkflowDraft(draft);
   const draftStorageKey = workflowVersionId ? `workflow-draft:${workflowVersionId}` : null;
   const selectedHistoryVersion = history.find((version) => version.id === selectedHistoryVersionId);
+  const selectedNode = editableWorkflow?.nodes.find((node) => node.id === selectedNodeId) ?? null;
 
   useEffect(() => {
     const storedDraft = draftStorageKey ? window.sessionStorage.getItem(draftStorageKey) : null;
     setDraft(storedDraft ?? (workflow ? JSON.stringify(workflow, null, 2) : ""));
     setDraftError(null);
     setSelectedHistoryVersionId("");
+    setSelectedNodeId(null);
   }, [draftStorageKey, workflow]);
+
+  useEffect(() => {
+    if (simulation) {
+      setActiveCanvasPanel("simulation");
+    }
+  }, [simulation]);
 
   function updateStoredDraft(value: string) {
     setDraft(value);
@@ -111,9 +125,19 @@ export function WorkflowViewer({
       ...definition,
       nodes: [...definition.nodes, { id, name, kind: newNodeKind }],
     }));
+    setCanvasViewResetKey((current) => current + 1);
+    setSelectedNodeId(id);
     setNewNodeId("");
     setNewNodeName("");
     setNewNodeKind("task");
+  }
+
+  function organizeCanvas() {
+    updateDraft((definition) => applyNodePositions(
+      definition,
+      autoLayoutPositions(definition.nodes, definition.edges),
+    ));
+    setCanvasViewResetKey((current) => current + 1);
   }
 
   function removeNode(nodeId: string) {
@@ -122,38 +146,22 @@ export function WorkflowViewer({
       nodes: definition.nodes.filter((node) => node.id !== nodeId),
       edges: definition.edges.filter((edge) => edge.from !== nodeId && edge.to !== nodeId),
     }));
+    if (selectedNodeId === nodeId) {
+      setSelectedNodeId(null);
+    }
   }
 
-  function addEdge() {
-    if (!edgeFrom || !edgeTo) {
-      setDraftError("请选择连线起点和终点。");
-      return;
-    }
-    if (edgeFrom === edgeTo) {
-      setDraftError("连线起点和终点不能相同。");
-      return;
-    }
-    if (editableWorkflow?.edges.some((edge) => edge.from === edgeFrom && edge.to === edgeTo)) {
-      setDraftError("该连线已存在。");
-      return;
-    }
-    updateDraft((definition) => {
-      const baseId = `edge-${edgeFrom}-${edgeTo}`;
-      const nextId = uniqueEdgeId(baseId, definition.edges.map((edge) => edge.id));
-      return {
-        ...definition,
-        edges: [...definition.edges, { id: nextId, from: edgeFrom, to: edgeTo }],
-      };
-    });
-    setEdgeFrom("");
-    setEdgeTo("");
-  }
-
-  function removeEdge(edgeId: string) {
+  function removeNodes(nodeIds: string[]) {
+    const removedIds = new Set(nodeIds);
+    if (removedIds.size === 0) return;
     updateDraft((definition) => ({
       ...definition,
-      edges: definition.edges.filter((edge) => edge.id !== edgeId),
+      nodes: definition.nodes.filter((node) => !removedIds.has(node.id)),
+      edges: definition.edges.filter((edge) => !removedIds.has(edge.from) && !removedIds.has(edge.to)),
     }));
+    if (selectedNodeId && removedIds.has(selectedNodeId)) {
+      setSelectedNodeId(null);
+    }
   }
 
   function updateNode(nodeId: string, update: (node: WorkflowDefinitionSummary["nodes"][number]) => WorkflowDefinitionSummary["nodes"][number]) {
@@ -187,20 +195,98 @@ export function WorkflowViewer({
     }));
   }
 
+  const simulationPanel = simulation && activeCanvasPanel === "simulation" ? (
+    <aside id="workflow-simulation" className="workflow-simulation" aria-label="模拟结果">
+      <div className="workflow-floating-panel-heading">
+        <div>
+          <strong>模拟结果</strong>
+          <span className="status-pill">{simulation.status === "ready" ? "可运行" : "存在阻塞"}</span>
+        </div>
+        <button type="button" className="quiet-button" aria-label="关闭模拟结果" onClick={() => setActiveCanvasPanel(null)}>关闭</button>
+      </div>
+      <ul className="compact-list" aria-label="工作流模拟步骤">
+        {simulation.steps.map((step) => <li key={step.nodeId}>{step.nodeId}：{step.state}</li>)}
+      </ul>
+      {simulation.diagnostics.length > 0 ? (
+        <ul className="compact-list" aria-label="工作流模拟诊断">
+          {simulation.diagnostics.map((diagnostic) => (
+            <li key={`${diagnostic.code}-${diagnostic.edgeId ?? diagnostic.nodeId ?? ""}`}>
+              {diagnostic.code}：{diagnostic.message}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </aside>
+  ) : null;
+
+  const workflowConfigurationPanel = (
+    <aside id="workflow-configuration" className="workflow-configuration" aria-label="工作流配置" hidden={activeCanvasPanel !== "workflow"}>
+      <div className="workflow-floating-panel-heading">
+        <strong>工作流配置</strong>
+        <button type="button" className="quiet-button" aria-label="关闭工作流配置" onClick={() => setActiveCanvasPanel(null)}>关闭</button>
+      </div>
+      <div className="form-grid">
+        <label className="form-wide">
+          工作流定义 JSON
+          <textarea value={draft} onChange={(event) => updateStoredDraft(event.target.value)} rows={18} spellCheck={false} />
+        </label>
+        <label>
+          比较版本
+          <select
+            value={selectedHistoryVersionId}
+            onChange={(event) => {
+              const selectedVersionId = event.target.value;
+              setSelectedHistoryVersionId(selectedVersionId);
+              if (selectedVersionId) onCompareVersion?.(selectedVersionId);
+            }}
+            disabled={history.length === 0 || !onCompareVersion}
+          >
+            <option value="">选择版本</option>
+            {history.map((version) => (
+              <option key={version.id} value={version.id}>
+                {version.version} · {version.nodeCount ?? "?"} 个节点 · {version.edgeCount ?? "?"} 条连线 · {version.createdAt}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          导出格式
+          <select value={exportFormat} onChange={(event) => setExportFormat(event.target.value as WorkflowExportFormat)} disabled={!onExportWorkflow}>
+            <option value="canonical-json">Canonical JSON</option>
+            <option value="generic-yaml">Generic YAML</option>
+          </select>
+        </label>
+      </div>
+      {selectedHistoryVersion ? (
+        <p className="body-copy">
+          选中版本内容：{selectedHistoryVersion.nodeSummary ?? "未提供节点摘要"}。
+          {selectedHistoryVersion.nodeCount === 0 ? "警告：该版本没有任何节点，恢复后可视化编辑器将为空。" : ""}
+        </p>
+      ) : null}
+      <div className="button-row">
+        <button className="quiet-button" onClick={() => {
+          if (draftStorageKey) window.sessionStorage.removeItem(draftStorageKey);
+          setDraft(JSON.stringify(workflow, null, 2));
+        }}>重置草稿</button>
+      </div>
+      {draftError ? <p className="body-copy">{draftError}</p> : null}
+    </aside>
+  );
+
   return (
-    <section id="workflow" className="panel" aria-labelledby="workflow-title">
+    <section id="workflow" className="panel page-workspace page-workflow" aria-labelledby="workflow-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">工作流</p>
           <h2 id="workflow-title">工作流视图</h2>
         </div>
-        <span className="status-pill">{projection?.status ?? "尚未创建 Run"}</span>
+        {onBack ? <button type="button" className="quiet-button" onClick={onBack}>返回列表</button> : null}
       </div>
-      {!projection ? (
+      {!projection && !workflow ? (
         <p className="body-copy">
           尚未创建 Run。工作流定义和编译诊断仍可在此审查，运行状态会在创建 Run 后显示。
         </p>
-      ) : (
+      ) : !workflow && projection ? (
         <>
           <p className="body-copy">当前 Run：{projection.runId}</p>
           <div className="table-like" role="table" aria-label="工作流节点状态">
@@ -229,14 +315,33 @@ export function WorkflowViewer({
             )}
           </ul>
         </>
-      )}
+        ) : null}
       {workflow ? (
         <>
           <div className="panel-heading">
-            <strong>{workflow.name}</strong>
-            <span className="status-pill">版本 {workflow.version}</span>
+            <div>
+              <strong>{workflow.name}</strong>
+              <span className="status-pill">版本 {workflow.version}</span>
+            </div>
+            <div className="workflow-editor-actions">
+              <span className="status-pill">{editableWorkflow ? "草稿可编辑" : "JSON 有错误"}</span>
+              <button type="button" className="quiet-button" disabled={!onSimulate} onClick={onSimulate}>模拟版本</button>
+              <button
+                type="button"
+                className="quiet-button"
+                aria-label="工作流配置"
+                aria-expanded={activeCanvasPanel === "workflow"}
+                aria-controls="workflow-configuration"
+                onClick={() => setActiveCanvasPanel((panel) => panel === "workflow" ? null : "workflow")}
+              >
+                版本管理
+              </button>
+              <button type="button" className="quiet-button" disabled={!selectedHistoryVersionId || !onRestoreVersion} onClick={() => onRestoreVersion?.(selectedHistoryVersionId)}>恢复为新版本</button>
+              <button type="button" disabled={!draft.trim() || !onSaveDefinition} onClick={saveDraft}>保存新版本</button>
+              <button type="button" className="quiet-button" disabled={!onExportWorkflow} onClick={() => onExportWorkflow?.(exportFormat)}>导出工作流</button>
+            </div>
           </div>
-          <div className="table-like" role="table" aria-label="工作流定义节点">
+          <div className="table-like workflow-definition-summary" role="table" aria-label="工作流定义节点">
             <div role="row" className="table-row table-head">
               <span role="columnheader">节点</span>
               <span role="columnheader">名称</span>
@@ -250,17 +355,94 @@ export function WorkflowViewer({
               </div>
             ))}
           </div>
-          <div className="panel-heading">
-            <strong>可视化编辑</strong>
-            <span className="status-pill">{editableWorkflow ? "草稿可编辑" : "JSON 有错误"}</span>
-          </div>
           {editableWorkflow ? (
             <>
-              <div className="table-like" role="list" aria-label="工作流图节点">
-                {editableWorkflow.nodes.map((node) => (
-                  <div className="gate-record" role="listitem" key={node.id}>
-                    <div className="panel-heading">
+              <div className="workflow-editor">
+                <div className="workflow-canvas-shell">
+                  <div className="workflow-canvas-toolbar" aria-label="画布工具栏">
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      aria-expanded={activeCanvasPanel === "nodes"}
+                      aria-controls="workflow-node-library"
+                      onClick={() => setActiveCanvasPanel((panel) => panel === "nodes" ? null : "nodes")}
+                    >
+                      节点库
+                    </button>
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      aria-expanded={activeCanvasPanel === "roles"}
+                      aria-controls="workflow-role-library"
+                      onClick={() => setActiveCanvasPanel((panel) => panel === "roles" ? null : "roles")}
+                    >
+                      角色库
+                    </button>
+                    <button type="button" className="quiet-button" onClick={organizeCanvas}>整理布局</button>
+                  </div>
+                {activeCanvasPanel === "nodes" ? (
+                <aside id="workflow-node-library" className="workflow-toolbox" aria-label="节点工具箱">
+                  <div className="form-grid">
+                    <label>
+                      新节点 ID
+                      <input value={newNodeId} onChange={(event) => setNewNodeId(event.target.value)} />
+                    </label>
+                    <label>
+                      新节点名称
+                      <input value={newNodeName} onChange={(event) => setNewNodeName(event.target.value)} />
+                    </label>
+                    <label>
+                      新节点类型
+                      <select value={newNodeKind} onChange={(event) => setNewNodeKind(event.target.value)}>
+                        {NODE_TYPE_OPTIONS.map(({ kind, label }) => <option key={kind} value={kind}>{label} ({kind})</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="button-row">
+                    <button className="quiet-button" onClick={addNode}>新增节点</button>
+                  </div>
+                </aside>
+                ) : null}
+                <WorkflowCanvas
+                  definition={editableWorkflow}
+                  compiled={compiled}
+                  state={state}
+                  onDefinitionChange={(definition: WorkflowDefinitionSummary) => updateDraft(() => definition)}
+                  onRemoveNodes={removeNodes}
+                  onSelectNode={setSelectedNodeId}
+                  viewResetKey={canvasViewResetKey}
+                />
+                {activeCanvasPanel === "roles" ? (
+                  <div id="workflow-role-library" className="workflow-role-library">
+                    <RoleLibrary
+                      roles={editableWorkflow.roles}
+                      nodes={editableWorkflow.nodes}
+                      onChange={(roles) => updateDraft((definition) => ({ ...definition, roles }))}
+                      onError={setDraftError}
+                    />
+                  </div>
+                ) : null}
+                {workflowConfigurationPanel}
+                {simulationPanel}
+                </div>
+                {selectedNode ? (
+                <div className="workflow-inspector-slot">
+                  <aside className="workflow-inspector" aria-label="节点属性">
+                  <div className="workflow-inspector-content">
+                    {(() => {
+                      const node = selectedNode;
+                      return (
+                    <>
+                      <div className="panel-heading">
                       <strong><span>{node.name}</span> · {node.id} · {node.kind}</strong>
+                      <button
+                        type="button"
+                        className="quiet-button"
+                        aria-label="关闭节点属性"
+                        onClick={() => setSelectedNodeId(null)}
+                      >
+                        关闭
+                      </button>
                       <button className="quiet-button" aria-label={`删除节点 ${node.id}`} onClick={() => removeNode(node.id)}>删除</button>
                     </div>
                     <div className="form-grid">
@@ -284,13 +466,36 @@ export function WorkflowViewer({
                           value={node.kind}
                           onChange={(event) => changeNodeKind(node.id, event.target.value)}
                         >
-                          {NODE_KINDS.map((kind) => (
-                            <option key={kind} value={kind}>{kind}</option>
+                          {NODE_TYPE_OPTIONS.map(({ kind, label }) => (
+                            <option key={kind} value={kind}>{label} ({kind})</option>
                           ))}
                         </select>
                       </label>
+                      <p className="workflow-node-type-help" role="status">
+                        {NODE_TYPE_HELP[node.kind]}
+                      </p>
                       {node.kind === "agent" ? (
                         <>
+                      <label>
+                        执行角色
+                        <select
+                          aria-label={`节点 ${node.id} 的执行角色`}
+                          value={node.agent?.roleId ?? ""}
+                          onChange={(event) => updateNode(node.id, (current) => ({
+                            ...current,
+                            agent: {
+                              ...current.agent,
+                              roleId: event.target.value || undefined,
+                              context: current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 },
+                            },
+                          }))}
+                        >
+                          <option value="">未绑定执行角色</option>
+                          {editableWorkflow.roles.filter((role) => !role.disabled).map((role) => (
+                            <option key={role.id} value={role.id}>{role.name}</option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="form-wide">
                         Agent 节点模板
                         <textarea
@@ -299,6 +504,7 @@ export function WorkflowViewer({
                           onChange={(event) => updateNode(node.id, (current) => ({
                             ...current,
                             agent: {
+                              ...current.agent,
                               promptTemplate: event.target.value,
                               context: current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 },
                             },
@@ -313,6 +519,7 @@ export function WorkflowViewer({
                           onChange={(event) => updateNode(node.id, (current) => ({
                             ...current,
                             agent: {
+                              ...current.agent,
                               promptTemplate: current.agent?.promptTemplate,
                               context: {
                                 ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }),
@@ -324,15 +531,15 @@ export function WorkflowViewer({
                       </label>
                       <label>
                         最多引用产物
-                        <input type="number" min="1" aria-label={`${node.id} 最多引用产物`} value={node.agent?.context?.maxArtifacts ?? 8} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }), maxArtifacts: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                        <input type="number" min="1" aria-label={`${node.id} 最多引用产物`} value={node.agent?.context?.maxArtifacts ?? 8} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }), maxArtifacts: Math.max(1, Number(event.target.value) || 1) } } }))} />
                       </label>
                       <label>
                         单产物摘要上限
-                        <input type="number" min="1" aria-label={`${node.id} 单产物摘要上限`} value={node.agent?.context?.summaryCharsPerArtifact ?? 2000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, maxTotalChars: 8000 }), summaryCharsPerArtifact: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                        <input type="number" min="1" aria-label={`${node.id} 单产物摘要上限`} value={node.agent?.context?.summaryCharsPerArtifact ?? 2000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, maxTotalChars: 8000 }), summaryCharsPerArtifact: Math.max(1, Number(event.target.value) || 1) } } }))} />
                       </label>
                       <label>
                         上下文总长度上限
-                        <input type="number" min="1" aria-label={`${node.id} 上下文总长度上限`} value={node.agent?.context?.maxTotalChars ?? 8000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000 }), maxTotalChars: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                        <input type="number" min="1" aria-label={`${node.id} 上下文总长度上限`} value={node.agent?.context?.maxTotalChars ?? 8000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000 }), maxTotalChars: Math.max(1, Number(event.target.value) || 1) } } }))} />
                       </label>
                       <label>
                         上游上下文范围
@@ -342,6 +549,7 @@ export function WorkflowViewer({
                           onChange={(event) => updateNode(node.id, (current) => ({
                             ...current,
                             agent: {
+                              ...current.agent,
                               promptTemplate: current.agent?.promptTemplate,
                               context: { ...(current.agent?.context ?? { maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }), upstream: event.target.value as "none" | "direct" | "ancestors" },
                             },
@@ -357,7 +565,7 @@ export function WorkflowViewer({
                     </div>
                     <div className="panel-heading"><strong>交付物规范</strong><button className="quiet-button" onClick={() => addArtifactOutput(node.id)}>新增交付物</button></div>
                     {(node.artifacts?.outputs ?? []).map((output, index) => (
-                      <div className="form-grid" key={`${node.id}-${output.id}-${index}`}>
+                      <div className="form-grid" key={`${node.id}-artifact-output-${index}`}>
                         <label>规范 ID<input aria-label={`${node.id} 交付物 ${index + 1} 规范 ID`} value={output.id} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value } : item) } }))} /></label>
                         <label>名称<input aria-label={`${node.id} 交付物 ${index + 1} 名称`} value={output.name} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) } }))} /></label>
                         <label>类型<input aria-label={`${node.id} 交付物 ${index + 1} 类型`} value={output.type} onChange={(event) => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value } : item) } }))} /></label>
@@ -368,83 +576,18 @@ export function WorkflowViewer({
                         <button className="quiet-button" aria-label={`删除 ${node.id} 交付物 ${index + 1}`} onClick={() => updateNode(node.id, (current) => ({ ...current, artifacts: { outputs: (current.artifacts?.outputs ?? []).filter((_, itemIndex) => itemIndex !== index) } }))}>删除交付物</button>
                       </div>
                     ))}
+                    </>
+                      );
+                    })()}
                   </div>
-                ))}
+                  </aside>
+                </div>
+                ) : null}
               </div>
-              <div className="form-grid">
-                <label>
-                  新节点 ID
-                  <input value={newNodeId} onChange={(event) => setNewNodeId(event.target.value)} />
-                </label>
-                <label>
-                  新节点名称
-                  <input value={newNodeName} onChange={(event) => setNewNodeName(event.target.value)} />
-                </label>
-                <label>
-                  新节点类型
-                  <select value={newNodeKind} onChange={(event) => setNewNodeKind(event.target.value)}>
-                    {NODE_KINDS.map((kind) => (
-                      <option key={kind} value={kind}>
-                        {kind}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div className="button-row">
-                <button className="quiet-button" onClick={addNode}>
-                  新增节点
-                </button>
-              </div>
-              <div className="form-grid">
-                <label>
-                  连线起点
-                  <select value={edgeFrom} onChange={(event) => setEdgeFrom(event.target.value)}>
-                    <option value="">选择节点</option>
-                    {editableWorkflow.nodes.map((node) => (
-                      <option key={node.id} value={node.id}>
-                        {node.name} · {node.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  连线终点
-                  <select value={edgeTo} onChange={(event) => setEdgeTo(event.target.value)}>
-                    <option value="">选择节点</option>
-                    {editableWorkflow.nodes.map((node) => (
-                      <option key={node.id} value={node.id}>
-                        {node.name} · {node.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div className="button-row">
-                <button className="quiet-button" onClick={addEdge}>
-                  新增连线
-                </button>
-              </div>
-              <ul className="compact-list" aria-label="工作流图连线">
-                {editableWorkflow.edges.length === 0 ? (
-                  <li>暂无连线</li>
-                ) : (
-                  editableWorkflow.edges.map((edge) => (
-                    <li key={edge.id}>
-                      {edge.from} → {edge.to}
-                      <button
-                        className="quiet-button"
-                        aria-label={`删除连线 ${edge.id}`}
-                        onClick={() => removeEdge(edge.id)}
-                      >
-                        删除
-                      </button>
-                    </li>
-                  ))
-                )}
-              </ul>
             </>
           ) : null}
+          {!editableWorkflow ? (
+          <>
           <div className="form-grid">
             <label className="form-wide">
               工作流定义 JSON
@@ -541,31 +684,7 @@ export function WorkflowViewer({
             </button>
           </div>
           {draftError ? <p className="body-copy">{draftError}</p> : null}
-          {simulation ? (
-            <>
-              <div className="panel-heading">
-                <strong>模拟结果</strong>
-                <span className="status-pill">
-                  {simulation.status === "ready" ? "可运行" : "存在阻塞"}
-                </span>
-              </div>
-              <ul className="compact-list" aria-label="工作流模拟步骤">
-                {simulation.steps.map((step) => (
-                  <li key={step.nodeId}>
-                    {step.nodeId}：{step.state}
-                  </li>
-                ))}
-              </ul>
-              {simulation.diagnostics.length > 0 ? (
-                <ul className="compact-list" aria-label="工作流模拟诊断">
-                  {simulation.diagnostics.map((diagnostic) => (
-                    <li key={`${diagnostic.code}-${diagnostic.edgeId ?? diagnostic.nodeId ?? ""}`}>
-                      {diagnostic.code}：{diagnostic.message}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </>
+          </>
           ) : null}
           {diff ? (
             <>
@@ -663,16 +782,24 @@ function removeUnsupportedAgentSettings(definition: WorkflowDefinitionSummary): 
   };
 }
 
-function uniqueEdgeId(baseId: string, existingIds: string[]) {
-  const existing = new Set(existingIds);
-  if (!existing.has(baseId)) {
-    return baseId;
-  }
-  let suffix = 2;
-  while (existing.has(`${baseId}-${suffix}`)) {
-    suffix += 1;
-  }
-  return `${baseId}-${suffix}`;
-}
+const NODE_TYPE_OPTIONS = [
+  { kind: "task", label: "人工任务" },
+  { kind: "agent", label: "Agent 执行" },
+  { kind: "approval", label: "人工审批" },
+  { kind: "gate", label: "质量门禁" },
+  { kind: "evidence", label: "证据登记" },
+  { kind: "deploy", label: "部署" },
+  { kind: "report", label: "报告" },
+  { kind: "composite", label: "组合阶段" },
+] as const;
 
-const NODE_KINDS = ["task", "agent", "approval", "gate", "evidence", "deploy", "report", "composite"];
+const NODE_TYPE_HELP: Record<string, string> = {
+  task: "人工任务：由操作者完成工作并在 Run 中手动推进节点。",
+  agent: "Agent 执行：可绑定角色并启动 Codex 或 Claude 执行该节点。",
+  approval: "人工审批：等待指定人员作出通过、拒绝或延后决定。",
+  gate: "质量门禁：依据交付物和验证证据决定是否允许继续。",
+  evidence: "证据登记：记录可追溯的文件、日志或验证材料。",
+  deploy: "部署：执行受控部署，并保留部署输出与回滚信息。",
+  report: "报告：汇总当前阶段结果，形成可交付的报告。",
+  composite: "组合阶段：用于组织多个步骤；本身不直接执行命令。",
+};

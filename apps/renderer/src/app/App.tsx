@@ -21,8 +21,9 @@ import {
 import { TerminalPage } from "../features/terminal/TerminalPage";
 import type { TerminalViewportOutput } from "../features/terminal/TerminalViewport";
 import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
+import { WorkflowLibraryPage } from "../features/workflow/WorkflowLibraryPage";
 import { Navigation } from "./navigation";
-import { normalizeRoute, routeHash } from "./routes";
+import { isKnownRouteHash, normalizeRoute, parseWorkflowRoute, routeHash } from "./routes";
 import {
   isInteractiveAgentSessionClosedError,
   isInteractiveAgentOutputLimitError,
@@ -57,6 +58,7 @@ import {
   type TerminalSessionSummary,
   type WorkflowDefinitionSummary,
   type WorkflowExportFormat,
+  type WorkflowLibraryItem,
   type WorkflowSimulation,
   type WorkflowVersionDiff,
   type WorkflowVersionSummary,
@@ -104,6 +106,9 @@ export function App() {
   const [workflowSimulation, setWorkflowSimulation] = useState<WorkflowSimulation | null>(null);
   const [workflowHistory, setWorkflowHistory] = useState<WorkflowVersionSummary[]>([]);
   const [workflowDiff, setWorkflowDiff] = useState<WorkflowVersionDiff | null>(null);
+  const [workflowLibrary, setWorkflowLibrary] = useState<WorkflowLibraryItem[]>([]);
+  const [workflowLibraryLoading, setWorkflowLibraryLoading] = useState(false);
+  const [workflowLibraryError, setWorkflowLibraryError] = useState<string | null>(null);
   const [gitWorkspaceStatus, setGitWorkspaceStatus] = useState<GitWorkspaceStatus | null>(null);
   const [gitWorktrees, setGitWorktrees] = useState<GitWorktree[]>([]);
   const [recoveryDiagnostics, setRecoveryDiagnostics] = useState<RecoveryDiagnostics | null>(null);
@@ -122,6 +127,9 @@ export function App() {
   const liveAgentOutputPendingRef = useRef<Record<string, Record<string, TerminalViewportOutput[]>>>({});
   const liveAgentOutputFrameRef = useRef<number | null>(null);
   const runSwitchInProgressRef = useRef(false);
+  const workflowRoute = parseWorkflowRoute(window.location.hash);
+  const workflowAssetId = workflowRoute.mode === "edit" ? workflowRoute.workflowId : "";
+  const isWorkflowEditor = currentRoute === "workflow" && workflowRoute.mode !== "library";
 
   useEffect(() => {
     if (currentRoute === "workflow") {
@@ -227,7 +235,7 @@ export function App() {
   }, [apiBaseUrl, state?.connection]);
 
   useEffect(() => {
-    if (!workflowVersionId || state?.connection !== "connected") {
+    if (!isWorkflowEditor || state?.connection !== "connected") {
       setWorkflowDefinition(null);
       setCompiledWorkflow(null);
       setWorkflowSimulation(null);
@@ -235,6 +243,15 @@ export function App() {
       setWorkflowDiff(null);
       return;
     }
+    if (workflowRoute.mode === "new") {
+      setWorkflowDefinition(createBlankWorkflowDefinition());
+      setCompiledWorkflow(null);
+      setWorkflowSimulation(null);
+      setWorkflowHistory([]);
+      setWorkflowDiff(null);
+      return;
+    }
+    if (!workflowVersionId) return;
     setWorkflowSimulation(null);
     setWorkflowDiff(null);
     let isMounted = true;
@@ -261,7 +278,33 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [apiBaseUrl, state?.connection, workflowVersionId]);
+  }, [apiBaseUrl, isWorkflowEditor, state?.connection, workflowRoute.mode, workflowVersionId]);
+
+  useEffect(() => {
+    if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "library") {
+      return;
+    }
+    void refreshWorkflowLibrary();
+  }, [apiBaseUrl, currentRoute, state?.connection, workflowRoute.mode]);
+
+  useEffect(() => {
+    if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "edit") {
+      return;
+    }
+    let isMounted = true;
+    createRuntimeClient(apiBaseUrl)
+      .listWorkflows()
+      .then((workflows) => {
+        const workflow = workflows.find((item) => item.workflowId === workflowAssetId);
+        if (isMounted && workflow?.workflowVersionId) {
+          setWorkflowVersionId(workflow.workflowVersionId);
+        }
+      })
+      .catch(() => {
+        // The version loader reports a concrete error if the asset is no longer available.
+      });
+    return () => { isMounted = false; };
+  }, [apiBaseUrl, currentRoute, state?.connection, workflowAssetId, workflowRoute.mode]);
 
   useEffect(() => {
     if (currentRoute !== "artifacts" || state?.connection !== "connected") {
@@ -604,7 +647,7 @@ export function App() {
   useEffect(() => {
     const syncRoute = () => {
       const route = normalizeRoute(window.location.hash);
-      if (window.location.hash !== routeHash(route)) {
+      if (!isKnownRouteHash(window.location.hash)) {
         window.history.replaceState(null, "", routeHash(route));
       }
       setCurrentRoute(route);
@@ -681,6 +724,38 @@ export function App() {
       return;
     }
     setRuns(await createRuntimeClient(apiBaseUrl).listRunsForWorkflowVersion(workflowVersionId));
+  }
+
+  async function refreshWorkflowLibrary() {
+    setWorkflowLibraryLoading(true);
+    setWorkflowLibraryError(null);
+    try {
+      setWorkflowLibrary(await createRuntimeClient(apiBaseUrl).listWorkflows());
+    } catch (error) {
+      setWorkflowLibraryError(`加载工作流失败：${errorMessage(error)}`);
+    } finally {
+      setWorkflowLibraryLoading(false);
+    }
+  }
+
+  function openWorkflowEditor(workflow: WorkflowLibraryItem) {
+    if (!workflow.workflowVersionId) {
+      setOperationMessage("该工作流尚未保存版本，无法编辑。");
+      return;
+    }
+    setWorkflowVersionId(workflow.workflowVersionId);
+    window.location.hash = `#/workflow/${encodeURIComponent(workflow.workflowId)}`;
+  }
+
+  async function copyWorkflowTemplate(workflow: WorkflowLibraryItem, name: string) {
+    try {
+      const copied = await client.copyWorkflowTemplate(workflow.workflowId, name, now());
+      setWorkflowVersionId(copied.workflowVersionId);
+      setOperationMessage(`已基于模板创建工作流：${name}`);
+      window.location.hash = `#/workflow/${encodeURIComponent(copied.workflowId)}`;
+    } catch (error) {
+      setOperationMessage(`基于模板创建工作流失败：${errorMessage(error)}`);
+    }
   }
 
   async function handleImportProject() {
@@ -1547,10 +1622,16 @@ export function App() {
   }
 
   async function handleSaveWorkflowDefinition(definition: WorkflowDefinitionSummary) {
-    if (!workflowVersionId) {
-      return;
-    }
     try {
+      if (workflowRoute.mode === "new") {
+        const created = await client.createWorkflow(definition, false, now());
+        setWorkflowVersionId(created.workflowVersionId);
+        setOperationMessage(`工作流已创建：${definition.name}`);
+        window.location.hash = "#/workflow";
+        await refreshWorkflowLibrary();
+        return;
+      }
+      if (!workflowVersionId) throw new Error("工作流版本不存在");
       const saved = await client.saveWorkflowVersion(workflowVersionId, definition, now());
       setWorkflowVersionId(saved.workflowVersionId);
       setWorkflowDefinition(saved.definition);
@@ -1567,6 +1648,8 @@ export function App() {
         workflowName: saved.definition.name,
       });
       setOperationMessage(`工作流新版本已保存：${saved.definition.version}`);
+      window.location.hash = "#/workflow";
+      await refreshWorkflowLibrary();
     } catch (error) {
       setOperationMessage(`保存工作流版本失败：${errorMessage(error)}`);
       throw error;
@@ -1843,7 +1926,18 @@ export function App() {
             providerDiagnostics={providerDiagnostics}
             />
           ) : null}
-          {currentRoute === "workflow" ? (
+          {currentRoute === "workflow" && workflowRoute.mode === "library" ? (
+            <WorkflowLibraryPage
+              workflows={workflowLibrary}
+              loading={workflowLibraryLoading}
+              error={workflowLibraryError}
+              onRefresh={() => void refreshWorkflowLibrary()}
+              onCreate={() => { window.location.hash = "#/workflow/new"; }}
+              onEdit={openWorkflowEditor}
+              onCopyTemplate={(workflow, name) => void copyWorkflowTemplate(workflow, name)}
+            />
+          ) : null}
+          {currentRoute === "workflow" && workflowRoute.mode !== "library" ? (
             <WorkflowViewer
               state={state}
               workflow={workflowDefinition}
@@ -1857,6 +1951,7 @@ export function App() {
               onCompareVersion={handleCompareWorkflowVersion}
               onRestoreVersion={handleRestoreWorkflowVersion}
               onExportWorkflow={handleExportWorkflowVersion}
+              onBack={() => { window.location.hash = "#/workflow"; }}
             />
           ) : null}
           {currentRoute === "terminal" ? (
@@ -2044,6 +2139,21 @@ function fallbackState(): RuntimeWorkbenchState {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function createBlankWorkflowDefinition(): WorkflowDefinitionSummary {
+  return {
+    id: `workflow-${crypto.randomUUID()}`,
+    name: "未命名工作流",
+    version: "1",
+    sourceAdapter: "manual",
+    nodes: [],
+    edges: [],
+    roles: [],
+    gates: [],
+    policies: {},
+    metadata: {},
+  };
 }
 
 function downloadTextFile(fileName: string, content: string, mediaType: string) {

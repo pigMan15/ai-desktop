@@ -14,10 +14,31 @@ export const routes = [
 
 export type RouteId = (typeof routes)[number]["id"];
 
+export type WorkflowRoute =
+  | { mode: "library" }
+  | { mode: "new" }
+  | { mode: "edit"; workflowId: string };
+
 export function normalizeRoute(hash: string): RouteId {
+  if (parseWorkflowRoute(hash).mode !== "library" || hash.split("?")[0] === "#/workflow") {
+    return "workflow";
+  }
   return routes.find((route) => route.hash === hash)?.id ?? "projects";
 }
 
 export function routeHash(routeId: RouteId): string {
   return routes.find((route) => route.id === routeId)?.hash ?? "#/projects";
+}
+
+export function parseWorkflowRoute(hash: string): WorkflowRoute {
+  const pathname = hash.split("?")[0];
+  if (pathname === "#/workflow/new") return { mode: "new" };
+  const editMatch = pathname.match(/^#\/workflow\/([^/]+)$/);
+  if (editMatch && editMatch[1]) return { mode: "edit", workflowId: decodeURIComponent(editMatch[1]) };
+  return { mode: "library" };
+}
+
+export function isKnownRouteHash(hash: string) {
+  const pathname = hash.split("?")[0];
+  return routes.some((route) => route.hash === pathname) || pathname === "#/workflow/new" || /^#\/workflow\/[^/]+$/.test(pathname);
 }
