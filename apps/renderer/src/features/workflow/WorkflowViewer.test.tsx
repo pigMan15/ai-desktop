@@ -6,7 +6,7 @@ import { WorkflowViewer } from "./WorkflowViewer";
 afterEach(cleanup);
 
 describe("WorkflowViewer", () => {
-  it("renders node states and blocking reasons from the current Run projection", () => {
+  it("does not render Run status inside the workflow definition editor", () => {
     render(
       <WorkflowViewer
         state={{
@@ -36,10 +36,9 @@ describe("WorkflowViewer", () => {
       />,
     );
 
-    expect(screen.getByText("当前 Run：run-1")).toBeInTheDocument();
-    expect(screen.getByText("plan")).toBeInTheDocument();
-    expect(screen.getByText("PASSED")).toBeInTheDocument();
-    expect(screen.getByText("WAITING_FOR_HUMAN：等待人工审批")).toBeInTheDocument();
+    expect(screen.getByText("正在加载工作流定义...")).toBeInTheDocument();
+    expect(screen.queryByText("当前 Run：run-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("WAITING_FOR_HUMAN：等待人工审批")).not.toBeInTheDocument();
   });
 
   it("renders the persisted workflow definition and compiler diagnostics", () => {
@@ -270,6 +269,37 @@ describe("WorkflowViewer", () => {
     expect(onExportWorkflow).toHaveBeenCalledWith("generic-yaml");
   });
 
+  it("keeps workflow actions in the canvas toolbar when configuration is open", () => {
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "workflow-actions-workflow",
+          name: "Workflow actions",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onSimulate={vi.fn()}
+        onSaveDefinition={vi.fn()}
+        onExportWorkflow={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "工作流配置" }));
+
+    expect(screen.getAllByRole("button", { name: "模拟版本" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "保存新版本" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "恢复为新版本" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "导出工作流" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "重置草稿" })).toBeInTheDocument();
+  });
+
   it("shows version history and requests a semantic comparison", () => {
     const onCompareVersion = vi.fn();
     render(
@@ -388,18 +418,16 @@ describe("WorkflowViewer", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "节点库" }));
     fireEvent.change(screen.getByLabelText("新节点 ID"), { target: { value: "review" } });
     fireEvent.change(screen.getByLabelText("新节点名称"), { target: { value: "人工审查" } });
     fireEvent.change(screen.getByLabelText("新节点类型"), { target: { value: "approval" } });
     fireEvent.click(screen.getByRole("button", { name: "新增节点" }));
 
-    fireEvent.change(screen.getByLabelText("连线起点"), { target: { value: "plan" } });
-    fireEvent.change(screen.getByLabelText("连线终点"), { target: { value: "review" } });
-    fireEvent.click(screen.getByRole("button", { name: "新增连线" }));
+    fireEvent.click(screen.getByRole("button", { name: "连接 plan 到 review" }));
     fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
 
-    expect(screen.getByText("人工审查")).toBeInTheDocument();
-    expect(screen.getByText("plan → review")).toBeInTheDocument();
+    expect(screen.getAllByText("人工审查").length).toBeGreaterThan(0);
     expect(onSaveDefinition).toHaveBeenCalledWith(
       expect.objectContaining({
         nodes: expect.arrayContaining([
@@ -433,6 +461,7 @@ describe("WorkflowViewer", () => {
     );
 
     expect(screen.queryByLabelText(/plan.*Agent/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 implement" }));
     expect(screen.getByLabelText(/implement.*Agent/)).toBeInTheDocument();
   });
 
@@ -457,6 +486,7 @@ describe("WorkflowViewer", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 plan" }));
     fireEvent.change(screen.getByLabelText("plan 节点类型"), { target: { value: "agent" } });
 
     expect(screen.getByLabelText(/plan.*Agent/)).toBeInTheDocument();
@@ -497,5 +527,267 @@ describe("WorkflowViewer", () => {
     expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({
       nodes: [expect.not.objectContaining({ agent: expect.anything() })],
     }));
+  });
+
+  it("keeps focus while editing an artifact output ID", () => {
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "artifact-focus-workflow",
+          name: "交付物焦点测试",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{
+            id: "plan",
+            name: "计划",
+            kind: "task",
+            artifacts: {
+              outputs: [{ id: "plan", name: "计划文档", type: "plan", required: true, path: "plan.md" }],
+            },
+          }],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 plan" }));
+    const input = screen.getByLabelText(/plan.*交付物.*规范 ID/) as HTMLInputElement;
+    input.focus();
+    fireEvent.change(input, { target: { value: "plan-a" } });
+
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe("plan-a");
+  });
+
+  it("shows the selected node in the inspector", () => {
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "canvas-selection-workflow",
+          name: "Canvas selection",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+      />,
+    );
+
+    expect(screen.queryByLabelText("plan 节点类型")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 plan" }));
+
+    expect(screen.getByLabelText("plan 节点类型")).toBeInTheDocument();
+    expect(screen.getByText("人工任务：由操作者完成工作并在 Run 中手动推进节点。")).toBeInTheDocument();
+  });
+
+  it("closes the selected node inspector", () => {
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "canvas-inspector-close-workflow",
+          name: "Canvas inspector close",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 plan" }));
+    expect(screen.getByLabelText("plan 节点类型")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭节点属性" }));
+    expect(screen.queryByLabelText("plan 节点类型")).not.toBeInTheDocument();
+  });
+
+  it("adds an edge through the accessible canvas connection control before saving", () => {
+    const onSaveDefinition = vi.fn();
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "canvas-connection-workflow",
+          name: "Canvas connection",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [
+            { id: "plan", name: "Plan", kind: "task" },
+            { id: "review", name: "Review", kind: "approval" },
+          ],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onSaveDefinition={onSaveDefinition}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "连接 plan 到 review" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({
+      edges: [expect.objectContaining({ from: "plan", to: "review" })],
+    }));
+  });
+
+  it("clears agent roleId but retains the legacy node role when changing to a non-agent node", () => {
+    const onSaveDefinition = vi.fn();
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "clear-agent-config-workflow",
+          name: "Clear agent config",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{
+            id: "plan",
+            name: "Plan",
+            kind: "agent",
+            role: "legacy-planner",
+            agent: { roleId: "planner", promptTemplate: "Draft a plan" },
+          }],
+          edges: [],
+          roles: [{ id: "planner", name: "Planner" }],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onSaveDefinition={onSaveDefinition}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 plan" }));
+    fireEvent.change(screen.getByLabelText("plan 节点类型"), { target: { value: "task" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    const savedNode = onSaveDefinition.mock.calls[0][0].nodes[0];
+    expect(savedNode).toEqual(expect.objectContaining({
+      id: "plan",
+      kind: "task",
+      role: "legacy-planner",
+    }));
+    expect(savedNode).not.toHaveProperty("agent");
+    expect(savedNode).not.toHaveProperty("agent.roleId");
+  });
+
+  it("edits a platform role and binds it to the selected Agent node", () => {
+    const onSaveDefinition = vi.fn();
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "role-library-workflow",
+          name: "Role library",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "implement", name: "Implement", kind: "agent" }],
+          edges: [],
+          roles: [{ id: "developer", name: "Developer", instructions: "Implement approved work." }],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onSaveDefinition={onSaveDefinition}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "角色库" }));
+    fireEvent.change(screen.getByLabelText("角色 developer 的职责与边界"), {
+      target: { value: "Implement the approved plan and verify it." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 implement" }));
+    fireEvent.change(screen.getByLabelText("节点 implement 的执行角色"), { target: { value: "developer" } });
+    fireEvent.change(screen.getByLabelText("implement Agent 节点模板"), { target: { value: "Implement the endpoint." } });
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({
+      roles: [expect.objectContaining({
+        id: "developer",
+        instructions: "Implement the approved plan and verify it.",
+      })],
+      nodes: [expect.objectContaining({
+        id: "implement",
+        agent: expect.objectContaining({ roleId: "developer", promptTemplate: "Implement the endpoint." }),
+      })],
+    }));
+  });
+
+  it("does not delete a role while an Agent node references it", () => {
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "referenced-role-workflow",
+          name: "Referenced role",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "implement", name: "Implement", kind: "agent", agent: { roleId: "developer" } }],
+          edges: [],
+          roles: [{ id: "developer", name: "Developer" }],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "角色库" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除角色 developer" }));
+
+    expect(screen.getByText("角色仍被节点 implement 使用")).toBeInTheDocument();
+  });
+
+  it("imports the Harness reference roles into the workflow draft", () => {
+    const onSaveDefinition = vi.fn();
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "harness-role-import",
+          name: "Harness roles",
+          version: "1",
+          sourceAdapter: "generic-yaml",
+          nodes: [],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onSaveDefinition={onSaveDefinition}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "角色库" }));
+    fireEvent.click(screen.getByRole("button", { name: "导入 Harness 参考角色" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({
+      roles: expect.arrayContaining([
+        expect.objectContaining({ id: "developer", name: "开发" }),
+        expect.objectContaining({ id: "verifier", name: "验证" }),
+        expect.objectContaining({ id: "knowledge-keeper", name: "知识沉淀" }),
+      ]),
+    }));
+    expect(onSaveDefinition.mock.calls[0][0].roles).toHaveLength(13);
   });
 });

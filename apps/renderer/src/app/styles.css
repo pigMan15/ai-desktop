@@ -190,11 +190,14 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
-  margin: 0 0 18px;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
 }
 
 .workflow-editor--inspecting { grid-template-columns: minmax(0, 1fr) minmax(340px, 380px); }
-.workflow-canvas-shell { position: relative; min-width: 0; }
+.page-workflow { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.workflow-canvas-shell { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .workflow-canvas-toolbar {
   display: flex;
   align-items: center;
@@ -255,7 +258,6 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 
 .workflow-role-library,
 .workflow-configuration,
-.workflow-run-status,
 .workflow-simulation {
   position: absolute;
   z-index: 6;
@@ -281,8 +283,6 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 }
 
 .workflow-configuration { padding: 14px; }
-.workflow-run-status { width: min(720px, calc(100% - 24px)); padding: 14px; }
-.workflow-run-status .table-like { max-height: 300px; }
 .workflow-simulation { width: min(560px, calc(100% - 24px)); padding: 14px; }
 .workflow-simulation .workflow-floating-panel-heading > div { display: flex; align-items: center; gap: 10px; }
 .workflow-configuration .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -382,8 +382,10 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 
 .workflow-canvas {
   position: relative;
+  flex: 1 1 auto;
   min-width: 0;
-  height: clamp(460px, calc(100dvh - 400px), 760px);
+  min-height: 240px;
+  height: auto;
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -489,9 +491,13 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 @supports selector(body:has(.page-workflow)) {
   body:has(.page-workflow) { overflow: hidden; }
   .workbench:has(.page-workflow) {
+    display: flex;
+    flex-direction: column;
     height: 100dvh;
     overflow: clip;
   }
+  .workbench:has(.page-workflow) .content-grid { flex: 1 1 auto; min-height: 0; }
+  .workbench:has(.page-workflow) .page-workflow { height: 100%; }
 }
 
 @media (max-width: 720px) {
@@ -499,7 +505,7 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
     body:has(.page-workflow) { overflow: auto; }
     .workbench:has(.page-workflow) { height: auto; overflow: visible; }
   }
-  .workflow-canvas { height: 460px; }
+  .workflow-canvas { min-height: 360px; }
 }
 
 @media (max-width: 980px) {
@@ -514,12 +520,11 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   }
   .workflow-role-library,
   .workflow-configuration,
-  .workflow-run-status,
   .workflow-simulation { left: 8px; width: calc(100% - 16px); }
   .workflow-inspector { right: 8px; width: min(360px, calc(100% - 16px)); padding: 12px; }
   .workflow-toolbox .form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .workflow-toolbox .quiet-button { width: auto; }
-  .workflow-canvas { height: clamp(380px, calc(100dvh - 360px), 560px); }
+  .workflow-canvas { min-height: 280px; }
   .workflow-inspector .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workflow-inspector .form-wide { grid-column: span 2; }
 }

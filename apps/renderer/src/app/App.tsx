@@ -109,6 +109,8 @@ export function App() {
   const [workflowLibrary, setWorkflowLibrary] = useState<WorkflowLibraryItem[]>([]);
   const [workflowLibraryLoading, setWorkflowLibraryLoading] = useState(false);
   const [workflowLibraryError, setWorkflowLibraryError] = useState<string | null>(null);
+  const [workflowRouteError, setWorkflowRouteError] = useState<string | null>(null);
+  const [resolvedWorkflowAssetId, setResolvedWorkflowAssetId] = useState<string | null>(null);
   const [gitWorkspaceStatus, setGitWorkspaceStatus] = useState<GitWorkspaceStatus | null>(null);
   const [gitWorktrees, setGitWorktrees] = useState<GitWorktree[]>([]);
   const [recoveryDiagnostics, setRecoveryDiagnostics] = useState<RecoveryDiagnostics | null>(null);
@@ -130,6 +132,9 @@ export function App() {
   const workflowRoute = parseWorkflowRoute(window.location.hash);
   const workflowAssetId = workflowRoute.mode === "edit" ? workflowRoute.workflowId : "";
   const isWorkflowEditor = currentRoute === "workflow" && workflowRoute.mode !== "library";
+  const editorWorkflowVersionId = workflowRoute.mode === "edit" && resolvedWorkflowAssetId === workflowAssetId
+    ? workflowVersionId
+    : "";
 
   useEffect(() => {
     if (currentRoute === "workflow") {
@@ -251,15 +256,15 @@ export function App() {
       setWorkflowDiff(null);
       return;
     }
-    if (!workflowVersionId) return;
+    if (!editorWorkflowVersionId || resolvedWorkflowAssetId !== workflowAssetId) return;
     setWorkflowSimulation(null);
     setWorkflowDiff(null);
     let isMounted = true;
     const runtimeClient = createRuntimeClient(apiBaseUrl);
     Promise.all([
-      runtimeClient.getWorkflowDefinition(workflowVersionId),
-      runtimeClient.compileWorkflowDefinition(workflowVersionId),
-      runtimeClient.listWorkflowVersionHistory(workflowVersionId),
+      runtimeClient.getWorkflowDefinition(editorWorkflowVersionId),
+      runtimeClient.compileWorkflowDefinition(editorWorkflowVersionId),
+      runtimeClient.listWorkflowVersionHistory(editorWorkflowVersionId),
     ])
       .then(([definition, compiled, history]) => {
         if (isMounted) {
@@ -278,7 +283,22 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [apiBaseUrl, isWorkflowEditor, state?.connection, workflowRoute.mode, workflowVersionId]);
+  }, [
+    apiBaseUrl,
+    editorWorkflowVersionId,
+    isWorkflowEditor,
+    resolvedWorkflowAssetId,
+    state?.connection,
+    workflowAssetId,
+    workflowRoute.mode,
+  ]);
+
+  useEffect(() => {
+    if (currentRoute !== "workflow" || workflowRoute.mode !== "new") return;
+    setWorkflowVersionId("");
+    setResolvedWorkflowAssetId(null);
+    setWorkflowRouteError(null);
+  }, [currentRoute, workflowRoute.mode]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "library") {
@@ -292,16 +312,41 @@ export function App() {
       return;
     }
     let isMounted = true;
+    setResolvedWorkflowAssetId(null);
+    setWorkflowRouteError(null);
+    setWorkflowDefinition(null);
+    setCompiledWorkflow(null);
+    setWorkflowHistory([]);
+    setWorkflowSimulation(null);
+    setWorkflowDiff(null);
     createRuntimeClient(apiBaseUrl)
       .listWorkflows()
       .then((workflows) => {
         const workflow = workflows.find((item) => item.workflowId === workflowAssetId);
-        if (isMounted && workflow?.workflowVersionId) {
-          setWorkflowVersionId(workflow.workflowVersionId);
+        if (!isMounted) return;
+        if (!workflow) {
+          setWorkflowVersionId("");
+          setWorkflowRouteError("找不到该工作流，可能已被删除或没有访问权限。");
+          return;
         }
+        if (workflow.archivedAt) {
+          setWorkflowVersionId("");
+          setWorkflowRouteError("该工作流已归档，不能继续编辑或保存新版本。");
+          return;
+        }
+        if (!workflow.workflowVersionId) {
+          setWorkflowVersionId("");
+          setWorkflowRouteError("该工作流没有可编辑的版本。");
+          return;
+        }
+        setWorkflowVersionId(workflow.workflowVersionId);
+        setResolvedWorkflowAssetId(workflow.workflowId);
       })
       .catch(() => {
-        // The version loader reports a concrete error if the asset is no longer available.
+        if (isMounted) {
+          setWorkflowVersionId("");
+          setWorkflowRouteError("无法验证该工作流，请检查 Runtime 连接后重试。");
+        }
       });
     return () => { isMounted = false; };
   }, [apiBaseUrl, currentRoute, state?.connection, workflowAssetId, workflowRoute.mode]);
@@ -1631,8 +1676,8 @@ export function App() {
         await refreshWorkflowLibrary();
         return;
       }
-      if (!workflowVersionId) throw new Error("工作流版本不存在");
-      const saved = await client.saveWorkflowVersion(workflowVersionId, definition, now());
+      if (!editorWorkflowVersionId) throw new Error("工作流版本不存在");
+      const saved = await client.saveWorkflowVersion(editorWorkflowVersionId, definition, now());
       setWorkflowVersionId(saved.workflowVersionId);
       setWorkflowDefinition(saved.definition);
       setCompiledWorkflow(saved.compiled);
@@ -1937,7 +1982,24 @@ export function App() {
               onCopyTemplate={(workflow, name) => void copyWorkflowTemplate(workflow, name)}
             />
           ) : null}
-          {currentRoute === "workflow" && workflowRoute.mode !== "library" ? (
+          {currentRoute === "workflow" && workflowRoute.mode === "edit" && workflowRouteError ? (
+            <section className="panel page-workspace workflow-route-error" aria-labelledby="workflow-route-error-title">
+              <div className="panel-heading">
+                <div>
+                  <p className="section-kicker">工作流</p>
+                  <h2 id="workflow-route-error-title">工作流不可用</h2>
+                </div>
+                <button type="button" className="quiet-button" onClick={() => { window.location.hash = "#/workflow"; }}>返回列表</button>
+              </div>
+              <p className="body-copy">{workflowRouteError}</p>
+            </section>
+          ) : null}
+          {currentRoute === "workflow" && workflowRoute.mode === "edit" && !workflowRouteError && resolvedWorkflowAssetId !== workflowAssetId ? (
+            <section className="panel page-workspace workflow-route-loading" aria-label="正在加载工作流">
+              <p className="body-copy" role="status">正在验证工作流...</p>
+            </section>
+          ) : null}
+          {currentRoute === "workflow" && (workflowRoute.mode === "new" || (workflowRoute.mode === "edit" && !workflowRouteError && resolvedWorkflowAssetId === workflowAssetId)) ? (
             <WorkflowViewer
               state={state}
               workflow={workflowDefinition}
@@ -1945,9 +2007,9 @@ export function App() {
               simulation={workflowSimulation}
               history={workflowHistory}
               diff={workflowDiff}
-              workflowVersionId={workflowVersionId}
+              workflowVersionId={editorWorkflowVersionId || undefined}
               onSaveDefinition={handleSaveWorkflowDefinition}
-              onSimulate={handleSimulateWorkflowDefinition}
+              onSimulate={workflowRoute.mode === "edit" ? handleSimulateWorkflowDefinition : undefined}
               onCompareVersion={handleCompareWorkflowVersion}
               onRestoreVersion={handleRestoreWorkflowVersion}
               onExportWorkflow={handleExportWorkflowVersion}

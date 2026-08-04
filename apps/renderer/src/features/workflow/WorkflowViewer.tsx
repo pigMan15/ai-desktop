@@ -44,7 +44,6 @@ export function WorkflowViewer({
   onExportWorkflow,
   onBack,
 }: Props) {
-  const projection = state?.projection;
   const [draft, setDraft] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
   const [newNodeId, setNewNodeId] = useState("");
@@ -282,40 +281,7 @@ export function WorkflowViewer({
         </div>
         {onBack ? <button type="button" className="quiet-button" onClick={onBack}>返回列表</button> : null}
       </div>
-      {!projection && !workflow ? (
-        <p className="body-copy">
-          尚未创建 Run。工作流定义和编译诊断仍可在此审查，运行状态会在创建 Run 后显示。
-        </p>
-      ) : !workflow && projection ? (
-        <>
-          <p className="body-copy">当前 Run：{projection.runId}</p>
-          <div className="table-like" role="table" aria-label="工作流节点状态">
-            <div role="row" className="table-row table-head">
-              <span role="columnheader">节点</span>
-              <span role="columnheader">状态</span>
-              <span role="columnheader">当前执行</span>
-            </div>
-            {Object.entries(projection.nodeStates).map(([nodeId, nodeState]) => (
-              <div role="row" className="table-row" key={nodeId}>
-                <span role="cell">{nodeId}</span>
-                <span role="cell">{nodeState}</span>
-                <span role="cell">{projection.currentNodeIds.includes(nodeId) ? "是" : "否"}</span>
-              </div>
-            ))}
-          </div>
-          <ul className="compact-list" aria-label="工作流阻塞原因">
-            {projection.blockingReasons.length === 0 ? (
-              <li>暂无阻塞原因</li>
-            ) : (
-              projection.blockingReasons.map((reason) => (
-                <li key={`${reason.code}-${reason.nodeId ?? ""}`}>
-                  {reason.code}：{reason.message}
-                </li>
-              ))
-            )}
-          </ul>
-        </>
-        ) : null}
+      {!workflow ? <p className="body-copy">正在加载工作流定义...</p> : null}
       {workflow ? (
         <>
           <div className="panel-heading">

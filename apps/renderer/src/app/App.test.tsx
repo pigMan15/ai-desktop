@@ -99,6 +99,171 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "项目工作区" })).toBeInTheDocument();
   });
 
+  it("isolates a new workflow draft from the previously selected workflow version", async () => {
+    window.location.hash = "#/workflow/new";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      workflowVersionId: "workflow-version-old",
+      projectName: "demo",
+      workflowName: "旧工作流",
+      runId: null,
+    });
+    window.sessionStorage.setItem("workflow-draft:workflow-version-old", JSON.stringify({ name: "旧草稿" }));
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        calls.push(url.pathname);
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/agents/providers") return jsonResponse([]);
+        return jsonResponse([]);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("未命名工作流")).toBeInTheDocument();
+    await waitFor(() => expect((screen.getByLabelText("工作流定义 JSON") as HTMLTextAreaElement).value).toContain("未命名工作流"));
+    expect(screen.queryByText("旧草稿")).not.toBeInTheDocument();
+    expect(calls).not.toContain("/workflow-versions/workflow-version-old");
+  });
+
+  it("blocks an archived workflow asset route before any old version can be loaded or saved", async () => {
+    window.location.hash = "#/workflow/archived-workflow";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      workflowVersionId: "workflow-version-old",
+      projectName: "demo",
+      workflowName: "旧工作流",
+      runId: null,
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        calls.push(url.pathname);
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/agents/providers") return jsonResponse([]);
+        if (url.pathname === "/workflows") {
+          return jsonResponse([{
+            workflowId: "archived-workflow",
+            name: "归档流程",
+            isBuiltin: false,
+            archivedAt: "2026-08-04T10:00:00Z",
+            updatedAt: "2026-08-04T10:00:00Z",
+            workflowVersionId: "workflow-version-archived",
+            currentVersion: "2",
+            nodeCount: 2,
+            boundProjectCount: 0,
+          }]);
+        }
+        return jsonResponse([]);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "工作流不可用" })).toBeInTheDocument();
+    expect(screen.getByText("该工作流已归档，不能继续编辑或保存新版本。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存新版本" })).not.toBeInTheDocument();
+    expect(calls).not.toContain("/workflow-versions/workflow-version-old");
+  });
+
+  it("shows an explicit error for an unknown workflow asset route", async () => {
+    window.location.hash = "#/workflow/missing-workflow";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/agents/providers" || url.pathname === "/workflows") return jsonResponse([]);
+        return jsonResponse([]);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "工作流不可用" })).toBeInTheDocument();
+    expect(screen.getByText("找不到该工作流，可能已被删除或没有访问权限。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存新版本" })).not.toBeInTheDocument();
+  });
+
+  it("opens a copied template as an editable asset and returns to the refreshed library after save", async () => {
+    window.location.hash = "#/workflow";
+    let copied = false;
+    const template = {
+      workflowId: "delivery-template",
+      name: "交付模板",
+      isBuiltin: true,
+      archivedAt: null,
+      updatedAt: "2026-08-04T10:00:00Z",
+      workflowVersionId: "template-version",
+      currentVersion: "1",
+      nodeCount: 1,
+      boundProjectCount: 0,
+    };
+    const copiedAsset = {
+      workflowId: "my-delivery",
+      name: "交付模板副本",
+      isBuiltin: false,
+      archivedAt: null,
+      updatedAt: "2026-08-04T11:00:00Z",
+      workflowVersionId: "my-delivery-version",
+      currentVersion: "1",
+      nodeCount: 1,
+      boundProjectCount: 0,
+    };
+    const definition = {
+      id: "my-delivery-definition",
+      name: "交付模板副本",
+      version: "1",
+      sourceAdapter: "manual",
+      nodes: [{ id: "plan", name: "计划", kind: "task" }],
+      edges: [],
+      roles: [],
+      gates: [],
+      policies: {},
+      metadata: {},
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/agents/providers") return jsonResponse([]);
+        if (url.pathname === "/workflows") return jsonResponse(copied ? [template, copiedAsset] : [template]);
+        if (url.pathname === "/workflows/delivery-template/copy") {
+          copied = true;
+          return jsonResponse({ workflowId: "my-delivery", workflowVersionId: "my-delivery-version", isBuiltin: false });
+        }
+        if (url.pathname === "/workflow-versions/my-delivery-version") return jsonResponse(definition);
+        if (url.pathname === "/workflow-versions/my-delivery-version/compile") return jsonResponse({ diagnostics: [], graphSpec: { nodes: [], edges: [] } });
+        if (url.pathname === "/workflow-versions/my-delivery-version/history") return jsonResponse([]);
+        if (url.pathname === "/workflow-versions/my-delivery-version/save") {
+          return jsonResponse({
+            workflowVersionId: "my-delivery-version-2",
+            definition: { ...definition, version: "2" },
+            compiled: { diagnostics: [], graphSpec: { nodes: [], edges: [] } },
+          });
+        }
+        return jsonResponse([]);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "基于模板新建 交付模板" }));
+    expect(await screen.findByText("交付模板副本")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    await waitFor(() => expect(window.location.hash).toBe("#/workflow"));
+    expect(await screen.findByRole("button", { name: "编辑 交付模板副本" })).toBeInTheDocument();
+  });
+
   it("restores the saved Run from Runtime when the application starts", async () => {
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
