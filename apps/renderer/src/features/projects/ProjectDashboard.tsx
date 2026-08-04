@@ -1,4 +1,4 @@
-import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
+import type { ProjectWorkflowBinding, RuntimeWorkbenchState } from "../../app/runtimeClient";
 import type { ReactNode } from "react";
 
 type Props = {
@@ -13,6 +13,7 @@ type Props = {
   operationMessage?: string;
   gitPanel?: ReactNode;
   workflowBindingStep?: ReactNode;
+  workflowBinding?: ProjectWorkflowBinding | null;
 };
 
 export function ProjectDashboard({
@@ -27,9 +28,13 @@ export function ProjectDashboard({
   operationMessage,
   gitPanel,
   workflowBindingStep,
+  workflowBinding = null,
 }: Props) {
   const connected = state?.connection === "connected";
   const initialized = state?.workspaceStatus === "ready";
+  const workflowName = workflowBinding && state?.workflowName?.includes("未绑定")
+    ? "已绑定工作流"
+    : state?.workflowName ?? "未绑定工作流";
 
   return (
     <section id="projects" className="panel panel-wide page-workspace page-projects" aria-labelledby="projects-title">
@@ -63,6 +68,7 @@ export function ProjectDashboard({
       ) : initialized ? (
         <>
           {workflowBindingStep}
+          {operationMessage ? <p className="body-copy project-operation-message" role="status">{operationMessage}</p> : null}
           <div className="table-like" role="table" aria-label="项目状态">
             <div role="row" className="table-row table-head">
               <span role="columnheader">项目</span>
@@ -71,7 +77,7 @@ export function ProjectDashboard({
             </div>
             <div role="row" className="table-row">
               <span role="cell">{state.projectName}</span>
-              <span role="cell">{state.workflowName}</span>
+              <span role="cell">{workflowName}</span>
               <span role="cell">{state.projection?.status ?? "尚未创建 Run"}</span>
             </div>
           </div>
@@ -102,7 +108,6 @@ export function ProjectDashboard({
           {operationMessage ? <p className="body-copy" role="status">{operationMessage}</p> : null}
         </>
       )}
-      {initialized && operationMessage ? <p className="body-copy" role="status">{operationMessage}</p> : null}
     </section>
   );
 }

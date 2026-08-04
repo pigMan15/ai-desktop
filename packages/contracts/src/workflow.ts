@@ -51,10 +51,17 @@ export type NodeAdvanceSpec = {
 
 export type WorkflowRole = {
   id: string;
+  assetVersionId?: string;
   name: string;
+  purpose?: string;
   description?: string;
   instructions?: string;
+  inputRequirements?: string;
+  outputRequirements?: string;
+  acceptanceCriteria?: string;
+  forbiddenActions?: string;
   provider?: "codex" | "claude";
+  model?: string;
   allowedTools?: string[];
   disabled?: boolean;
   metadata?: Record<string, unknown>;

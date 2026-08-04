@@ -10,7 +10,7 @@ import {
 import { TerminalManager, type TerminalCommandDecisionRecord } from "./terminal.js";
 import { GitWorkspaceManager } from "./gitWorkspace.js";
 
-const { BrowserWindow, app, ipcMain } = electron;
+const { BrowserWindow, app, dialog, ipcMain } = electron;
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultRendererUrl = process.env.RENDERER_URL ?? "http://127.0.0.1:5173";
 const registeredRuntimeHandlers = new WeakSet<IpcMainLike>();
@@ -33,6 +33,7 @@ export type IpcMainLike = {
   handle(channel: "runtime:restart", handler: () => Promise<RuntimeStatus>): void;
   handle(channel: "runtime:logs", handler: () => RuntimeLogEntry[]): void;
   handle(channel: "runtime:request", handler: (...args: unknown[]) => unknown): void;
+  handle(channel: "project:select-directory", handler: (...args: unknown[]) => unknown): void;
 };
 
 type TerminalIpcMainLike = {
@@ -48,6 +49,12 @@ type TerminalIpcEvent = {
 type GitWorkspaceIpcMainLike = {
   handle(channel: string, handler: (...args: unknown[]) => unknown): void;
 };
+
+type ProjectDialogLike = {
+  showOpenDialog(options: Electron.OpenDialogOptions): Promise<{ canceled: boolean; filePaths: string[] }>;
+};
+
+type ProjectIpcMainLike = Pick<IpcMainLike, "handle">;
 
 type GitWorkspaceOperations = Pick<
   GitWorkspaceManager,
@@ -269,6 +276,19 @@ export function registerGitWorkspaceHandlers(
   );
 }
 
+export function registerProjectHandlers(
+  ipcMainLike: ProjectIpcMainLike = ipcMain,
+  projectDialog: ProjectDialogLike = dialog,
+): void {
+  ipcMainLike.handle("project:select-directory", async () => {
+    const selection = await projectDialog.showOpenDialog({
+      title: "选择项目目录",
+      properties: ["openDirectory"],
+    });
+    return selection.canceled ? null : selection.filePaths[0] ?? null;
+  });
+}
+
 function isElectronPackaged(): boolean {
   return Boolean(app?.isPackaged);
 }
@@ -345,6 +365,7 @@ export function bootstrap(options: {
   registerRuntimeHandlers(ipcMainLike, runtimeManager);
   registerTerminalHandlers(ipcMainLike);
   registerGitWorkspaceHandlers(ipcMainLike);
+  registerProjectHandlers(ipcMainLike);
 
   appLike.whenReady().then(async () => {
     await runtimeManager.start();

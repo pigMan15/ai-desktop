@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import type {
   KnowledgeCandidate,
@@ -21,7 +21,6 @@ type Props = {
   onCreate: (title: string, content: string, source: string) => void;
   onReview: (candidateId: string, decision: "approved" | "rejected") => void;
   onPublish: (candidateId: string) => void;
-  onSynthesize?: (candidateId: string, provider: KnowledgeSynthesis["provider"]) => void;
   onFeedbackSynthesis?: (synthesisId: string, feedback: string) => void;
   onPublishSynthesis?: (synthesisId: string) => void;
   onReplay?: (documentId: string) => void;
@@ -39,6 +38,13 @@ type Props = {
   operationMessage?: string;
 };
 
+type SynthesisViewer = {
+  title: string;
+  label: string;
+  kind: "log" | "rich";
+  content: string;
+} | null;
+
 export function KnowledgePage({
   candidates,
   documents = [],
@@ -50,7 +56,6 @@ export function KnowledgePage({
   onCreate,
   onReview,
   onPublish,
-  onSynthesize,
   onFeedbackSynthesis,
   onPublishSynthesis,
   onReplay,
@@ -65,6 +70,7 @@ export function KnowledgePage({
   const [content, setContent] = useState("");
   const [selectedRunId, setSelectedRunId] = useState("");
   const [feedbackBySynthesisId, setFeedbackBySynthesisId] = useState<Record<string, string>>({});
+  const [synthesisViewer, setSynthesisViewer] = useState<SynthesisViewer>(null);
 
   function createCandidate() {
     const runId = selectedRunId || activeRunId || runs[0]?.id;
@@ -77,9 +83,15 @@ export function KnowledgePage({
   }
 
   const effectiveRunId = selectedRunId || activeRunId || runs[0]?.id || "";
+  const sortedCandidates = [...candidates].sort((left, right) =>
+    Date.parse(right.createdAt) - Date.parse(left.createdAt),
+  );
+  const sortedDocuments = [...documents].sort((left, right) =>
+    Date.parse(right.publishedAt) - Date.parse(left.publishedAt),
+  );
 
   return (
-    <section id="knowledge" className="panel" aria-labelledby="knowledge-title">
+    <section id="knowledge" className="panel page-workspace page-knowledge" aria-labelledby="knowledge-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Knowledge</p>
@@ -90,11 +102,10 @@ export function KnowledgePage({
       <p className="body-copy">
         知识必须经过可信人工审核后才能发布。发布记录会写入 Runtime 审计链，供后续检索和复盘。
       </p>
+      <details className="knowledge-manual-entry">
+        <summary>补录人工知识</summary>
+        <p className="body-copy">用于记录无法从 Run 产物直接提炼的经验、规则或临时决策。</p>
       <div className="form-grid">
-        <label>
-          知识标题
-          <input value={title} onChange={(event) => setTitle(event.target.value)} />
-        </label>
         <label>
           关联 Run
           <select
@@ -104,12 +115,12 @@ export function KnowledgePage({
             disabled={runs.length === 0}
           >
             {runs.length === 0 ? <option value="">当前项目没有可关联的 Run</option> : null}
-            {runs.map((run) => (
-              <option key={run.id} value={run.id}>
-                {run.title} ({run.status})
-              </option>
-            ))}
+            {runs.map((run) => <option key={run.id} value={run.id}>{run.title} ({run.status})</option>)}
           </select>
+        </label>
+        <label>
+          知识标题
+          <input value={title} onChange={(event) => setTitle(event.target.value)} />
         </label>
         <label className="form-wide">
           知识内容
@@ -126,8 +137,9 @@ export function KnowledgePage({
         </button>
         {operationMessage ? <span className="status-pill">{operationMessage}</span> : null}
       </div>
+      </details>
       <div className="gate-stack" aria-label="知识候选">
-        {candidates.map((candidate) => (
+        {sortedCandidates.map((candidate) => (
           <KnowledgeCandidateCard
             key={candidate.id}
             candidate={candidate}
@@ -139,21 +151,21 @@ export function KnowledgePage({
             }
             onReview={onReview}
             onPublish={onPublish}
-            onSynthesize={onSynthesize}
             onFeedbackSynthesis={onFeedbackSynthesis}
             onPublishSynthesis={onPublishSynthesis}
+            onOpenSynthesisViewer={(viewer) => setSynthesisViewer(viewer)}
           />
         ))}
         {candidates.length === 0 ? <p className="body-copy">还没有待审核知识候选。</p> : null}
       </div>
       {documents.length > 0 ? (
         <div className="gate-stack" aria-label="已发布知识">
-          {documents.map((document) => (
+          {sortedDocuments.map((document) => (
             <article key={document.id} className="gate-record">
               <div className="panel-heading">
                 <strong>{document.title}</strong>
                 <span className="status-pill">
-                  {document.gitPublicationCount > 0 ? `已推送 ${document.gitPublicationCount} 次` : "已发布"}
+                  {document.gitPublicationCount > 0 ? `已推送 ${document.gitPublicationCount} 次` : knowledgeStatusLabel(document.status)}
                 </span>
               </div>
               <dl className="facts">
@@ -163,7 +175,7 @@ export function KnowledgePage({
                 </div>
                 <div>
                   <dt>发布时间</dt>
-                  <dd>{document.publishedAt}</dd>
+                  <dd>{formatChinaTime(document.publishedAt)}</dd>
                 </div>
                 {document.latestGitPublication ? (
                   <div>
@@ -250,6 +262,36 @@ export function KnowledgePage({
           </ul>
         </article>
       ) : null}
+      {synthesisViewer ? (
+        <div className="knowledge-drawer-backdrop" role="presentation">
+          <section
+            className="knowledge-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="knowledge-viewer-title"
+          >
+            <div className="panel-heading">
+              <div>
+                <p className="section-kicker">{synthesisViewer.label}</p>
+                <h3 id="knowledge-viewer-title">{synthesisViewer.title}</h3>
+              </div>
+              <button className="quiet-button" onClick={() => setSynthesisViewer(null)}>
+                关闭
+              </button>
+            </div>
+            {synthesisViewer.kind === "log" ? (
+              <pre className="terminal-readout" aria-label={`${synthesisViewer.label}：${synthesisViewer.title}`}>
+                {synthesisViewer.content}
+              </pre>
+            ) : (
+              <RichTextPreview
+                ariaLabel={`${synthesisViewer.label}：${synthesisViewer.title}`}
+                content={synthesisViewer.content}
+              />
+            )}
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -262,9 +304,9 @@ type KnowledgeCandidateCardProps = {
   onFeedbackChange: (synthesisId: string, feedback: string) => void;
   onReview: Props["onReview"];
   onPublish: Props["onPublish"];
-  onSynthesize?: Props["onSynthesize"];
   onFeedbackSynthesis?: Props["onFeedbackSynthesis"];
   onPublishSynthesis?: Props["onPublishSynthesis"];
+  onOpenSynthesisViewer: (viewer: Exclude<SynthesisViewer, null>) => void;
 };
 
 function KnowledgeCandidateCard({
@@ -275,21 +317,21 @@ function KnowledgeCandidateCard({
   onFeedbackChange,
   onReview,
   onPublish,
-  onSynthesize,
   onFeedbackSynthesis,
   onPublishSynthesis,
+  onOpenSynthesisViewer,
 }: KnowledgeCandidateCardProps) {
   const latestSynthesis = syntheses[0] ?? null;
-  const isSynthesisActive =
-    latestSynthesis?.status === "QUEUED" || latestSynthesis?.status === "RUNNING";
-
   return (
     <article className="gate-record">
       <div className="panel-heading">
         <strong>{candidate.title}</strong>
-        <span className="status-pill">{candidate.status}</span>
+        <span className="status-pill">{knowledgeStatusLabel(candidate.status)}</span>
       </div>
-      <p className="body-copy">{candidate.content}</p>
+      <details>
+        <summary>查看知识正文</summary>
+        <p className="body-copy">{candidate.content}</p>
+      </details>
       <dl className="facts">
         <div>
           <dt>来源</dt>
@@ -298,6 +340,10 @@ function KnowledgeCandidateCard({
         <div>
           <dt>审核意见</dt>
           <dd>{candidate.reviewComment ?? "尚未审核"}</dd>
+        </div>
+        <div>
+          <dt>创建时间</dt>
+          <dd>{formatChinaTime(candidate.createdAt)}</dd>
         </div>
       </dl>
       <div className="button-row">
@@ -316,16 +362,6 @@ function KnowledgeCandidateCard({
             <button className="quiet-button" onClick={() => onPublish(candidate.id)}>
               发布知识
             </button>
-            {onSynthesize ? (
-              <button
-                className="quiet-button"
-                disabled={isSynthesisActive}
-                onClick={() => onSynthesize(candidate.id, "codex")}
-                aria-label={`开始 CLI 合成：${candidate.title}`}
-              >
-                {isSynthesisActive ? "CLI 合成进行中" : "开始 CLI 合成"}
-              </button>
-            ) : null}
           </>
         ) : null}
       </div>
@@ -333,24 +369,42 @@ function KnowledgeCandidateCard({
         <section className="knowledge-synthesis" aria-label={`知识合成：${candidate.title}`}>
           <div className="panel-heading">
             <strong>CLI 合成稿</strong>
-            <span className="status-pill">{latestSynthesis.status}</span>
+            <span className="status-pill">{knowledgeStatusLabel(latestSynthesis.status)}</span>
           </div>
           {latestSynthesis.error ? <p className="body-copy">合成失败：{latestSynthesis.error}</p> : null}
           {synthesisOutput.some((event) => event.synthesisId === latestSynthesis.id) ? (
-            <pre className="terminal-readout" aria-label={`合成实时输出：${candidate.title}`}>
-              {synthesisOutput
-                .filter((event) => event.synthesisId === latestSynthesis.id)
-                .sort((left, right) => left.sequence - right.sequence)
-                .map((event) => formatSynthesisOutput(event.payload))
-                .join("\n")}
-            </pre>
+            <button
+              className="knowledge-detail-trigger"
+              onClick={() =>
+                onOpenSynthesisViewer({
+                  title: candidate.title,
+                  label: "CLI 执行日志",
+                  kind: "log",
+                  content: synthesisOutput
+                    .filter((event) => event.synthesisId === latestSynthesis.id)
+                    .sort((left, right) => left.sequence - right.sequence)
+                    .map((event) => formatSynthesisOutput(event.payload))
+                    .join("\n"),
+                })
+              }
+            >
+              查看 CLI 执行日志
+            </button>
           ) : null}
           {latestSynthesis.summary ? (
-            <pre className="terminal-readout" aria-label={`合成差异：${candidate.title}`}>
-              {diffArtifactText(candidate.content, latestSynthesis.summary)
-                .map((line) => `${line.kind === "added" ? "+ " : line.kind === "removed" ? "- " : "  "}${line.text}`)
-                .join("\n")}
-            </pre>
+            <button
+              className="knowledge-detail-trigger"
+              onClick={() =>
+                onOpenSynthesisViewer({
+                  title: candidate.title,
+                  label: "合成结果",
+                  kind: "rich",
+                  content: latestSynthesis.summary ?? "",
+                })
+              }
+            >
+              查看合成结果
+            </button>
           ) : (
             <p className="body-copy">正在等待 CLI 返回合成结果。</p>
           )}
@@ -396,7 +450,98 @@ function KnowledgeCandidateCard({
   );
 }
 
+function RichTextPreview({ content, ariaLabel }: { content: string; ariaLabel: string }) {
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  let inCode = false;
+  let codeLines: string[] = [];
+  const blocks: ReactNode[] = [];
+
+  lines.forEach((line, index) => {
+    if (line.trim().startsWith("```")) {
+      if (inCode) {
+        blocks.push(<pre className="rich-text-code" key={`code-${index}`}>{codeLines.join("\n")}</pre>);
+        codeLines = [];
+      }
+      inCode = !inCode;
+      return;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      return;
+    }
+    if (!line.trim()) {
+      blocks.push(<div className="rich-text-spacer" key={`space-${index}`} />);
+      return;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line.trim());
+    if (heading) {
+      const Heading = `h${Math.min(6, heading[1].length)}` as keyof JSX.IntrinsicElements;
+      blocks.push(<Heading key={`heading-${index}`}>{renderInlineText(heading[2])}</Heading>);
+      return;
+    }
+    if (/^[-*]\s+/.test(line.trim())) {
+      blocks.push(<li key={`item-${index}`}>{renderInlineText(line.trim().slice(2))}</li>);
+      return;
+    }
+    blocks.push(<p key={`paragraph-${index}`}>{renderInlineText(line)}</p>);
+  });
+
+  if (inCode && codeLines.length > 0) {
+    blocks.push(<pre className="rich-text-code" key="code-final">{codeLines.join("\n")}</pre>);
+  }
+
+  return <article className="rich-text-preview" aria-label={ariaLabel}>{blocks}</article>;
+}
+
+function renderInlineText(value: string): ReactNode {
+  return value.split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
+    part.startsWith("**") && part.endsWith("**")
+      ? <strong key={index}>{part.slice(2, -2)}</strong>
+      : part,
+  );
+}
+
 function formatSynthesisOutput(payload: Record<string, unknown>): string {
   const value = payload.text ?? payload.message ?? payload.summary ?? JSON.stringify(payload);
   return String(value);
+}
+
+function formatChinaTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function knowledgeStatusLabel(status: string): string {
+  switch (status) {
+    case "pending":
+      return "待审核";
+    case "approved":
+      return "已通过";
+    case "rejected":
+      return "已拒绝";
+    case "QUEUED":
+      return "等待合成";
+    case "RUNNING":
+      return "正在合成";
+    case "COMPLETED":
+      return "合成完成";
+    case "FAILED":
+      return "合成失败";
+    case "published":
+      return "已发布";
+    default:
+      return status;
+  }
 }

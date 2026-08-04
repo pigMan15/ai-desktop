@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RunDashboard } from "./RunDashboard";
@@ -22,6 +22,95 @@ vi.mock("../terminal/TerminalViewport", () => ({
 afterEach(cleanup);
 
 describe("RunDashboard", () => {
+  it("renders the active Run workbench before collapsed run details and dispatches its primary action", () => {
+    const onCompleteNode = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "Demo project",
+          workflowName: "Demo workflow",
+          projection: {
+            runId: "run-workbench",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [
+              {
+                id: "complete:plan",
+                label: "Complete node",
+                eventType: "NODE_COMPLETED",
+                nodeId: "plan",
+                risk: "low",
+              },
+              {
+                id: "reject:plan",
+                label: "Reject node",
+                eventType: "HUMAN_REJECTED",
+                nodeId: "plan",
+                risk: "medium",
+              },
+            ],
+            blockingReasons: [],
+            revision: "2",
+            updatedAt: "2026-08-04T00:00:00Z",
+          },
+          timeline: [{ id: "event-1", type: "NODE_STARTED", nodeId: "plan", createdAt: "2026-08-04T00:00:00Z" }],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        workflow={{
+          id: "demo-workflow",
+          name: "Demo workflow",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{
+            id: "plan",
+            name: "Plan",
+            kind: "human",
+            role: "Planner",
+            description: "Define the delivery plan.",
+            artifacts: {
+              outputs: [{ id: "plan-output", name: "Plan", type: "markdown", required: true, path: "docs/plan.md" }],
+            },
+            advance: { mode: "manual" },
+          }, {
+            id: "review",
+            name: "Review",
+            kind: "approval",
+          }],
+          edges: [{ id: "plan-to-review", from: "plan", to: "review" }],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onCompleteNode={onCompleteNode}
+      />,
+    );
+
+    const progressMap = screen.getByRole("region", { name: "运行进度图" });
+    const currentNode = screen.getByLabelText("当前工作环节");
+    const nextAction = screen.getByTestId("run-next-action-primary");
+    const details = screen.getByText("运行详情").closest("details");
+
+    expect(details).not.toHaveAttribute("open");
+    expect(screen.queryByTestId("run-next-action-secondary")).not.toBeInTheDocument();
+    expect(Boolean(progressMap.compareDocumentPosition(currentNode) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(Boolean(currentNode.compareDocumentPosition(nextAction) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(Boolean(nextAction.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(within(currentNode).getByText("下一工作环节")).toBeInTheDocument();
+    expect(within(currentNode).getByText("Review")).toBeInTheDocument();
+
+    fireEvent.click(within(nextAction).getByRole("button"));
+
+    expect(onCompleteNode).toHaveBeenCalledWith("plan");
+  });
+
   it("在 Runtime 允许人工完成时显示并触发完成当前节点", () => {
     const onCompleteNode = vi.fn();
     render(
@@ -63,6 +152,40 @@ describe("RunDashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成当前节点" }));
 
     expect(onCompleteNode).toHaveBeenCalledWith("plan");
+  });
+
+  it("makes an archived project's Run read-only", () => {
+    render(
+      <RunDashboard
+        projectArchived
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "Archived project",
+          workflowName: "Demo workflow",
+          projection: {
+            runId: "run-archived-project",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [{ id: "complete:plan", label: "Complete", eventType: "NODE_COMPLETED", nodeId: "plan", risk: "low" }],
+            blockingReasons: [],
+            revision: "2",
+            updatedAt: "2026-08-04T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("项目已归档，Run 仅可查看。重新导入项目后可恢复运行操作。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "完成当前节点" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动 Agent" })).toBeDisabled();
   });
 
   it("引导未初始化工作区先导入项目，而不是展示 Run 操作", () => {

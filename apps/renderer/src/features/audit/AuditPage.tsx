@@ -11,7 +11,7 @@ export function AuditPage({ records, onFilter }: Props) {
   const [action, setAction] = useState("");
 
   return (
-    <section id="audit" className="panel" aria-labelledby="audit-title">
+    <section id="audit" className="panel page-workspace page-audit" aria-labelledby="audit-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Governance</p>

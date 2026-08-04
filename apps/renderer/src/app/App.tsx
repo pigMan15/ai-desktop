@@ -23,6 +23,7 @@ import { TerminalPage } from "../features/terminal/TerminalPage";
 import type { TerminalViewportOutput } from "../features/terminal/TerminalViewport";
 import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
 import { WorkflowLibraryPage } from "../features/workflow/WorkflowLibraryPage";
+import { RoleAssetsPage } from "../features/workflow/RoleAssetsPage";
 import { Navigation } from "./navigation";
 import { isKnownRouteHash, normalizeRoute, parseWorkflowRoute, routeHash } from "./routes";
 import {
@@ -60,7 +61,11 @@ import {
   type WorkflowDefinitionSummary,
   type WorkflowExportFormat,
   type WorkflowLibraryItem,
+  type WorkflowRoleSummary,
   type ProjectWorkflowBinding,
+  type RoleAssetSummary,
+  type RoleVersionSummary,
+  type RoleWorkflowReference,
   type WorkflowSimulation,
   type WorkflowVersionDiff,
   type WorkflowVersionSummary,
@@ -70,7 +75,8 @@ import { loadWorkspaceSession, saveWorkspaceSession } from "./workspaceSession";
 export function App() {
   const [savedSession] = useState(loadWorkspaceSession);
   const [state, setState] = useState<RuntimeWorkbenchState | null>(null);
-  const [currentRoute, setCurrentRoute] = useState(() => normalizeRoute(window.location.hash));
+  const [routeLocation, setRouteLocation] = useState(() => window.location.hash);
+  const currentRoute = normalizeRoute(routeLocation);
   const [apiBaseUrl, setApiBaseUrl] = useState(savedSession.apiBaseUrl);
   const [projectPath, setProjectPath] = useState(savedSession.projectPath);
   const [projectId, setProjectId] = useState(savedSession.projectId ?? "");
@@ -113,6 +119,7 @@ export function App() {
   const [workflowLibrary, setWorkflowLibrary] = useState<WorkflowLibraryItem[]>([]);
   const [workflowLibraryLoading, setWorkflowLibraryLoading] = useState(false);
   const [workflowLibraryError, setWorkflowLibraryError] = useState<string | null>(null);
+  const [roleAssets, setRoleAssets] = useState<RoleAssetSummary[]>([]);
   const [workflowRouteError, setWorkflowRouteError] = useState<string | null>(null);
   const [resolvedWorkflowAssetId, setResolvedWorkflowAssetId] = useState<string | null>(null);
   const [gitWorkspaceStatus, setGitWorkspaceStatus] = useState<GitWorkspaceStatus | null>(null);
@@ -133,7 +140,7 @@ export function App() {
   const liveAgentOutputPendingRef = useRef<Record<string, Record<string, TerminalViewportOutput[]>>>({});
   const liveAgentOutputFrameRef = useRef<number | null>(null);
   const runSwitchInProgressRef = useRef(false);
-  const workflowRoute = parseWorkflowRoute(window.location.hash);
+  const workflowRoute = parseWorkflowRoute(routeLocation);
   const workflowAssetId = workflowRoute.mode === "edit" ? workflowRoute.workflowId : "";
   const isWorkflowEditor = currentRoute === "workflow" && workflowRoute.mode !== "library";
   const editorWorkflowVersionId = workflowRoute.mode === "edit" && resolvedWorkflowAssetId === workflowAssetId
@@ -272,6 +279,13 @@ export function App() {
     ])
       .then(([definition, compiled, history]) => {
         if (isMounted) {
+          if (!isWorkflowDefinitionSummary(definition)) {
+            setWorkflowDefinition(null);
+            setCompiledWorkflow(null);
+            setWorkflowHistory([]);
+            setWorkflowRouteError("工作流定义无效，无法打开编辑器。");
+            return;
+          }
           setWorkflowDefinition(definition);
           setCompiledWorkflow(compiled);
           setWorkflowHistory(history);
@@ -282,6 +296,7 @@ export function App() {
           setWorkflowDefinition(null);
           setCompiledWorkflow(null);
           setWorkflowHistory([]);
+          setWorkflowRouteError("无法加载工作流定义，请检查 Runtime 连接后重试。");
         }
       });
     return () => {
@@ -305,11 +320,36 @@ export function App() {
   }, [currentRoute, workflowRoute.mode]);
 
   useEffect(() => {
+    if (currentRoute !== "runs" || state?.connection !== "connected" || !workflowVersionId) {
+      return;
+    }
+    let isMounted = true;
+    setWorkflowDefinition(null);
+    createRuntimeClient(apiBaseUrl)
+      .getWorkflowDefinition(workflowVersionId)
+      .then((definition) => {
+        if (!isMounted) return;
+        setWorkflowDefinition(isWorkflowDefinitionSummary(definition) ? definition : null);
+      })
+      .catch(() => {
+        if (isMounted) setWorkflowDefinition(null);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBaseUrl, currentRoute, state?.connection, workflowVersionId]);
+
+  useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "library") {
       return;
     }
     void refreshWorkflowLibrary();
   }, [apiBaseUrl, currentRoute, state?.connection, workflowRoute.mode]);
+
+  useEffect(() => {
+    if (state?.connection !== "connected" || (currentRoute !== "roles" && !isWorkflowEditor)) return;
+    void refreshRoleAssets();
+  }, [apiBaseUrl, currentRoute, isWorkflowEditor, state?.connection]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || !projectId) {
@@ -333,9 +373,9 @@ export function App() {
   useEffect(() => {
     if (currentRoute !== "projects" || !projectId) return;
     void refreshWorkflowLibrary();
-    const requestedWorkflowId = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("bindWorkflow");
+    const requestedWorkflowId = new URLSearchParams(routeLocation.split("?")[1] ?? "").get("bindWorkflow");
     if (requestedWorkflowId) setPendingWorkflowBindingId(requestedWorkflowId);
-  }, [currentRoute, projectId]);
+  }, [currentRoute, projectId, routeLocation]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "edit") {
@@ -721,11 +761,13 @@ export function App() {
 
   useEffect(() => {
     const syncRoute = () => {
-      const route = normalizeRoute(window.location.hash);
-      if (!isKnownRouteHash(window.location.hash)) {
+      let nextLocation = window.location.hash;
+      const route = normalizeRoute(nextLocation);
+      if (!isKnownRouteHash(nextLocation)) {
         window.history.replaceState(null, "", routeHash(route));
+        nextLocation = window.location.hash;
       }
-      setCurrentRoute(route);
+      setRouteLocation(nextLocation);
     };
 
     syncRoute();
@@ -811,6 +853,60 @@ export function App() {
     } finally {
       setWorkflowLibraryLoading(false);
     }
+  }
+
+  async function refreshRoleAssets() {
+    try { setRoleAssets(await createRuntimeClient(apiBaseUrl).listRoleAssets()); }
+    catch (error) { setOperationMessage(`加载角色库失败：${errorMessage(error)}`); }
+  }
+
+  async function handleSaveRoleAsset(role: WorkflowRoleSummary) {
+    try {
+      await client.saveRoleAsset(role, now());
+      await refreshRoleAssets();
+      setOperationMessage(`角色已保存：${role.name}`);
+    } catch (error) { setOperationMessage(`保存角色失败：${errorMessage(error)}`); }
+  }
+
+  async function handleArchiveRoleAsset(roleId: string) {
+    try {
+      await client.archiveRoleAsset(roleId, now());
+      await refreshRoleAssets();
+      setOperationMessage("角色已归档。");
+    } catch (error) { setOperationMessage(`归档角色失败：${errorMessage(error)}`); }
+  }
+
+  async function handleRestoreRoleAsset(roleId: string) {
+    try {
+      await client.restoreRoleAsset(roleId, now());
+      await refreshRoleAssets();
+      setOperationMessage("角色已恢复使用。");
+    } catch (error) { setOperationMessage(`恢复角色失败：${errorMessage(error)}`); }
+  }
+
+  async function handleDeleteRoleAsset(roleId: string) {
+    try {
+      await client.deleteRoleAsset(roleId, now());
+      await refreshRoleAssets();
+      setOperationMessage("角色已删除");
+    } catch (error) { setOperationMessage(`删除角色失败：${errorMessage(error)}`); }
+  }
+
+  async function handleDeleteWorkflow(workflow: WorkflowLibraryItem) {
+    if (!window.confirm(`确定删除工作流“${workflow.name}”吗？删除后不可恢复。`)) return;
+    try {
+      await client.deleteWorkflow(workflow.workflowId, now());
+      await refreshWorkflowLibrary();
+      setOperationMessage(`工作流已删除：${workflow.name}`);
+    } catch (error) { setOperationMessage(`删除工作流失败：${errorMessage(error)}`); }
+  }
+
+  async function loadRoleVersionHistory(roleId: string): Promise<RoleVersionSummary[]> {
+    return client.listRoleVersionHistory(roleId);
+  }
+
+  async function loadRoleReferences(roleId: string): Promise<RoleWorkflowReference[]> {
+    return client.listRoleReferences(roleId);
   }
 
   function openWorkflowEditor(workflow: WorkflowLibraryItem) {
@@ -1874,6 +1970,7 @@ export function App() {
               archived={projectArchived}
               onReimport={projectArchived ? handleImportProject : undefined}
               operationMessage={operationMessage}
+              workflowBinding={projectWorkflowBinding}
               workflowBindingStep={
                 state?.workspaceStatus === "ready" && projectId && projectWorkflowBinding !== undefined ? (
                   <WorkflowBindingStep
@@ -2043,7 +2140,8 @@ export function App() {
             onStartDeployment={handleStartDeployment}
             onCancelDeployment={handleCancelDeployment}
             operationMessage={operationMessage}
-            providerDiagnostics={providerDiagnostics}
+              providerDiagnostics={providerDiagnostics}
+            projectArchived={projectArchived}
             {...(projectId ? { workflowBinding: projectWorkflowBinding } : {})}
             />
           ) : null}
@@ -2056,8 +2154,10 @@ export function App() {
               onCreate={() => { window.location.hash = "#/workflow/new"; }}
               onEdit={openWorkflowEditor}
               onCopyTemplate={(workflow, name) => void copyWorkflowTemplate(workflow, name)}
+              onDelete={(workflow) => void handleDeleteWorkflow(workflow)}
             />
           ) : null}
+          {currentRoute === "roles" ? <RoleAssetsPage roles={roleAssets} onSave={handleSaveRoleAsset} onArchive={handleArchiveRoleAsset} onRestore={handleRestoreRoleAsset} onDelete={handleDeleteRoleAsset} onLoadHistory={loadRoleVersionHistory} onLoadReferences={loadRoleReferences} /> : null}
           {currentRoute === "workflow" && workflowRoute.mode === "edit" && workflowRouteError ? (
             <section className="panel page-workspace workflow-route-error" aria-labelledby="workflow-route-error-title">
               <div className="panel-heading">
@@ -2075,7 +2175,12 @@ export function App() {
               <p className="body-copy" role="status">正在验证工作流...</p>
             </section>
           ) : null}
-          {currentRoute === "workflow" && (workflowRoute.mode === "new" || (workflowRoute.mode === "edit" && !workflowRouteError && resolvedWorkflowAssetId === workflowAssetId)) ? (
+          {currentRoute === "workflow" && workflowRoute.mode === "edit" && !workflowRouteError && resolvedWorkflowAssetId === workflowAssetId && !workflowDefinition ? (
+            <section className="panel page-workspace workflow-route-loading" aria-label="正在加载工作流定义">
+              <p className="body-copy" role="status">正在加载工作流定义...</p>
+            </section>
+          ) : null}
+          {currentRoute === "workflow" && (workflowRoute.mode === "new" || (workflowRoute.mode === "edit" && !workflowRouteError && resolvedWorkflowAssetId === workflowAssetId && workflowDefinition)) ? (
             <WorkflowViewer
               state={state}
               workflow={workflowDefinition}
@@ -2090,6 +2195,7 @@ export function App() {
               onRestoreVersion={handleRestoreWorkflowVersion}
               onExportWorkflow={handleExportWorkflowVersion}
               onBack={() => { window.location.hash = "#/workflow"; }}
+              roleAssets={roleAssets}
             />
           ) : null}
           {currentRoute === "terminal" ? (
@@ -2277,6 +2383,15 @@ function fallbackState(): RuntimeWorkbenchState {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isWorkflowDefinitionSummary(value: unknown): value is WorkflowDefinitionSummary {
+  if (!value || typeof value !== "object") return false;
+  const definition = value as Partial<WorkflowDefinitionSummary>;
+  return typeof definition.id === "string"
+    && typeof definition.name === "string"
+    && typeof definition.version === "string"
+    && Array.isArray(definition.nodes);
 }
 
 function createBlankWorkflowDefinition(): WorkflowDefinitionSummary {

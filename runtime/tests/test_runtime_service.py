@@ -409,6 +409,25 @@ def test_binding_rejects_an_archived_project_inside_the_binding_transaction(tmp_
         )
 
 
+def test_archived_project_rejects_transitions_for_existing_runs(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project = service.import_project(copy_harness_project(tmp_path / "archived-run"), now=NOW)
+    run = service.create_run(project["projectId"], title="Existing run", now=NOW)
+    service.archive_project(project["projectId"], actor=trusted_human().model_dump(), now="2026-08-05T00:00:00Z")
+
+    with pytest.raises(ValueError, match="PROJECT_ARCHIVED"):
+        service.transition_run(
+            run.runId,
+            "NODE_STARTED",
+            node_id="plan",
+            actor=trusted_human().model_dump(),
+            expected_revision=run.revision,
+            now="2026-08-05T00:01:00Z",
+        )
+
+
 def trusted_human() -> Actor:
     return Actor(id="human-1", type="human", source="renderer", trusted=True)
 

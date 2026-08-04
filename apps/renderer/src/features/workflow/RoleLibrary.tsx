@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 
-import type { WorkflowDefinitionSummary, WorkflowRoleSummary } from "../../app/runtimeClient";
+import type { RoleAssetSummary, WorkflowDefinitionSummary, WorkflowRoleSummary } from "../../app/runtimeClient";
 
 type Props = {
   roles: WorkflowRoleSummary[];
   nodes: WorkflowDefinitionSummary["nodes"];
   onChange: (roles: WorkflowRoleSummary[]) => void;
   onError: (message: string) => void;
+  publicRoles?: RoleAssetSummary[];
 };
 
 const DEVELOPER_TEMPLATE: WorkflowRoleSummary = {
@@ -39,8 +40,9 @@ const HARNESS_REFERENCE_ROLES: WorkflowRoleSummary[] = [
   { id: "verifier", name: "验证", purpose: "独立验证实现结果与门禁证据。", instructions: "执行编译、测试和静态检查，检查证据；门禁失败时记录重试并交由调度角色恢复。", outputRequirements: "编译、测试、验收和证据报告。", forbiddenActions: "不得隐藏失败命令、绕过失败恢复；除非重新指定为开发角色，否则不得实现修复。", provider: "codex", allowedTools: ["read", "test"] },
 ];
 
-export function RoleLibrary({ roles, nodes, onChange, onError }: Props) {
+export function RoleLibrary({ roles, nodes, onChange, onError, publicRoles = [] }: Props) {
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(roles[0]?.id ?? null);
+  const [selectedPublicRoleId, setSelectedPublicRoleId] = useState("");
   const selectedRole = roles.find((role) => role.id === selectedRoleId) ?? null;
 
   useEffect(() => {
@@ -52,6 +54,13 @@ export function RoleLibrary({ roles, nodes, onChange, onError }: Props) {
     const role = { ...template, id, name: template?.name ?? "新角色" };
     onChange([...roles, role]);
     setSelectedRoleId(id);
+  }
+
+  function addPublicRole() {
+    const asset = publicRoles.find((role) => role.id === selectedPublicRoleId);
+    if (!asset || asset.archivedAt) return;
+    onChange([...roles.filter((role) => role.id !== asset.id), { ...asset, assetVersionId: asset.roleVersionId }]);
+    setSelectedRoleId(asset.id);
   }
 
   function importHarnessRoles() {
@@ -89,6 +98,11 @@ export function RoleLibrary({ roles, nodes, onChange, onError }: Props) {
           <span>{roles.length} 个角色</span>
         </div>
         <div className="button-row">
+          <select aria-label="选择公共角色" value={selectedPublicRoleId} onChange={(event) => setSelectedPublicRoleId(event.target.value)}>
+            <option value="">选择公共角色</option>
+            {publicRoles.filter((role) => !role.archivedAt).map((role) => <option value={role.id} key={role.id}>{role.name} v{role.version}</option>)}
+          </select>
+          <button type="button" className="quiet-button" disabled={!selectedPublicRoleId} onClick={addPublicRole}>添加公共角色</button>
           <button type="button" className="quiet-button" onClick={() => addRole()}>新增角色</button>
           <button type="button" className="quiet-button" onClick={() => addRole(DEVELOPER_TEMPLATE)}>开发模板</button>
           <button type="button" className="quiet-button" onClick={importHarnessRoles}>导入 Harness 参考角色</button>

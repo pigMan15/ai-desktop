@@ -42,6 +42,7 @@ describe("WorkflowLibraryPage", () => {
         onCreate={onCreate}
         onEdit={vi.fn()}
         onCopyTemplate={vi.fn()}
+        onDelete={vi.fn()}
         onRefresh={vi.fn()}
       />,
     );
@@ -66,6 +67,7 @@ describe("WorkflowLibraryPage", () => {
         onCreate={vi.fn()}
         onEdit={onEdit}
         onCopyTemplate={onCopyTemplate}
+        onDelete={vi.fn()}
         onRefresh={vi.fn()}
       />,
     );
@@ -78,5 +80,24 @@ describe("WorkflowLibraryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "基于模板新建 交付流程模板" }));
     expect(onCopyTemplate).toHaveBeenCalledWith(workflows[0], "我的交付流程");
     expect(screen.queryByRole("button", { name: "编辑 交付流程模板" })).not.toBeInTheDocument();
+  });
+
+  it("offers deletion for custom workflows", () => {
+    const onDelete = vi.fn();
+    render(
+      <WorkflowLibraryPage
+        workflows={workflows}
+        loading={false}
+        error={null}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onCopyTemplate={vi.fn()}
+        onDelete={onDelete}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(onDelete).toHaveBeenCalledWith(workflows[1]);
   });
 });

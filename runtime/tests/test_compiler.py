@@ -1,5 +1,5 @@
 from workflow_platform.compiler.compiler import compile_workflow
-from workflow_platform.models import WorkflowDefinition, WorkflowEdge, WorkflowNode
+from workflow_platform.models import Role, WorkflowDefinition, WorkflowEdge, WorkflowNode
 
 
 def _workflow(
@@ -176,3 +176,67 @@ def test_compile_workflow_rejects_cycles_and_unsupported_auto_advance() -> None:
     codes = {diagnostic["code"] for diagnostic in compile_workflow(workflow)["diagnostics"]}
 
     assert codes == {"WORKFLOW_CYCLE", "AUTO_ADVANCE_UNSUPPORTED"}
+
+
+def test_compile_workflow_keeps_business_roles_out_of_agent_role_diagnostics() -> None:
+    workflow = _workflow(
+        nodes=[
+            WorkflowNode(id="task", name="Plan", kind="task", role="planner"),
+            WorkflowNode(id="approval", name="Approve", kind="approval", role="reviewer"),
+        ],
+        edges=[],
+    )
+
+    codes = {diagnostic["code"] for diagnostic in compile_workflow(workflow)["diagnostics"]}
+
+    assert not {"AGENT_ROLE_MISSING", "AGENT_ROLE_DISABLED", "AGENT_ROLE_UNSUPPORTED"} & codes
+
+
+def test_compile_workflow_validates_role_definitions_without_agent_role_bindings() -> None:
+    workflow = _workflow()
+    workflow.roles = [
+        Role(id="", name=""),
+        Role(id="duplicate", name="First"),
+        Role(id="duplicate", name="Second"),
+    ]
+
+    codes = {diagnostic["code"] for diagnostic in compile_workflow(workflow)["diagnostics"]}
+
+    assert {"INVALID_ROLE_DEFINITION", "DUPLICATE_ROLE_ID"} <= codes
+
+
+def test_compile_workflow_validates_agent_role_bindings_and_definitions() -> None:
+    workflow = _workflow(
+        nodes=[
+            WorkflowNode(
+                id="missing", name="Missing", kind="agent", agent={"roleId": "not-defined"}
+            ),
+            WorkflowNode(
+                id="disabled", name="Disabled", kind="agent", agent={"roleId": "disabled"}
+            ),
+            WorkflowNode(
+                id="task",
+                name="Task",
+                kind="task",
+                agent={"roleId": "engineer", "promptTemplate": "Do not run."},
+            ),
+        ],
+        edges=[],
+    )
+    workflow.roles = [
+        Role(id="", name="Empty identifier"),
+        Role(id="engineer", name=""),
+        Role(id="engineer", name="Engineer"),
+        Role(id="disabled", name="Disabled", disabled=True),
+    ]
+
+    codes = {diagnostic["code"] for diagnostic in compile_workflow(workflow)["diagnostics"]}
+
+    assert codes == {
+        "INVALID_ROLE_DEFINITION",
+        "DUPLICATE_ROLE_ID",
+        "AGENT_ROLE_MISSING",
+        "AGENT_ROLE_DISABLED",
+        "AGENT_ROLE_UNSUPPORTED",
+        "AGENT_CONFIGURATION_UNSUPPORTED",
+    }

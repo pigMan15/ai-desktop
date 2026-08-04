@@ -21,7 +21,7 @@ from workflow_platform.governance.audit import AuditLog
 from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
 from workflow_platform.knowledge.service import LocalKnowledgeService
-from workflow_platform.models import Actor, RunEvent, RunProjection, WorkflowDefinition
+from workflow_platform.models import Actor, Role, RunEvent, RunProjection, WorkflowDefinition
 from workflow_platform.terminals.redaction import normalize_terminal_output, redact_terminal_output
 from workflow_platform.persistence.repositories import (
     AgentCheckpointRepository,
@@ -41,6 +41,7 @@ from workflow_platform.persistence.repositories import (
     TerminalSessionRepository,
     WorkflowVersionRepository,
     WorkflowAssetRepository,
+    RoleAssetRepository,
 )
 
 
@@ -55,6 +56,7 @@ class WorkflowRuntimeService:
         self._projects = ProjectRepository(db)
         self._workflow_versions = WorkflowVersionRepository(db)
         self._workflow_assets = WorkflowAssetRepository(db)
+        self._role_assets = RoleAssetRepository(db)
         self._workflow_bindings = ProjectWorkflowBindingRepository(db)
         self._runs = RunRepository(db)
         self._events = RunEventRepository(db)
@@ -291,9 +293,123 @@ class WorkflowRuntimeService:
             for item in self._workflow_assets.list()
         ]
 
+    def list_role_assets(self) -> list[dict]:
+        result: list[dict] = []
+        for item in self._role_assets.list_assets():
+            definition = json.loads(item["definition_json"]) if item["definition_json"] else {}
+            result.append({
+                **definition,
+                "id": item["id"],
+                "name": item["name"],
+                "isBuiltin": bool(item["is_builtin"]),
+                "archivedAt": item["archived_at"],
+                "updatedAt": item["updated_at"],
+                "roleVersionId": item["current_role_version_id"],
+                "version": item["version"],
+            })
+        return result
+
+    def save_role_asset(self, *, definition: dict, is_builtin: bool, actor: dict, now: str) -> dict:
+        editor = require_trusted_human(actor, operation="保存角色资产")
+        role = Role.model_validate(definition)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                version_id, version = self._role_assets.save(role, is_builtin=is_builtin, actor=editor.model_dump(by_alias=True), now=now)
+                self._audit.record(actor=editor, action="role.version.created", resource=f"role:{role.id}", detail={"roleVersionId": version_id, "version": version}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"roleId": role.id, "roleVersionId": version_id, "version": version}
+
+    def archive_role_asset(self, role_id: str, *, actor: dict, now: str) -> dict:
+        editor = require_trusted_human(actor, operation="归档角色资产")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                archived = self._role_assets.archive(role_id, now=now)
+                if archived:
+                    self._audit.record(actor=editor, action="role.archived", resource=f"role:{role_id}", detail={}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"roleId": role_id, "archived": archived, "archivedAt": now if archived else None}
+
+    def restore_role_asset(self, role_id: str, *, actor: dict, now: str) -> dict:
+        editor = require_trusted_human(actor, operation="恢复角色资产")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                restored = self._role_assets.restore(role_id, now=now)
+                if restored:
+                    self._audit.record(actor=editor, action="role.restored", resource=f"role:{role_id}", detail={}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"roleId": role_id, "restored": restored}
+
+    def delete_role_asset(self, role_id: str, *, actor: dict, now: str) -> dict:
+        editor = require_trusted_human(actor, operation="删除角色资产")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                deleted = self._role_assets.delete(role_id)
+                if deleted:
+                    self._audit.record(actor=editor, action="role.deleted", resource=f"role:{role_id}", detail={}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"roleId": role_id, "deleted": deleted}
+
+    def list_role_version_history(self, role_id: str) -> list[dict]:
+        if self._role_assets.get(role_id) is None:
+            raise KeyError(f"Role not found: {role_id}")
+        return [
+            {"roleVersionId": item["id"], "version": item["version"], "createdAt": item["created_at"], "definition": json.loads(item["definition_json"])}
+            for item in self._role_assets.list_versions(role_id)
+        ]
+
+    def list_role_references(self, role_id: str) -> list[dict]:
+        if self._role_assets.get(role_id) is None:
+            raise KeyError(f"Role not found: {role_id}")
+        rows = self._db.execute(
+            """
+            SELECT versions.id AS workflow_version_id, versions.name AS workflow_name, versions.version AS workflow_version
+            FROM workflow_versions AS versions
+            WHERE EXISTS (
+                SELECT 1 FROM json_each(json_extract(versions.definition_json, '$.roles')) AS role
+                WHERE json_extract(role.value, '$.id') = ?
+                  AND json_extract(role.value, '$.assetVersionId') IS NOT NULL
+            )
+            ORDER BY versions.created_at DESC, versions.id
+            """,
+            (role_id,),
+        ).fetchall()
+        return [{"workflowVersionId": row["workflow_version_id"], "workflowName": row["workflow_name"], "workflowVersion": row["workflow_version"]} for row in rows]
+
+    def _resolve_role_snapshots(self, workflow: WorkflowDefinition) -> WorkflowDefinition:
+        snapshots: list[Role] = []
+        for role in workflow.roles:
+            if not role.assetVersionId:
+                snapshots.append(role)
+                continue
+            asset = self._role_assets.get(role.id)
+            snapshot = self._role_assets.get_version(role.assetVersionId)
+            if asset is None or snapshot is None or snapshot.id != role.id:
+                raise ValueError(f"ROLE_VERSION_NOT_FOUND: 角色 {role.id} 的指定版本不可用")
+            if asset["archived_at"] is not None:
+                raise ValueError(f"ROLE_ARCHIVED: 角色 {role.id} 已归档，不能用于新工作流版本")
+            snapshots.append(snapshot)
+        return workflow.model_copy(update={"roles": snapshots})
+
     def create_workflow(self, *, definition: dict, is_builtin: bool, actor: dict, now: str) -> dict:
         creator = require_trusted_human(actor, operation="创建工作流")
         workflow = WorkflowDefinition.model_validate(definition)
+        workflow = self._resolve_role_snapshots(workflow)
         _require_valid_workflow(workflow)
         if self._workflow_assets.get(workflow.id) is not None:
             raise ValueError(f"WORKFLOW_ALREADY_EXISTS: 工作流已存在：{workflow.id}")
@@ -379,6 +495,34 @@ class WorkflowRuntimeService:
                 self._db.rollback()
                 raise
         return {"workflowId": workflow_id, "archived": archived, "archivedAt": now if archived else asset["archived_at"]}
+
+    def delete_workflow(self, workflow_id: str, *, actor: dict, now: str) -> dict:
+        deleter = require_trusted_human(actor, operation="删除工作流资产")
+        asset = self._workflow_assets.get(workflow_id)
+        if asset is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        if asset["is_builtin"]:
+            raise ValueError("BUILTIN_WORKFLOW_READ_ONLY: 内置模板不可删除")
+        binding = self._db.execute("SELECT 1 FROM project_workflow_bindings WHERE workflow_id = ? LIMIT 1", (workflow_id,)).fetchone()
+        if binding is not None:
+            raise ValueError("WORKFLOW_IN_USE: 工作流仍绑定项目，请先解除绑定")
+        version_ids = [row["id"] for row in self._db.execute("SELECT id FROM workflow_versions WHERE workflow_asset_id = ?", (workflow_id,)).fetchall()]
+        if version_ids:
+            placeholders = ", ".join("?" for _ in version_ids)
+            run = self._db.execute(f"SELECT 1 FROM runs WHERE workflow_version_id IN ({placeholders}) LIMIT 1", version_ids).fetchone()
+            if run is not None:
+                raise ValueError("WORKFLOW_HAS_RUNS: 工作流已有运行记录，不能直接删除")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                deleted = self._workflow_assets.delete(workflow_id)
+                if deleted:
+                    self._audit.record(actor=deleter, action="workflow.deleted", resource=f"workflow:{workflow_id}", detail={}, created_at=now)
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+        return {"workflowId": workflow_id, "deleted": deleted}
 
     def get_project_workflow_binding(self, project_id: str) -> dict | None:
         if not self._projects.exists(project_id):
@@ -566,7 +710,7 @@ class WorkflowRuntimeService:
         if asset is not None and asset["is_builtin"]:
             raise ValueError("BUILTIN_WORKFLOW_READ_ONLY: 内置模板只能复制后编辑")
         editor = require_trusted_human(actor, operation="保存工作流版本")
-        candidate = WorkflowDefinition.model_validate(definition)
+        candidate = self._resolve_role_snapshots(WorkflowDefinition.model_validate(definition))
         _require_valid_workflow(candidate)
         if candidate.id != base.id:
             raise ValueError("WORKFLOW_ID_IMMUTABLE: 新版本不能更改工作流标识")
@@ -642,6 +786,7 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
     ) -> RunProjection:
+        self._assert_run_project_active(run_id)
         if artifact_status not in {"verified", "provisional"}:
             raise ValueError(f"ARTIFACT_STATUS_INVALID: unsupported artifact status {artifact_status}")
         workflow = self._runs.workflow_for_run(run_id)
@@ -749,6 +894,7 @@ class WorkflowRuntimeService:
         artifact_status: str = "verified",
     ) -> dict:
         """Register declared artifact files without creating duplicate revisions for unchanged content."""
+        self._assert_run_project_active(run_id)
         workflow = self._runs.workflow_for_run(run_id)
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
         if node is None:
@@ -1862,6 +2008,7 @@ class WorkflowRuntimeService:
         mode: str = "automatic",
         parent_job_id: str | None = None,
     ) -> dict:
+        self._assert_run_project_active(run_id)
         if mode not in {"automatic", "interactive"}:
             raise ValueError(f"AGENT_MODE_INVALID: unsupported mode {mode}")
         if mode == "interactive":
@@ -2578,6 +2725,7 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
     ) -> dict:
+        self._assert_run_project_active(run_id)
         human_actor = require_trusted_human(actor, operation="启动部署")
         workflow = self._runs.workflow_for_run(run_id)
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
@@ -2968,6 +3116,7 @@ class WorkflowRuntimeService:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                self._assert_run_project_active(run_id)
                 workflow = self._runs.workflow_for_run(run_id)
                 events = self._events.list_for_run(run_id)
                 event = RunEvent(
@@ -2999,6 +3148,11 @@ class WorkflowRuntimeService:
                 if self._db.in_transaction:
                     self._db.rollback()
                 raise
+
+    def _assert_run_project_active(self, run_id: str) -> None:
+        project_id = self._runs.project_id_for_run(run_id)
+        if self._projects.is_archived(project_id):
+            raise ValueError("PROJECT_ARCHIVED: 项目已归档，不能继续操作已有 Run")
 
     def _evaluate_automatic_gate(
         self,

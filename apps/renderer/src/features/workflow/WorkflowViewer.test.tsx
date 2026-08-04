@@ -41,6 +41,49 @@ describe("WorkflowViewer", () => {
     expect(screen.queryByText("WAITING_FOR_HUMAN：等待人工审批")).not.toBeInTheDocument();
   });
 
+  it("keeps project Run progress out of the shared workflow canvas", () => {
+    render(
+      <WorkflowViewer
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "demo",
+          workflowName: "Demo Workflow",
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-08-05T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        workflow={{
+          id: "shared-workflow",
+          name: "Shared workflow",
+          version: "1",
+          sourceAdapter: "manual",
+          nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+          edges: [],
+          roles: [],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Run: RUNNING")).not.toBeInTheDocument();
+  });
+
   it("renders the persisted workflow definition and compiler diagnostics", () => {
     render(
       <WorkflowViewer
@@ -125,6 +168,22 @@ describe("WorkflowViewer", () => {
       name: "已编辑工作流",
       nodes: [expect.objectContaining({ name: "更新计划" })],
     }));
+  });
+
+  it("edits the workflow name from the editor", () => {
+    const onSaveDefinition = vi.fn();
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{ id: "demo-workflow", name: "旧名称", version: "1", sourceAdapter: "manual", nodes: [], edges: [], roles: [], gates: [], policies: {}, metadata: {} }}
+        onSaveDefinition={onSaveDefinition}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("工作流名称"), { target: { value: "新名称" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({ name: "新名称" }));
   });
 
   it("restores an unsaved workflow draft after the workflow route is remounted", () => {
@@ -689,6 +748,72 @@ describe("WorkflowViewer", () => {
     expect(savedNode).not.toHaveProperty("agent.roleId");
   });
 
+  it("binds Agent nodes only to active global role assets", () => {
+    const onSaveDefinition = vi.fn();
+    render(
+      <WorkflowViewer
+        state={null}
+        workflow={{
+          id: "global-role-bindings",
+          name: "Global role bindings",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "implement", name: "Implement", kind: "agent", agent: { roleId: "planner" } }],
+          edges: [],
+          roles: [
+            { id: "planner", name: "Planner" },
+            { id: "reviewer", name: "Reviewer" },
+            { id: "developer", name: "Developer" },
+          ],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        roleAssets={[{
+          id: "architect",
+          name: "Architect",
+          isBuiltin: false,
+          archivedAt: null,
+          updatedAt: "2026-08-04T00:00:00Z",
+          roleVersionId: "role-version-architect-2",
+          version: 2,
+        }, {
+          id: "retired-developer",
+          name: "Retired developer",
+          isBuiltin: false,
+          archivedAt: "2026-08-01T00:00:00Z",
+          updatedAt: "2026-08-01T00:00:00Z",
+          roleVersionId: "role-version-retired-developer-1",
+          version: 1,
+        }]}
+        onSaveDefinition={onSaveDefinition}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "选择节点 implement" }));
+    const roleSelect = screen.getAllByRole("combobox").find((element) =>
+      element.getAttribute("aria-label")?.includes("implement")
+      && Array.from((element as HTMLSelectElement).options).some((option) => option.value === ""),
+    );
+
+    expect(roleSelect).toBeDefined();
+    expect(Array.from((roleSelect as HTMLSelectElement).options, (option) => option.text)).toEqual([
+      "未绑定执行角色",
+      "Architect",
+    ]);
+
+    fireEvent.change(roleSelect as HTMLSelectElement, { target: { value: "architect" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存新版本" }));
+
+    expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({
+      roles: [expect.objectContaining({ id: "architect", assetVersionId: "role-version-architect-2" })],
+      nodes: [expect.objectContaining({
+        id: "implement",
+        agent: expect.objectContaining({ roleId: "architect" }),
+      })],
+    }));
+  });
+
   it("edits a platform role and binds it to the selected Agent node", () => {
     const onSaveDefinition = vi.fn();
     render(
@@ -706,6 +831,16 @@ describe("WorkflowViewer", () => {
           policies: {},
           metadata: {},
         }}
+        roleAssets={[{
+          id: "developer",
+          name: "Developer",
+          instructions: "Implement approved work.",
+          isBuiltin: false,
+          archivedAt: null,
+          updatedAt: "2026-08-04T00:00:00Z",
+          roleVersionId: "role-version-developer-1",
+          version: 1,
+        }]}
         onSaveDefinition={onSaveDefinition}
       />,
     );
@@ -722,7 +857,8 @@ describe("WorkflowViewer", () => {
     expect(onSaveDefinition).toHaveBeenCalledWith(expect.objectContaining({
       roles: [expect.objectContaining({
         id: "developer",
-        instructions: "Implement the approved plan and verify it.",
+        instructions: "Implement approved work.",
+        assetVersionId: "role-version-developer-1",
       })],
       nodes: [expect.objectContaining({
         id: "implement",

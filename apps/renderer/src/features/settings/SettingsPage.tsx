@@ -45,7 +45,7 @@ export function SettingsPage({
   const connected = connection === "connected";
 
   return (
-    <section id="settings" className="panel" aria-labelledby="settings-title">
+    <section id="settings" className="panel page-workspace page-settings" aria-labelledby="settings-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">配置</p>

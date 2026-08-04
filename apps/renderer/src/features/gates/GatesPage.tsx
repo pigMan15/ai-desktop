@@ -26,7 +26,7 @@ export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGat
   );
 
   return (
-    <section id="gates" className="panel" aria-labelledby="gates-title">
+    <section id="gates" className="panel page-workspace page-gates" aria-labelledby="gates-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Quality Gates</p>

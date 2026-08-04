@@ -111,8 +111,12 @@ export class GitWorkspaceManager {
     if (target === sourceBranch) {
       throw new Error("不能将当前分支合并到自身。");
     }
-    await this.runGit(["merge-base", "--is-ancestor", target, sourceBranch], rootPath);
-    await this.runGit(["merge", "--ff-only", sourceBranch], rootPath);
+    try {
+      await this.runGit(["merge", "--no-edit", sourceBranch], rootPath);
+    } catch (error) {
+      await this.runGit(["merge", "--abort"], rootPath).catch(() => undefined);
+      throw error;
+    }
     return this.status(rootPath);
   }
 

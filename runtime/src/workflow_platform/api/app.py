@@ -73,6 +73,18 @@ class ArchiveWorkflowRequest(BaseModel):
     now: str
 
 
+class SaveRoleAssetRequest(BaseModel):
+    definition: dict[str, Any]
+    isBuiltin: bool = False
+    actor: dict[str, Any]
+    now: str
+
+
+class ArchiveRoleAssetRequest(BaseModel):
+    actor: dict[str, Any]
+    now: str
+
+
 class BindProjectWorkflowRequest(BaseModel):
     workflowId: str
     workflowVersionId: str
@@ -618,6 +630,60 @@ def create_app(
     def list_workflows() -> list[dict[str, Any]]:
         return _require_service(runtime_service).list_workflows()
 
+    @application.get("/roles")
+    def list_role_assets() -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_role_assets()
+
+    @application.post("/roles")
+    def save_role_asset(request: SaveRoleAssetRequest) -> dict[str, Any]:
+        try:
+            return _require_service(runtime_service).save_role_asset(
+                definition=request.definition, is_builtin=request.isBuiltin, actor=request.actor, now=request.now,
+            )
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/roles/{role_id}/archive")
+    def archive_role_asset(role_id: str, request: ArchiveRoleAssetRequest) -> dict[str, Any]:
+        try:
+            return _require_service(runtime_service).archive_role_asset(role_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/roles/{role_id}/restore")
+    def restore_role_asset(role_id: str, request: ArchiveRoleAssetRequest) -> dict[str, Any]:
+        try:
+            return _require_service(runtime_service).restore_role_asset(role_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/roles/{role_id}/delete")
+    def delete_role_asset(role_id: str, request: ArchiveRoleAssetRequest) -> dict[str, Any]:
+        try:
+            return _require_service(runtime_service).delete_role_asset(role_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/roles/{role_id}/history")
+    def list_role_version_history(role_id: str) -> list[dict[str, Any]]:
+        try:
+            return _require_service(runtime_service).list_role_version_history(role_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.get("/roles/{role_id}/references")
+    def list_role_references(role_id: str) -> list[dict[str, Any]]:
+        try:
+            return _require_service(runtime_service).list_role_references(role_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     @application.post("/workflows")
     def create_workflow(request: CreateWorkflowRequest) -> dict[str, Any]:
         service = _require_service(runtime_service)
@@ -646,6 +712,16 @@ def create_app(
         service = _require_service(runtime_service)
         try:
             return service.archive_workflow(workflow_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.post("/workflows/{workflow_id}/delete")
+    def delete_workflow(workflow_id: str, request: ArchiveWorkflowRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.delete_workflow(workflow_id, actor=request.actor, now=request.now)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:

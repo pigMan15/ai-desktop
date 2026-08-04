@@ -145,6 +145,7 @@ class AgentContextSpec(CanonicalModel):
 
 
 class NodeAgentSpec(CanonicalModel):
+    roleId: str | None = None
     promptTemplate: str | None = None
     context: AgentContextSpec = Field(default_factory=AgentContextSpec)
 
@@ -178,7 +179,20 @@ class WorkflowEdge(CanonicalModel):
 
 class Role(CanonicalModel):
     id: str
+    assetVersionId: str | None = None
     name: str
+    purpose: str | None = None
+    description: str | None = None
+    instructions: str | None = None
+    inputRequirements: str | None = None
+    outputRequirements: str | None = None
+    acceptanceCriteria: str | None = None
+    forbiddenActions: str | None = None
+    provider: Literal["codex", "claude"] | None = None
+    model: str | None = None
+    allowedTools: list[str] = Field(default_factory=list)
+    disabled: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Gate(CanonicalModel):

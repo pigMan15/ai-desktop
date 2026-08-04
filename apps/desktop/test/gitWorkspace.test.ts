@@ -80,10 +80,23 @@ await assert.rejects(() => manager.mergeBack(projectRoot, "feature/review"), /åˆ
 branch = "main";
 const mergeStart = calls.length;
 await manager.mergeBack(projectRoot, "feature/review");
-assert.deepEqual(calls.slice(mergeStart + 3, mergeStart + 5), [
-  { args: ["merge-base", "--is-ancestor", "main", "feature/review"], cwd: projectRoot },
-  { args: ["merge", "--ff-only", "feature/review"], cwd: projectRoot },
+assert.deepEqual(calls.slice(mergeStart + 3, mergeStart + 4), [
+  { args: ["merge", "--no-edit", "feature/review"], cwd: projectRoot },
 ]);
+
+const conflictCalls: string[][] = [];
+const conflictManager = new GitWorkspaceManager({
+  runGit: async (args) => {
+    conflictCalls.push(args);
+    if (args.join(" ") === "rev-parse --is-inside-work-tree") return "true\n";
+    if (args.join(" ") === "symbolic-ref --quiet --short HEAD") return "main\n";
+    if (args.join(" ") === "status --porcelain=v1") return "";
+    if (args.join(" ") === "merge --no-edit feature/review") throw new Error("merge conflict");
+    return "";
+  },
+});
+await assert.rejects(() => conflictManager.mergeBack(projectRoot, "feature/review"), /merge conflict/);
+assert.ok(conflictCalls.some((args) => args.join(" ") === "merge --abort"));
 
 const knowledgeWrites: Array<{ path: string; content: string }> = [];
 const knowledgeManager = new GitWorkspaceManager({

@@ -409,6 +409,31 @@ def migrate(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_project_workflow_bindings_workflow
             ON project_workflow_bindings(workflow_id, workflow_version_id);
 
+        CREATE TABLE IF NOT EXISTS role_assets (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_builtin INTEGER NOT NULL DEFAULT 0,
+            archived_at TEXT,
+            created_by_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            current_role_version_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS role_versions (
+            id TEXT PRIMARY KEY,
+            role_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            definition_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (role_id) REFERENCES role_assets(id) ON DELETE CASCADE,
+            UNIQUE(role_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_role_assets_active_updated
+            ON role_assets(archived_at, updated_at DESC, id);
+        CREATE INDEX IF NOT EXISTS idx_role_versions_role_version
+            ON role_versions(role_id, version DESC);
+
         CREATE TABLE IF NOT EXISTS artifact_consumers (
             id TEXT PRIMARY KEY,
             artifact_id TEXT NOT NULL,

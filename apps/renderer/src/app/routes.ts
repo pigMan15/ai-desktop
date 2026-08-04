@@ -1,4 +1,5 @@
 export const routes = [
+  { id: "roles", label: "角色库", hash: "#/roles" },
   { id: "projects", label: "项目", hash: "#/projects" },
   { id: "runs", label: "运行", hash: "#/runs" },
   { id: "workflow", label: "工作流", hash: "#/workflow" },

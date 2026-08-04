@@ -90,3 +90,8 @@ contextBridge.exposeInMainWorld("workflowGit", {
   ): Promise<PublishedKnowledgeDocument> =>
     ipcRenderer.invoke("git:publish-knowledge", projectRoot, documentId, markdown) as Promise<PublishedKnowledgeDocument>,
 });
+
+contextBridge.exposeInMainWorld("workflowProject", {
+  selectDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke("project:select-directory") as Promise<string | null>,
+});

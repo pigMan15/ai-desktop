@@ -14,6 +14,13 @@ import type {
   WorkflowDefinitionSummary,
 } from "../../app/runtimeClient";
 import { TerminalViewport, type TerminalViewportOutput } from "../terminal/TerminalViewport";
+import { RunNextActionPanel } from "./RunNextActionPanel";
+import { RunProgressMap } from "./RunProgressMap";
+import {
+  resolveNodeGuidance,
+  type RunGuidance,
+  type RunGuidanceAction,
+} from "./runWorkbenchModel";
 
 export type AgentWorkspaceOption = {
   path: string;
@@ -59,6 +66,7 @@ type Props = {
   operationMessage?: string;
   providerDiagnostics?: AgentProviderDiagnostic[];
   workflowBinding?: ProjectWorkflowBinding | null;
+  projectArchived?: boolean;
 };
 
 export function RunDashboard({
@@ -93,6 +101,7 @@ export function RunDashboard({
   operationMessage,
   providerDiagnostics,
   workflowBinding,
+  projectArchived = false,
 }: Props) {
   const [runTitle, setRunTitle] = useState("");
   const [taskGoal, setTaskGoal] = useState("");
@@ -138,6 +147,12 @@ export function RunDashboard({
     ? nodeId
     : projection?.currentNodeIds[0] ?? availableNodeIds[0] ?? null;
   const selectedWorkflowNode = workflow?.nodes?.find((node) => node.id === currentNodeId);
+  const nextWorkflowNodes = workflow && currentNodeId
+    ? workflow.edges
+      .filter((edge) => edge.from === currentNodeId)
+      .map((edge) => workflow.nodes.find((node) => node.id === edge.to))
+      .filter((node): node is WorkflowDefinitionSummary["nodes"][number] => Boolean(node))
+    : [];
   const selectedRole = selectedWorkflowNode?.agent?.roleId
     ? workflow?.roles?.find((role) => role.id === selectedWorkflowNode.agent?.roleId)
     : undefined;
@@ -187,12 +202,147 @@ export function RunDashboard({
   const contextArtifacts = Array.isArray(nodeContext?.artifacts) ? nodeContext.artifacts : [];
   const hasRun = Boolean(state?.connection === "connected" && projection?.runId);
   const canRunAction = (eventType: string, nodeId: string | null = currentNodeId) =>
+    !projectArchived &&
     hasRun &&
     (projection?.allowedActions.some(
       (action) =>
         action.eventType === eventType &&
         (action.nodeId === nodeId || action.nodeId === undefined),
     ) ?? false);
+  const isDeploymentNode = ["deploy", "deployment"].includes(selectedWorkflowNode?.kind.toLowerCase() ?? "");
+  const resolvedGuidance = workflow && projection
+    ? resolveNodeGuidance({ workflow, projection, nodeId: currentNodeId, projectArchived })
+    : null;
+
+  function supportsGuidanceAction(action: RunGuidanceAction): boolean {
+    const actionNodeId = action.nodeId ?? currentNodeId;
+
+    switch (action.eventType) {
+      case "NODE_STARTED":
+        return Boolean(actionNodeId && (isDeploymentNode ? onStartDeployment : onStartNode));
+      case "NODE_COMPLETED":
+        return Boolean(actionNodeId && onCompleteNode);
+      case "ARTIFACT_SUBMITTED":
+        return Boolean(actionNodeId && (
+          (declaredArtifactRequirements.some((requirement) => Boolean(requirement.relativePath)) && (onScanNodeArtifacts || onSubmitArtifact))
+          || (!declaredArtifactRequirements.some((requirement) => Boolean(requirement.relativePath)) && onSubmitArtifact)
+        ));
+      case "HUMAN_APPROVED":
+        return Boolean(actionNodeId && onApprove);
+      case "GATE_PASSED":
+        return Boolean(actionNodeId && gateEvidenceUri && onPassGate);
+      case "GATE_WAIVED":
+        return Boolean(actionNodeId && onWaiveGate);
+      case "RUN_PAUSED":
+        return Boolean(onPauseRun);
+      case "RUN_RESUMED":
+        return Boolean(onResumeRun);
+      case "RUN_ARCHIVED":
+        return Boolean(onArchiveRun);
+      default:
+        return false;
+    }
+  }
+
+  const supportedGuidanceActions = resolvedGuidance?.actions.filter(supportsGuidanceAction) ?? [];
+  const primaryGuidanceAction = supportedGuidanceActions.find(
+    (action) => action.id === resolvedGuidance?.primaryAction?.id,
+  ) ?? supportedGuidanceActions.find((action) => action.priority === "primary") ?? supportedGuidanceActions[0] ?? null;
+  const runGuidance: RunGuidance | null = resolvedGuidance
+    ? {
+      ...resolvedGuidance,
+      actions: supportedGuidanceActions,
+      primaryAction: primaryGuidanceAction,
+      secondaryActions: supportedGuidanceActions.filter((action) => action !== primaryGuidanceAction),
+      waitingMessage: primaryGuidanceAction
+        ? null
+        : resolvedGuidance.waitingMessage
+          ?? (resolvedGuidance.actions.some((action) => action.eventType === "GATE_PASSED" && !gateEvidenceUri)
+            ? "Waiting for a verified artifact before this gate can be passed."
+            : "This action is waiting for an available application callback."),
+    }
+    : null;
+
+  function dispatchGuidanceAction(action: RunGuidanceAction) {
+    const actionNodeId = action.nodeId ?? currentNodeId;
+
+    switch (action.eventType) {
+      case "NODE_STARTED":
+        if (!actionNodeId) return;
+        if (isDeploymentNode && onStartDeployment) {
+          onStartDeployment(actionNodeId);
+        } else {
+          onStartNode?.(actionNodeId);
+        }
+        return;
+      case "NODE_COMPLETED":
+        if (actionNodeId) onCompleteNode?.(actionNodeId);
+        return;
+      case "ARTIFACT_SUBMITTED":
+        if (!actionNodeId) return;
+        if (declaredArtifactRequirements.some((requirement) => Boolean(requirement.relativePath)) && onScanNodeArtifacts) {
+          onScanNodeArtifacts?.(actionNodeId);
+        } else if (artifactPath.trim() && artifactType.trim()) {
+          onSubmitArtifact?.(actionNodeId, artifactPath.trim(), artifactType.trim());
+        }
+        return;
+      case "HUMAN_APPROVED":
+        if (actionNodeId) onApprove?.(actionNodeId);
+        return;
+      case "GATE_PASSED":
+        if (actionNodeId && gateEvidenceUri) onPassGate?.(actionNodeId, gateEvidenceUri);
+        return;
+      case "GATE_WAIVED":
+        if (actionNodeId && waiverReason.trim()) onWaiveGate?.(actionNodeId, waiverReason.trim());
+        return;
+      case "RUN_PAUSED":
+        onPauseRun?.();
+        return;
+      case "RUN_RESUMED":
+        onResumeRun?.();
+        return;
+      case "RUN_ARCHIVED":
+        onArchiveRun?.();
+        return;
+    }
+  }
+
+  function renderActionInput(action: RunGuidanceAction) {
+    if (action.requiredInput === "artifact") {
+      return (
+        <div className="run-action-input-grid">
+          <label>
+            Artifact path
+            <input value={artifactPath} onChange={(event) => setArtifactPath(event.target.value)} />
+          </label>
+          <label>
+            Artifact type
+            <select value={artifactType} onChange={(event) => setArtifactType(event.target.value)}>
+              <option value="">Select artifact type</option>
+              {declaredArtifactRequirements.map((requirement) => (
+                <option key={requirement.id} value={requirement.type}>{requirement.name} ({requirement.type})</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      );
+    }
+
+    if (action.requiredInput === "gate-evidence") {
+      return <p className="run-next-action-message">{gateEvidenceUri ?? "A verified artifact is required before this gate can be passed."}</p>;
+    }
+
+    if (action.requiredInput === "waiver-reason") {
+      return (
+        <label>
+          Waiver reason
+          <textarea value={waiverReason} onChange={(event) => setWaiverReason(event.target.value)} />
+        </label>
+      );
+    }
+
+    return null;
+  }
 
   useEffect(() => {
     if (!projection?.runId || !currentNodeId || !onLoadNodeArtifactRequirements) {
@@ -237,6 +387,10 @@ export function RunDashboard({
   }, [artifactType, declaredArtifactRequirements]);
 
   function createRun() {
+    if (projectArchived) {
+      setRunConfigurationError("项目已归档，不能创建 Run。请重新导入项目后再试。");
+      return;
+    }
     try {
       const parsed = JSON.parse(parametersText || "{}");
       if (!isRecord(parsed)) {
@@ -353,7 +507,7 @@ export function RunDashboard({
         <div className="button-row">
           <button
             className="quiet-button"
-            disabled={!runTitle.trim()}
+            disabled={projectArchived || !runTitle.trim()}
             onClick={createRun}
           >
             创建 Run
@@ -373,6 +527,55 @@ export function RunDashboard({
         <span className="status-pill status-blocked">{projection.status}</span>
       </div>
       <p className="body-copy">所有运行操作均由 Runtime 的允许操作和版本号校验，不会在界面本地伪造状态。</p>
+      {projectArchived ? <p className="body-copy" role="status">项目已归档，Run 仅可查看。重新导入项目后可恢复运行操作。</p> : null}
+      {workflow && runGuidance ? (
+        <div className="run-workbench">
+          <label className="run-workbench-selector">
+            切换 Run
+            <select value={activeRunId ?? ""} onChange={(event) => onSelectRun?.(event.target.value)}>
+              {runs.map((run) => (
+                <option key={run.id} value={run.id}>
+                  {run.title}（{run.status}）
+                </option>
+              ))}
+            </select>
+          </label>
+          <RunProgressMap
+            workflow={workflow}
+            projection={projection}
+            selectedNodeId={currentNodeId}
+            onSelectNode={setNodeId}
+          />
+          <section className="run-current-node" aria-label="当前工作环节">
+            <div className="panel-heading">
+              <div>
+                <p className="section-kicker">当前工作环节</p>
+                <h3>{selectedWorkflowNode?.name ?? currentNodeId ?? "未选择工作环节"}</h3>
+              </div>
+              <span className="status-pill">{nodeState ?? "PENDING"}</span>
+            </div>
+            <dl className="facts">
+              <div><dt>工作目标</dt><dd>{selectedWorkflowNode?.description ?? "未配置工作目标。"}</dd></div>
+              <div><dt>执行角色</dt><dd>{selectedRole?.name ?? selectedWorkflowNode?.role ?? selectedWorkflowNode?.kind ?? "未分配"}</dd></div>
+              <div><dt>所需输入</dt><dd>{selectedWorkflowNode?.agent?.context?.artifactTypes?.join("、") ?? "未声明输入。"}</dd></div>
+              <div><dt>预期产物</dt><dd>{selectedWorkflowNode?.artifacts?.outputs.map((output) => output.name).join("、") || "未声明产物。"}</dd></div>
+              <div><dt>完成条件</dt><dd>{selectedWorkflowNode?.advance?.mode === "auto" ? "系统自动推进" : "需要人工确认完成"}</dd></div>
+              <div><dt>下一工作环节</dt><dd>{nextWorkflowNodes.length ? nextWorkflowNodes.map((node) => node.name).join("、") : "无直接后续环节"}</dd></div>
+              <div><dt>阻塞原因</dt><dd>{runGuidance.blockingReason?.message ?? "当前无阻塞。"}</dd></div>
+            </dl>
+          </section>
+          <RunNextActionPanel
+            guidance={runGuidance}
+            onAction={dispatchGuidanceAction}
+            renderInput={renderActionInput}
+          />
+        </div>
+      ) : null}
+      <details className="run-workbench-details" open={!workflow}>
+        <summary>运行详情</summary>
+        <div className="run-workbench-details-content">
+      <details className="run-workbench-detail-section" open={!workflow}>
+        <summary>Run metadata</summary>
       <div className="form-grid">
         <label>
           切换 Run
@@ -419,7 +622,7 @@ export function RunDashboard({
         <div className="button-row">
           <button
             className="quiet-button"
-            disabled={!runTitle.trim()}
+            disabled={projectArchived || !runTitle.trim()}
             onClick={createRun}
           >
             创建并切换 Run
@@ -456,6 +659,9 @@ export function RunDashboard({
       <pre className="code-block" aria-label="运行参数">
         {JSON.stringify(activeRun?.context?.parameters ?? {}, null, 2)}
       </pre>
+      </details>
+      <details className="run-workbench-detail-section" open={!workflow}>
+        <summary>Artifacts and context</summary>
       {declaredArtifactRequirements.length ? (
         <div className="gate-record" aria-label="节点交付物要求">
           <div className="panel-heading">
@@ -496,6 +702,9 @@ export function RunDashboard({
           ) : <p className="body-copy">当前节点不接收上游正式产物。</p>}
         </div>
       ) : null}
+      </details>
+      <details className="run-workbench-detail-section" open={!workflow}>
+        <summary>Runtime timeline</summary>
       <ul className="compact-list" aria-label="Runtime Timeline">
         {(state?.timeline ?? []).map((event) => (
           <li key={event.id}>
@@ -504,7 +713,8 @@ export function RunDashboard({
           </li>
         ))}
       </ul>
-      <div className="form-grid">
+      </details>
+      <div className="form-grid" hidden={Boolean(workflow)}>
         <label>
           节点 ID
           <select
@@ -550,7 +760,7 @@ export function RunDashboard({
           />
         </label>
       </div>
-      <div className="button-row">
+      <div className="button-row" hidden={Boolean(workflow)}>
         <button
           className="quiet-button"
           disabled={!canRunAction("NODE_STARTED") || !nodeId.trim()}
@@ -641,6 +851,8 @@ export function RunDashboard({
           归档 Run
         </button>
       </div>
+      <details className="run-workbench-detail-section" open={!workflow}>
+        <summary>Deployment history</summary>
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Deploy</p>
@@ -696,6 +908,9 @@ export function RunDashboard({
             .map((event) => ({ sequence: event.sequence, data: event.data }))}
         />
       ) : null}
+      </details>
+      <details className="run-workbench-detail-section" open={!workflow}>
+        <summary>Agent task and output</summary>
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Agent</p>
@@ -756,9 +971,10 @@ export function RunDashboard({
         </ul>
       ) : null}
       <div className="button-row">
-        <button
-          className="quiet-button"
-          disabled={!hasRun || !nodeId.trim() || !agentPrompt.trim() || !providerAvailable}
+          <button
+            className="quiet-button"
+            hidden={Boolean(workflow && selectedWorkflowNode?.kind.toLowerCase() !== "agent")}
+            disabled={projectArchived || !hasRun || !nodeId.trim() || !agentPrompt.trim() || !providerAvailable}
           onClick={() => onStartAgent?.(nodeId.trim(), agentProvider, agentPrompt.trim(), agentMode, roleAllowedTools, activeRun?.context?.executionWorkspace || agentWorkspacePath || undefined)}
         >
           启动 Agent
@@ -787,7 +1003,7 @@ export function RunDashboard({
         ariaLabel="Agent 交互终端"
         resetKey={`${activeRunId ?? "none"}:${latestAgentJob?.id ?? "none"}`}
         output={agentTerminalOutput}
-        writable={Boolean(activeInteractiveAgent && onAgentTerminalInput)}
+        writable={!projectArchived && Boolean(activeInteractiveAgent && onAgentTerminalInput)}
         onInput={(data) => {
           if (activeInteractiveAgent) {
             onAgentTerminalInput?.(activeInteractiveAgent.id, data);
@@ -804,6 +1020,9 @@ export function RunDashboard({
           }
         }}
       />
+      </details>
+        </div>
+      </details>
     </section>
   );
 }

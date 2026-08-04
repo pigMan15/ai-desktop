@@ -31,7 +31,7 @@ export function ApprovalInbox({ state, onDecide }: Props) {
     ));
 
   return (
-    <section id="approvals" className="panel" aria-labelledby="approvals-title">
+    <section id="approvals" className="panel page-workspace page-approvals" aria-labelledby="approvals-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Human Review</p>

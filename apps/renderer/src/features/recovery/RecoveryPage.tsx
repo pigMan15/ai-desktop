@@ -27,7 +27,7 @@ export function RecoveryPage({
   const recoverableCheckpointIds = diagnostics?.recoverableAgentCheckpointIds ?? [];
 
   return (
-    <section id="recovery" className="panel" aria-labelledby="recovery-title">
+    <section id="recovery" className="panel page-workspace page-recovery" aria-labelledby="recovery-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">恢复</p>

@@ -100,3 +100,42 @@ it("shows the archived project path and allows it to be reimported", () => {
   fireEvent.click(screen.getByRole("button", { name: "重新导入项目" }));
   expect(onReimport).toHaveBeenCalledTimes(1);
 });
+
+it("uses the bound workflow state in the project summary and keeps the operation message above Git", () => {
+  render(
+    <ProjectDashboard
+      state={{
+        connection: "connected",
+        workspaceStatus: "ready",
+        projectName: "demo",
+        workflowName: "未绑定工作流",
+        projection: null,
+        timeline: [],
+        artifacts: [],
+        approvals: [],
+        gates: [],
+        agentJobs: [],
+        agentOutput: [],
+      }}
+      projectPath="G:\\Project\\demo"
+      onProjectPathChange={() => undefined}
+      onImport={() => undefined}
+      workflowBinding={{
+        projectId: "project-1",
+        workflowId: "release-workflow",
+        workflowVersionId: "workflow-version-1",
+        actor: {},
+        boundAt: "2026-08-04T00:00:00Z",
+        workflowBindingStatus: "bound",
+      }}
+      operationMessage="导入完成：已绑定发布工作流"
+      gitPanel={<section aria-label="Git panel">Git panel</section>}
+    />,
+  );
+
+  expect(screen.getByRole("cell", { name: "已绑定工作流" })).toBeInTheDocument();
+
+  const status = screen.getByRole("status");
+  const gitPanel = screen.getByRole("region", { name: "Git panel" });
+  expect(Boolean(status.compareDocumentPosition(gitPanel) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+});

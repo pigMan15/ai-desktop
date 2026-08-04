@@ -7,7 +7,7 @@ import {
   autoLayoutPositions,
   removeFlowEdges,
   toFlowGraph,
-} from "./workflowCanvas";
+} from "./workflowCanvasModel";
 
 function definition(overrides: Partial<WorkflowDefinitionSummary> = {}): WorkflowDefinitionSummary {
   return {
@@ -32,7 +32,7 @@ function definition(overrides: Partial<WorkflowDefinitionSummary> = {}): Workflo
   };
 }
 
-describe("workflowCanvas", () => {
+describe("workflowCanvasModel", () => {
   it("uses deterministic automatic layout when canvas positions are absent", () => {
     const graph = toFlowGraph(definition());
 

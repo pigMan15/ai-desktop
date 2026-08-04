@@ -1,7 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KnowledgePage } from "./KnowledgePage";
+
+afterEach(cleanup);
 
 describe("KnowledgePage", () => {
   it("创建候选、审核并发布经批准的知识", () => {
@@ -126,8 +128,7 @@ describe("KnowledgePage", () => {
     expect(screen.queryByRole("button", { name: "提交并推送知识：产物归档规范" })).not.toBeInTheDocument();
   });
 
-  it("starts a CLI synthesis, shows its diff, records feedback, and publishes only a completed draft", () => {
-    const onSynthesize = vi.fn();
+  it("shows CLI synthesis results, records feedback, and publishes only a completed draft", () => {
     const onFeedback = vi.fn();
     const onPublishSynthesis = vi.fn();
     const { container } = render(
@@ -169,24 +170,24 @@ describe("KnowledgePage", () => {
         onCreate={vi.fn()}
         onReview={vi.fn()}
         onPublish={vi.fn()}
-        onSynthesize={onSynthesize}
         onFeedbackSynthesis={onFeedback}
         onPublishSynthesis={onPublishSynthesis}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "开始 CLI 合成：部署验收规则" }));
     fireEvent.change(screen.getByLabelText("合成反馈：部署验收规则"), {
       target: { value: "补充上线后验证要求。" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存合成反馈：部署验收规则" }));
     fireEvent.click(screen.getByRole("button", { name: "发布合成稿：部署验收规则" }));
 
-    expect(onSynthesize).toHaveBeenCalledWith("candidate-1", "codex");
     expect(onFeedback).toHaveBeenCalledWith("synthesis-1", "补充上线后验证要求。");
     expect(onPublishSynthesis).toHaveBeenCalledWith("synthesis-1");
-    expect(screen.getByLabelText("合成实时输出：部署验收规则").textContent).toContain("正在整理部署验收规则。");
-    expect(screen.getByLabelText("合成差异：部署验收规则").textContent).toContain("+ 部署前必须完成 Gate 审核并保留回滚证据。");
+    fireEvent.click(screen.getByRole("button", { name: "查看 CLI 执行日志" }));
+    expect(screen.getByLabelText("CLI 执行日志：部署验收规则").textContent).toContain("正在整理部署验收规则。");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看合成结果" }));
+    expect(screen.getByLabelText("合成结果：部署验收规则").textContent).toContain("部署前必须完成 Gate 审核并保留回滚证据。");
     expect(container.querySelector(".gate-record .gate-record")).toBeNull();
   });
 });

@@ -54,6 +54,9 @@ declare global {
         markdown: string,
       ): Promise<PublishedKnowledgeDocument>;
     };
+    workflowProject: {
+      selectDirectory(): Promise<string | null>;
+    };
   }
 }
 

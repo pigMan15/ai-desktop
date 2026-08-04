@@ -1,4 +1,4 @@
-from workflow_platform.models import NodeAgentSpec, WorkflowDefinition
+from workflow_platform.models import NodeAgentSpec, Role, WorkflowDefinition
 
 
 _ARTIFACT_PATH_VARIABLES = {"runId", "nodeId", "workflowId", "artifactId", "date"}
@@ -27,6 +27,33 @@ def compile_workflow(workflow: WorkflowDefinition) -> dict:
             )
             duplicate_node_ids.add(node.id)
         seen_node_ids.add(node.id)
+
+    roles_by_id: dict[str, Role] = {}
+    seen_role_ids: set[str] = set()
+    duplicate_role_ids: set[str] = set()
+    for role in workflow.roles:
+        if not role.id.strip() or not role.name.strip():
+            diagnostics.append(
+                {
+                    "code": "INVALID_ROLE_DEFINITION",
+                    "message": "Role id and name must be non-empty.",
+                    "roleId": role.id,
+                }
+            )
+        if not role.id.strip():
+            continue
+        if role.id in seen_role_ids and role.id not in duplicate_role_ids:
+            diagnostics.append(
+                {
+                    "code": "DUPLICATE_ROLE_ID",
+                    "message": f"Role id '{role.id}' is defined more than once.",
+                    "roleId": role.id,
+                }
+            )
+            duplicate_role_ids.add(role.id)
+        else:
+            roles_by_id[role.id] = role
+        seen_role_ids.add(role.id)
 
     for edge in workflow.edges:
         if edge.from_ not in seen_node_ids:
@@ -110,6 +137,35 @@ def compile_workflow(workflow: WorkflowDefinition) -> dict:
                     "nodeId": node.id,
                 }
             )
+        role_id = node.agent.roleId
+        if role_id is not None:
+            if node.kind != "agent":
+                diagnostics.append(
+                    {
+                        "code": "AGENT_ROLE_UNSUPPORTED",
+                        "message": f"Node '{node.id}' does not support agent role binding.",
+                        "nodeId": node.id,
+                        "roleId": role_id,
+                    }
+                )
+            elif not role_id.strip() or role_id not in roles_by_id:
+                diagnostics.append(
+                    {
+                        "code": "AGENT_ROLE_MISSING",
+                        "message": f"Node '{node.id}' references missing agent role '{role_id}'.",
+                        "nodeId": node.id,
+                        "roleId": role_id,
+                    }
+                )
+            elif roles_by_id[role_id].disabled:
+                diagnostics.append(
+                    {
+                        "code": "AGENT_ROLE_DISABLED",
+                        "message": f"Node '{node.id}' references disabled agent role '{role_id}'.",
+                        "nodeId": node.id,
+                        "roleId": role_id,
+                    }
+                )
         if node.advance.mode == "auto" and (
             node.kind in {"approval", "gate"}
             or (node.kind == "deploy" and node.metadata.get("risk") == "high")

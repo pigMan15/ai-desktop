@@ -8,6 +8,7 @@ import type {
   WorkflowSimulation,
   WorkflowVersionDiff,
   WorkflowVersionSummary,
+  RoleAssetSummary,
 } from "../../app/runtimeClient";
 import { WorkflowCanvas } from "./WorkflowCanvas";
 import { RoleLibrary } from "./RoleLibrary";
@@ -27,6 +28,7 @@ type Props = {
   onRestoreVersion?: (workflowVersionId: string) => void;
   onExportWorkflow?: (format: WorkflowExportFormat) => void;
   onBack?: () => void;
+  roleAssets?: RoleAssetSummary[];
 };
 
 export function WorkflowViewer({
@@ -43,6 +45,7 @@ export function WorkflowViewer({
   onRestoreVersion,
   onExportWorkflow,
   onBack,
+  roleAssets = [],
 }: Props) {
   const [draft, setDraft] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
@@ -58,6 +61,7 @@ export function WorkflowViewer({
   const draftStorageKey = workflowVersionId ? `workflow-draft:${workflowVersionId}` : null;
   const selectedHistoryVersion = history.find((version) => version.id === selectedHistoryVersionId);
   const selectedNode = editableWorkflow?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const activeRoleAssets = roleAssets.filter((role) => !role.archivedAt);
 
   useEffect(() => {
     const storedDraft = draftStorageKey ? window.sessionStorage.getItem(draftStorageKey) : null;
@@ -90,7 +94,10 @@ export function WorkflowViewer({
     }
     try {
       setDraftError(null);
-      await onSaveDefinition?.(removeUnsupportedAgentSettings(parsed));
+      const definition = removeUnsupportedAgentSettings(parsed);
+      await onSaveDefinition?.(
+        roleAssets.length > 0 ? normalizeGlobalRoleBindings(definition, activeRoleAssets) : definition,
+      );
       if (draftStorageKey) {
         window.sessionStorage.removeItem(draftStorageKey);
       }
@@ -167,6 +174,24 @@ export function WorkflowViewer({
     updateDraft((definition) => ({
       ...definition,
       nodes: definition.nodes.map((node) => node.id === nodeId ? update(node) : node),
+    }));
+  }
+
+  function bindNodeToGlobalRole(nodeId: string, roleId: string) {
+    const selectedRole = activeRoleAssets.find((role) => role.id === roleId);
+    updateDraft((definition) => ({
+      ...definition,
+      roles: selectedRole
+        ? [...definition.roles.filter((role) => role.id !== selectedRole.id), toRoleSnapshot(selectedRole)]
+        : definition.roles,
+      nodes: definition.nodes.map((node) => node.id === nodeId ? {
+        ...node,
+        agent: {
+          ...node.agent,
+          roleId: selectedRole?.id || undefined,
+          context: node.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 },
+        },
+      } : node),
     }));
   }
 
@@ -307,6 +332,11 @@ export function WorkflowViewer({
               <button type="button" className="quiet-button" disabled={!onExportWorkflow} onClick={() => onExportWorkflow?.(exportFormat)}>导出工作流</button>
             </div>
           </div>
+          {editableWorkflow ? (
+            <label className="workflow-name-editor">工作流名称
+              <input aria-label="工作流名称" value={editableWorkflow.name} onChange={(event) => updateDraft((definition) => ({ ...definition, name: event.target.value }))} placeholder="请输入工作流名称" />
+            </label>
+          ) : null}
           <div className="table-like workflow-definition-summary" role="table" aria-label="工作流定义节点">
             <div role="row" className="table-row table-head">
               <span role="columnheader">节点</span>
@@ -372,7 +402,6 @@ export function WorkflowViewer({
                 <WorkflowCanvas
                   definition={editableWorkflow}
                   compiled={compiled}
-                  state={state}
                   onDefinitionChange={(definition: WorkflowDefinitionSummary) => updateDraft(() => definition)}
                   onRemoveNodes={removeNodes}
                   onSelectNode={setSelectedNodeId}
@@ -385,6 +414,7 @@ export function WorkflowViewer({
                       nodes={editableWorkflow.nodes}
                       onChange={(roles) => updateDraft((definition) => ({ ...definition, roles }))}
                       onError={setDraftError}
+                      publicRoles={roleAssets}
                     />
                   </div>
                 ) : null}
@@ -446,22 +476,18 @@ export function WorkflowViewer({
                         执行角色
                         <select
                           aria-label={`节点 ${node.id} 的执行角色`}
-                          value={node.agent?.roleId ?? ""}
-                          onChange={(event) => updateNode(node.id, (current) => ({
-                            ...current,
-                            agent: {
-                              ...current.agent,
-                              roleId: event.target.value || undefined,
-                              context: current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 },
-                            },
-                          }))}
+                          value={activeRoleAssets.some((role) => role.id === node.agent?.roleId) ? node.agent?.roleId : ""}
+                          onChange={(event) => bindNodeToGlobalRole(node.id, event.target.value)}
                         >
                           <option value="">未绑定执行角色</option>
-                          {editableWorkflow.roles.filter((role) => !role.disabled).map((role) => (
+                          {activeRoleAssets.map((role) => (
                             <option key={role.id} value={role.id}>{role.name}</option>
                           ))}
                         </select>
                       </label>
+                      {node.agent?.roleId && !activeRoleAssets.some((role) => role.id === node.agent?.roleId) ? (
+                        <p className="workflow-node-type-help" role="alert">原角色已不存在或已归档，请重新绑定角色库中的角色。</p>
+                      ) : null}
                       <label className="form-wide">
                         Agent 节点模板
                         <textarea
@@ -745,6 +771,32 @@ function removeUnsupportedAgentSettings(definition: WorkflowDefinitionSummary): 
     nodes: definition.nodes.map(({ agent, ...node }) => (
       node.kind === "agent" ? { ...node, agent } : node
     )),
+  };
+}
+
+function toRoleSnapshot(role: RoleAssetSummary) {
+  return { ...role, assetVersionId: role.roleVersionId };
+}
+
+function normalizeGlobalRoleBindings(
+  definition: WorkflowDefinitionSummary,
+  activeRoleAssets: RoleAssetSummary[],
+): WorkflowDefinitionSummary {
+  const activeRolesById = new Map(activeRoleAssets.map((role) => [role.id, role]));
+  const nodes = definition.nodes.map((node) => {
+    if (node.kind !== "agent" || !node.agent?.roleId || activeRolesById.has(node.agent.roleId)) {
+      return node;
+    }
+    return { ...node, agent: { ...node.agent, roleId: undefined } };
+  });
+  const referencedRoleIds = new Set(nodes.flatMap((node) => node.agent?.roleId ? [node.agent.roleId] : []));
+
+  return {
+    ...definition,
+    nodes,
+    roles: activeRoleAssets
+      .filter((role) => referencedRoleIds.has(role.id))
+      .map(toRoleSnapshot),
   };
 }
 

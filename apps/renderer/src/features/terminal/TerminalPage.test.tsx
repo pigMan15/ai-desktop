@@ -4,13 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TerminalPage } from "./TerminalPage";
 
 vi.mock("./TerminalViewport", () => ({
-  TerminalViewport: ({ ariaLabel, output, writable, localEcho, onInput, onInterrupt }: {
+  TerminalViewport: ({ ariaLabel, output, writable, localEcho, onInput, onInterrupt, onResize }: {
     ariaLabel: string;
     output: Array<{ sequence: number; data: string }>;
     writable?: boolean;
     localEcho?: boolean;
     onInput?: (data: string) => void | Promise<void>;
     onInterrupt?: () => void;
+    onResize?: (columns: number, rows: number) => void;
   }) => (
     <section
       aria-label={ariaLabel}
@@ -24,6 +25,7 @@ vi.mock("./TerminalViewport", () => ({
       <button type="button" onClick={() => onInput?.("继续\r")}>输入 Agent 回复</button>
       <button type="button" onClick={() => onInput?.("\r")}>回车</button>
       <button type="button" onClick={onInterrupt}>中断</button>
+      <button type="button" onClick={() => onResize?.(120, 40)}>自动调整尺寸</button>
     </section>
   ),
 }));
@@ -73,6 +75,25 @@ describe("TerminalPage", () => {
     });
     expect(screen.queryByLabelText("终端输入")).not.toBeInTheDocument();
     expect(screen.getByLabelText("ANSI 终端")).toHaveAttribute("data-local-echo", "true");
+  });
+
+  it("默认在当前 Run 的执行工作区创建终端", async () => {
+    const bridge = installTerminalBridge();
+    render(
+      <TerminalPage
+        runId="run-1"
+        projectPath={String.raw`G:\Project\demo`}
+        executionWorkspace={String.raw`G:\Project\demo\.workflow-platform\worktrees\dev`}
+        nodeId="plan"
+        onRegisterSession={vi.fn(async () => ({ id: "runtime-terminal-1" }))}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建终端" }));
+    await waitFor(() => expect(bridge.create).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: String.raw`G:\Project\demo\.workflow-platform\worktrees\dev`,
+      projectRoot: String.raw`G:\Project\demo`,
+    })));
   });
 
   it("终端读取暂时失败后继续轮询后续输出", async () => {
@@ -212,6 +233,45 @@ describe("TerminalPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "停止终端" }));
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith("terminal-1"));
     expect(onStopSession).toHaveBeenCalledWith({ runId: "run-1", sessionId: "runtime-terminal-1" });
+  });
+
+  it("xterm viewport resize 同步到运行中的 PTY", async () => {
+    const bridge = installTerminalBridge();
+
+    render(
+      <TerminalPage
+        runId="run-1"
+        projectPath={"G:\\Project\\demo"}
+        nodeId="plan"
+        onRegisterSession={vi.fn(async () => ({ id: "runtime-terminal-1" }))}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建终端" }));
+    await waitFor(() => expect(bridge.create).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "自动调整尺寸" }));
+
+    await waitFor(() => expect(bridge.resize).toHaveBeenCalledWith("terminal-1", 120, 40));
+  });
+
+  it("相同 viewport 尺寸重复通知时不重复 resize PTY", async () => {
+    const bridge = installTerminalBridge();
+
+    render(
+      <TerminalPage
+        runId="run-1"
+        projectPath={"G:\\Project\\demo"}
+        nodeId="plan"
+        onRegisterSession={vi.fn(async () => ({ id: "runtime-terminal-1" }))}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建终端" }));
+    await waitFor(() => expect(bridge.create).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "自动调整尺寸" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动调整尺寸" }));
+
+    await waitFor(() => expect(bridge.resize).toHaveBeenCalledTimes(1));
   });
 
   it("加载历史会话为只读输出，并能基于历史配置新建终端", async () => {

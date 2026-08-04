@@ -69,6 +69,7 @@ describe("App", () => {
 
   it("renders one matching module for every declared route", () => {
     const headings = [
+      "角色库",
       "项目工作区",
       "运行管理",
       "工作流视图",
@@ -126,6 +127,20 @@ describe("App", () => {
             workflowBindingStatus: "bound",
           });
         }
+        if (url.pathname === "/workflow-versions/workflow-version-bound") {
+          return jsonResponse({
+            id: "workflow-restored",
+            name: "Restored workflow",
+            version: "1",
+            sourceAdapter: "manual",
+            nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+            edges: [],
+            roles: [],
+            gates: [],
+            policies: {},
+            metadata: {},
+          });
+        }
         if (url.pathname === "/runs/run-restored/projection") return jsonResponse(projection("run-restored", "1", "IN_PROGRESS"));
         if (url.pathname.endsWith("/timeline") || url.pathname.endsWith("/artifacts") || url.pathname.endsWith("/approvals") || url.pathname.endsWith("/gates") || url.pathname.endsWith("/agents")) return jsonResponse([]);
         if (url.pathname === "/agents/providers") return jsonResponse([]);
@@ -137,6 +152,8 @@ describe("App", () => {
 
     await screen.findByRole("heading", { name: "运行管理" });
     await waitFor(() => expect(calls).toContain("/projects/project-restored/workflow-binding"));
+    expect((await screen.findAllByText("Plan")).length).toBeGreaterThan(0);
+    expect(calls).toContain("/workflow-versions/workflow-version-bound");
   });
 
   it("blocks Run creation after an imported project is confirmed unbound", async () => {
@@ -257,6 +274,63 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "工作流不可用" })).toBeInTheDocument();
     expect(screen.getByText("找不到该工作流，可能已被删除或没有访问权限。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "保存新版本" })).not.toBeInTheDocument();
+  });
+
+  it("opens an editor when its version already matches the cached workflow version", async () => {
+    window.location.hash = "#/workflow";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      workflowVersionId: "delivery-version-1",
+      projectName: "demo",
+      workflowName: "产品交付",
+      runId: null,
+    });
+    const workflow = {
+      workflowId: "product-delivery",
+      name: "产品交付",
+      isBuiltin: false,
+      archivedAt: null,
+      updatedAt: "2026-08-04T10:00:00Z",
+      workflowVersionId: "delivery-version-1",
+      currentVersion: "1",
+      nodeCount: 1,
+      boundProjectCount: 0,
+    };
+    const definition = {
+      id: "delivery-definition",
+      name: "产品交付",
+      version: "1",
+      sourceAdapter: "manual",
+      nodes: [{ id: "plan", name: "计划", kind: "task" }],
+      edges: [],
+      roles: [],
+      gates: [],
+      policies: {},
+      metadata: {},
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/agents/providers") return jsonResponse([]);
+        if (url.pathname === "/workflows") return jsonResponse([workflow]);
+        if (url.pathname === "/workflow-versions/delivery-version-1") return jsonResponse(definition);
+        if (url.pathname === "/workflow-versions/delivery-version-1/compile") return jsonResponse({ diagnostics: [], graphSpec: { nodes: [], edges: [] } });
+        if (url.pathname === "/workflow-versions/delivery-version-1/history") return jsonResponse([]);
+        return jsonResponse([]);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 产品交付" }));
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("工作流定义 JSON") as HTMLTextAreaElement).value).toContain("产品交付");
+    });
+    expect(screen.queryByText("正在验证工作流...")).not.toBeInTheDocument();
   });
 
   it("opens a copied template as an editable asset and returns to the refreshed library after save", async () => {

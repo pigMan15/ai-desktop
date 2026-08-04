@@ -24,16 +24,26 @@ export function WorkflowBindingStep({
   onCreateBusinessWorkflow,
 }: Props) {
   const [selectedId, setSelectedId] = useState(selectedWorkflowId);
+  const [changingBinding, setChangingBinding] = useState(false);
 
   useEffect(() => {
     setSelectedId(selectedWorkflowId);
   }, [selectedWorkflowId]);
 
-  if (binding) {
+  useEffect(() => {
+    setChangingBinding(false);
+  }, [binding?.workflowVersionId]);
+
+  if (binding && !changingBinding) {
     return (
       <section className="workflow-binding-step" aria-label="项目工作流绑定">
         <strong>已绑定工作流</strong>
         <p className="body-copy">当前项目已固定到版本 {binding.workflowVersionId}，新建 Run 将使用该版本。</p>
+        <div className="button-row">
+          <button type="button" className="quiet-button" onClick={() => setChangingBinding(true)}>
+            更换工作流
+          </button>
+        </div>
       </section>
     );
   }
@@ -72,6 +82,11 @@ export function WorkflowBindingStep({
       </div>
       {availableWorkflows.length === 0 && !loading ? <p className="body-copy">还没有可绑定的工作流。</p> : null}
       <div className="button-row">
+        {binding ? (
+          <button type="button" className="quiet-button" onClick={() => setChangingBinding(false)}>
+            保留当前绑定
+          </button>
+        ) : null}
         <button type="button" onClick={onCreateBusinessWorkflow}>新建业务工作流</button>
       </div>
     </section>

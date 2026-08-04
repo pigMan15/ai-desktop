@@ -20,7 +20,6 @@ import {
 
 import type {
   CompiledWorkflowSummary,
-  RuntimeWorkbenchState,
   WorkflowDefinitionSummary,
 } from "../../app/runtimeClient";
 import { addFlowEdge, applyNodePositions, removeFlowEdges, toFlowGraph } from "./workflowCanvasModel";
@@ -32,7 +31,6 @@ type WorkflowNode = WorkflowDefinitionSummary["nodes"][number];
 type WorkflowCanvasProps = {
   definition: WorkflowDefinitionSummary;
   compiled?: CompiledWorkflowSummary | null;
-  state?: RuntimeWorkbenchState | null;
   onDefinitionChange: (definition: WorkflowDefinitionSummary) => void;
   onRemoveNodes: (nodeIds: string[]) => void;
   onSelectNode: (nodeId: string) => void;
@@ -42,7 +40,6 @@ type WorkflowCanvasProps = {
 type WorkflowCanvasNodeData = {
   node: WorkflowNode;
   roleName?: string;
-  runState?: string;
   diagnostics: string[];
   onSelect: (nodeId: string) => void;
 };
@@ -52,7 +49,6 @@ type WorkflowCanvasNode = Node<WorkflowCanvasNodeData>;
 export function WorkflowCanvas({
   definition,
   compiled = null,
-  state = null,
   onDefinitionChange,
   onRemoveNodes,
   onSelectNode,
@@ -72,14 +68,13 @@ export function WorkflowCanvas({
       data: {
         node,
         roleName: roleId ? roleNames.get(roleId) ?? roleId : undefined,
-        runState: state?.projection?.nodeStates[node.id],
         diagnostics: (compiled?.diagnostics ?? [])
           .filter((diagnostic) => diagnostic.nodeId === node.id)
           .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`),
         onSelect: onSelectNode,
       },
     };
-  }), [compiled?.diagnostics, graphNodes, onSelectNode, roleNames, state?.projection?.nodeStates]);
+  }), [compiled?.diagnostics, graphNodes, onSelectNode, roleNames]);
   const nodeSignature = graphNodes.map((node) => node.id).join("|");
 
   const connect: OnConnect = (connection: Connection) => {
@@ -183,7 +178,7 @@ function WorkflowCanvasViewport({ nodeSignature, viewResetKey }: { nodeSignature
 }
 
 function WorkflowCanvasNode({ data }: NodeProps<WorkflowCanvasNode>) {
-  const { node, roleName, runState, diagnostics, onSelect } = data;
+  const { node, roleName, diagnostics, onSelect } = data;
 
   return (
     <article className="workflow-flow-node" data-kind={node.kind}>
@@ -192,7 +187,6 @@ function WorkflowCanvasNode({ data }: NodeProps<WorkflowCanvasNode>) {
         <strong>{node.name}</strong>
         <span>{node.kind}</span>
         {roleName ? <span>Role: {roleName}</span> : null}
-        {runState ? <span>Run: {runState}</span> : null}
         {diagnostics.map((diagnostic) => <span className="workflow-flow-node-error" key={diagnostic}>{diagnostic}</span>)}
       </button>
       <Handle type="source" position={Position.Right} aria-label={`Source ${node.id}`} />

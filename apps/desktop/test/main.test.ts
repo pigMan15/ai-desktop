@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
   bootstrap,
   createMainWindow,
+  registerProjectHandlers,
   registerGitWorkspaceHandlers,
   registerTerminalHandlers,
   registerRuntimeHandlers,
@@ -286,6 +287,18 @@ const lifecycleProcess = new EventEmitter() as EventEmitter & {
   stderr: EventEmitter;
   kill: () => void;
 };
+
+const projectHandlers = new Map<string, () => unknown>();
+const projectIpcMain = {
+  handle(channel: string, handler: () => unknown) {
+    projectHandlers.set(channel, handler);
+  },
+};
+
+registerProjectHandlers(projectIpcMain, {
+  showOpenDialog: async () => ({ canceled: false, filePaths: ["G:\\Project\\selected"] }),
+});
+assert.equal(await projectHandlers.get("project:select-directory")?.(), "G:\\Project\\selected");
 lifecycleProcess.pid = 9999;
 lifecycleProcess.stdout = new EventEmitter();
 lifecycleProcess.stderr = new EventEmitter();

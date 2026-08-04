@@ -2,7 +2,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from workflow_platform.models import Actor, RunEvent, RunProjection, WorkflowDefinition
+from workflow_platform.models import Actor, Role, RunEvent, RunProjection, WorkflowDefinition
 
 
 class WorkflowVersionRepository:
@@ -268,11 +268,101 @@ class WorkflowAssetRepository:
             raise KeyError(f"Workflow not found: {workflow_id}")
         return False
 
+    def delete(self, workflow_id: str) -> bool:
+        asset = self.get(workflow_id)
+        if asset is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        self._db.execute("UPDATE workflow_assets SET current_workflow_version_id = NULL WHERE id = ?", (workflow_id,))
+        self._db.execute("DELETE FROM workflow_versions WHERE workflow_asset_id = ?", (workflow_id,))
+        self._db.execute("DELETE FROM workflow_assets WHERE id = ?", (workflow_id,))
+        return True
+
     def update_current_version(self, workflow_id: str, workflow_version_id: str, *, now: str) -> None:
         self._db.execute(
             "UPDATE workflow_assets SET current_workflow_version_id = ?, updated_at = ? WHERE id = ?",
             (workflow_version_id, now, workflow_id),
         )
+
+
+class RoleAssetRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def list_assets(self) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT assets.id, assets.name, assets.is_builtin, assets.archived_at, assets.updated_at,
+                   assets.current_role_version_id, versions.version, versions.definition_json
+            FROM role_assets AS assets
+            LEFT JOIN role_versions AS versions ON versions.id = assets.current_role_version_id
+            ORDER BY assets.archived_at IS NOT NULL, assets.updated_at DESC, assets.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get(self, role_id: str) -> dict | None:
+        row = self._db.execute("SELECT * FROM role_assets WHERE id = ?", (role_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_version(self, role_version_id: str) -> Role | None:
+        row = self._db.execute("SELECT definition_json FROM role_versions WHERE id = ?", (role_version_id,)).fetchone()
+        return Role.model_validate(json.loads(row["definition_json"])) if row is not None else None
+
+    def list_versions(self, role_id: str) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT id, version, definition_json, created_at FROM role_versions WHERE role_id = ? ORDER BY version DESC",
+            (role_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save(self, role: Role, *, is_builtin: bool, actor: dict, now: str) -> tuple[str, int]:
+        asset = self.get(role.id)
+        if asset is not None and asset["is_builtin"]:
+            raise ValueError("BUILTIN_ROLE_READ_ONLY: 内置角色只能复制后编辑")
+        version = int(self._db.execute("SELECT COALESCE(MAX(version), 0) AS value FROM role_versions WHERE role_id = ?", (role.id,)).fetchone()["value"]) + 1
+        version_id = f"role-version:{role.id}:{version}"
+        definition = role.model_copy(update={"assetVersionId": version_id})
+        self._db.execute(
+            """
+            INSERT INTO role_assets (id, name, is_builtin, archived_at, created_by_json, created_at, updated_at, current_role_version_id)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at, current_role_version_id = excluded.current_role_version_id
+            """,
+            (role.id, role.name, int(is_builtin if asset is None else bool(asset["is_builtin"])), json.dumps(actor, separators=(",", ":")), now, now, version_id),
+        )
+        self._db.execute(
+            "INSERT INTO role_versions (id, role_id, version, definition_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (version_id, role.id, version, json.dumps(definition.model_dump(by_alias=True), separators=(",", ":"), sort_keys=True), now),
+        )
+        return version_id, version
+
+    def archive(self, role_id: str, *, now: str) -> bool:
+        cursor = self._db.execute("UPDATE role_assets SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL", (now, now, role_id))
+        if cursor.rowcount:
+            return True
+        if self.get(role_id) is None:
+            raise KeyError(f"Role not found: {role_id}")
+        return False
+
+    def restore(self, role_id: str, *, now: str) -> bool:
+        cursor = self._db.execute(
+            "UPDATE role_assets SET archived_at = NULL, updated_at = ? WHERE id = ? AND archived_at IS NOT NULL",
+            (now, role_id),
+        )
+        if cursor.rowcount:
+            return True
+        if self.get(role_id) is None:
+            raise KeyError(f"Role not found: {role_id}")
+        return False
+
+    def delete(self, role_id: str) -> bool:
+        asset = self.get(role_id)
+        if asset is None:
+            raise KeyError(f"Role not found: {role_id}")
+        if asset["is_builtin"]:
+            raise ValueError("BUILTIN_ROLE_READ_ONLY: 内置角色不可删除")
+        self._db.execute("DELETE FROM role_assets WHERE id = ?", (role_id,))
+        return True
 
 
 class ProjectWorkflowBindingRepository:

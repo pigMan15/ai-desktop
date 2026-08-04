@@ -68,3 +68,29 @@ it("copies a template before binding and can open business workflow creation", (
   fireEvent.click(screen.getByRole("button", { name: "新建业务工作流" }));
   expect(onCreateBusinessWorkflow).toHaveBeenCalledTimes(1);
 });
+
+it("allows an already bound project to choose a different workflow", () => {
+  const onBind = vi.fn();
+  render(
+    <WorkflowBindingStep
+      projectId="project-demo"
+      workflows={workflows}
+      binding={{
+        projectId: "project-demo",
+        workflowId: "workflow-custom",
+        workflowVersionId: "workflow-version-custom",
+        actor: {},
+        boundAt: "2026-08-04T00:00:00Z",
+        workflowBindingStatus: "bound",
+      }}
+      onBind={onBind}
+      onCopyTemplate={vi.fn()}
+      onCreateBusinessWorkflow={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "更换工作流" }));
+  expect(screen.getByRole("heading", { name: "选择工作流" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "绑定支付改造" }));
+  expect(onBind).toHaveBeenCalledWith("workflow-custom", "workflow-version-custom");
+});

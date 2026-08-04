@@ -52,6 +52,7 @@ type TerminalBridge = {
 type TerminalPageProps = {
   runId?: string | null;
   projectPath?: string;
+  executionWorkspace?: string;
   nodeId?: string;
   onRegisterSession?: (session: {
     runId: string;
@@ -75,6 +76,7 @@ type TerminalPageProps = {
 export function TerminalPage({
   runId = null,
   projectPath = "",
+  executionWorkspace = "",
   nodeId: initialNodeId = "",
   onRegisterSession,
   onStopSession,
@@ -84,7 +86,7 @@ export function TerminalPage({
   onLoadHistoryOutput,
 }: TerminalPageProps) {
   const bridge = getTerminalBridge();
-  const [projectRoot, setProjectRoot] = useState(projectPath);
+  const [projectRoot, setProjectRoot] = useState(executionWorkspace || projectPath);
   const [nodeId, setNodeId] = useState(initialNodeId);
   const [kind, setKind] = useState<TerminalKind>("shell");
   const [initialPrompt, setInitialPrompt] = useState("");
@@ -98,9 +100,15 @@ export function TerminalPage({
   const [historySessionId, setHistorySessionId] = useState("");
   const [message, setMessage] = useState(bridge ? "等待创建终端" : "桌面终端不可用");
   const shellLineRef = useRef("");
+  const lastResizedSessionRef = useRef<{ sessionId: string; columns: number; rows: number } | null>(null);
+  const resizeInFlightRef = useRef(false);
   const latestSequence = output.reduce((latest, event) => Math.max(latest, event.sequence), 0);
   const selectedHistorySession =
     historySessions.find((candidate) => candidate.id === historySessionId) ?? null;
+
+  useEffect(() => {
+    if (!session) setProjectRoot(executionWorkspace || projectPath);
+  }, [executionWorkspace, projectPath, session]);
 
   useEffect(() => {
     if (!bridge || !session) {
@@ -162,7 +170,7 @@ export function TerminalPage({
       const nextSession = await bridge.create({
         kind,
         cwd: projectRoot.trim(),
-        projectRoot: projectRoot.trim(),
+        projectRoot: projectPath.trim() || projectRoot.trim(),
         columns,
         rows,
         initialPrompt: initialPrompt.trim() || undefined,
@@ -182,6 +190,11 @@ export function TerminalPage({
         throw error;
       }
       setSession(nextSession);
+      lastResizedSessionRef.current = {
+        sessionId: nextSession.id,
+        columns: nextSession.columns,
+        rows: nextSession.rows,
+      };
       setColumns(nextSession.columns);
       setRows(nextSession.rows);
       setOutput([]);
@@ -212,6 +225,7 @@ export function TerminalPage({
     try {
       const historyOutput = await onLoadHistoryOutput(selectedHistorySession.id);
       setSession(null);
+      lastResizedSessionRef.current = null;
       setOutput(historyOutput.map(({ sequence, data }) => ({ sequence, data })));
       shellLineRef.current = "";
       setMessage(`已加载历史会话：${selectedHistorySession.id}（只读）`);
@@ -343,6 +357,11 @@ export function TerminalPage({
     }
     try {
       const nextSession = await bridge.resize(session.id, columns, rows);
+      lastResizedSessionRef.current = {
+        sessionId: session.id,
+        columns: nextSession.columns,
+        rows: nextSession.rows,
+      };
       setSession({ ...nextSession, runtimeSessionId: session.runtimeSessionId });
       setMessage(`已调整为 ${nextSession.columns} x ${nextSession.rows}`);
     } catch (error) {
@@ -358,6 +377,34 @@ export function TerminalPage({
     await createTerminal();
   }
 
+  async function syncViewportSize(nextColumns: number, nextRows: number) {
+    if (!bridge || !session || nextColumns < 1 || nextRows < 1 || resizeInFlightRef.current) {
+      return;
+    }
+    const previous = lastResizedSessionRef.current;
+    if (previous?.sessionId === session.id && previous.columns === nextColumns && previous.rows === nextRows) {
+      return;
+    }
+    resizeInFlightRef.current = true;
+    try {
+      const nextSession = await bridge.resize(session.id, nextColumns, nextRows);
+      lastResizedSessionRef.current = {
+        sessionId: session.id,
+        columns: nextSession.columns,
+        rows: nextSession.rows,
+      };
+      setSession((current) => current?.id === session.id
+        ? { ...nextSession, runtimeSessionId: current.runtimeSessionId }
+        : current);
+      setColumns(nextSession.columns);
+      setRows(nextSession.rows);
+    } catch (error) {
+      setMessage(`终端尺寸同步失败：${errorMessage(error)}`);
+    } finally {
+      resizeInFlightRef.current = false;
+    }
+  }
+
   async function exportEvidence() {
     if (!session?.runtimeSessionId || !runId || !onExportEvidence) {
       return;
@@ -371,7 +418,7 @@ export function TerminalPage({
   }
 
   return (
-    <section id="terminal" className="panel" aria-labelledby="terminal-title">
+    <section id="terminal" className="panel page-workspace page-terminal" aria-labelledby="terminal-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">命令行</p>
@@ -396,7 +443,7 @@ export function TerminalPage({
           </select>
         </label>
         <label>
-          项目根目录
+          执行工作区
           <input
             value={projectRoot}
             onChange={(event) => setProjectRoot(event.target.value)}
@@ -496,6 +543,7 @@ export function TerminalPage({
         localEcho={session?.kind === "shell"}
         onInput={handleTerminalInput}
         onInterrupt={interruptTerminal}
+        onResize={syncViewportSize}
       />
       {pendingApproval ? (
         <div className="dialog-backdrop" role="presentation">

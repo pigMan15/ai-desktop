@@ -9,6 +9,7 @@ type Props = {
   onCreate: () => void;
   onEdit: (workflow: WorkflowLibraryItem) => void;
   onCopyTemplate: (workflow: WorkflowLibraryItem, name: string) => void;
+  onDelete: (workflow: WorkflowLibraryItem) => void;
   onRefresh: () => void;
 };
 
@@ -19,6 +20,7 @@ export function WorkflowLibraryPage({
   onCreate,
   onEdit,
   onCopyTemplate,
+  onDelete,
   onRefresh,
 }: Props) {
   const [query, setQuery] = useState("");
@@ -104,6 +106,7 @@ export function WorkflowLibraryPage({
                       </button>
                     </>
                   ) : (
+                    <>
                     <button
                       type="button"
                       className="quiet-button"
@@ -112,6 +115,8 @@ export function WorkflowLibraryPage({
                     >
                       编辑 {workflow.name}
                     </button>
+                    <button type="button" className="quiet-button" onClick={() => onDelete(workflow)}>删除</button>
+                    </>
                   )}
                 </div>
               </article>

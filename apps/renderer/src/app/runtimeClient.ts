@@ -290,6 +290,7 @@ export type WorkflowDefinitionSummary = {
 
 export type WorkflowRoleSummary = {
   id: string;
+  assetVersionId?: string;
   name: string;
   purpose?: string;
   description?: string;
@@ -304,6 +305,17 @@ export type WorkflowRoleSummary = {
   disabled?: boolean;
   metadata?: Record<string, unknown>;
 };
+
+export type RoleAssetSummary = WorkflowRoleSummary & {
+  isBuiltin: boolean;
+  archivedAt: string | null;
+  updatedAt: string;
+  roleVersionId: string;
+  version: number;
+};
+
+export type RoleVersionSummary = { roleVersionId: string; version: number; createdAt: string; definition: WorkflowRoleSummary };
+export type RoleWorkflowReference = { workflowVersionId: string; workflowName: string; workflowVersion: string };
 
 export type CompiledWorkflowSummary = {
   diagnostics: Array<{ code: string; message: string; nodeId?: string; edgeId?: string }>;
@@ -723,6 +735,21 @@ export function createRuntimeClient(apiBaseUrl: string) {
         now,
       }),
     listWorkflows: () => request<WorkflowLibraryItem[]>(apiBaseUrl, "/workflows"),
+    listRoleAssets: () => request<RoleAssetSummary[]>(apiBaseUrl, "/roles"),
+    saveRoleAsset: (definition: WorkflowRoleSummary, now: string) =>
+      request<{ roleId: string; roleVersionId: string; version: number }>(apiBaseUrl, "/roles", {
+        definition,
+        actor: HUMAN_ACTOR,
+        now,
+      }),
+    archiveRoleAsset: (roleId: string, now: string) =>
+      request<{ roleId: string; archived: boolean; archivedAt: string | null }>(apiBaseUrl, `/roles/${encodeURIComponent(roleId)}/archive`, { actor: HUMAN_ACTOR, now }),
+    restoreRoleAsset: (roleId: string, now: string) =>
+      request<{ roleId: string; restored: boolean }>(apiBaseUrl, `/roles/${encodeURIComponent(roleId)}/restore`, { actor: HUMAN_ACTOR, now }),
+    deleteRoleAsset: (roleId: string, now: string) =>
+      request<{ roleId: string; deleted: boolean }>(apiBaseUrl, `/roles/${encodeURIComponent(roleId)}/delete`, { actor: HUMAN_ACTOR, now }),
+    listRoleVersionHistory: (roleId: string) => request<RoleVersionSummary[]>(apiBaseUrl, `/roles/${encodeURIComponent(roleId)}/history`),
+    listRoleReferences: (roleId: string) => request<RoleWorkflowReference[]>(apiBaseUrl, `/roles/${encodeURIComponent(roleId)}/references`),
     createWorkflow: (definition: WorkflowDefinitionSummary, isBuiltin: boolean, now: string) =>
       request<WorkflowCreateResult>(apiBaseUrl, "/workflows", {
         definition,
@@ -742,6 +769,8 @@ export function createRuntimeClient(apiBaseUrl: string) {
         `/workflows/${encodeURIComponent(workflowId)}/archive`,
         { actor: HUMAN_ACTOR, now },
       ),
+    deleteWorkflow: (workflowId: string, now: string) =>
+      request<{ workflowId: string; deleted: boolean }>(apiBaseUrl, `/workflows/${encodeURIComponent(workflowId)}/delete`, { actor: HUMAN_ACTOR, now }),
     getProjectWorkflowBinding: (projectId: string) =>
       request<ProjectWorkflowBinding | null>(
         apiBaseUrl,
