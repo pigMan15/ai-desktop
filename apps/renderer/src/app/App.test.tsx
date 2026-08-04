@@ -99,6 +99,73 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "项目工作区" })).toBeInTheDocument();
   });
 
+  it("loads the project workflow binding when restoring directly into runs", async () => {
+    const calls: string[] = [];
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-restored",
+      workflowVersionId: "workflow-version-cached",
+      projectName: "demo",
+      workflowName: "缓存工作流",
+      runId: "run-restored",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        calls.push(url.pathname);
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/projects/project-restored/workflow-binding") {
+          return jsonResponse({
+            projectId: "project-restored",
+            workflowId: "workflow-restored",
+            workflowVersionId: "workflow-version-bound",
+            actor: { id: "renderer-human" },
+            boundAt: "2026-08-04T00:00:00Z",
+            workflowBindingStatus: "bound",
+          });
+        }
+        if (url.pathname === "/runs/run-restored/projection") return jsonResponse(projection("run-restored", "1", "IN_PROGRESS"));
+        if (url.pathname.endsWith("/timeline") || url.pathname.endsWith("/artifacts") || url.pathname.endsWith("/approvals") || url.pathname.endsWith("/gates") || url.pathname.endsWith("/agents")) return jsonResponse([]);
+        if (url.pathname === "/agents/providers") return jsonResponse([]);
+        return jsonResponse([]);
+      }),
+    );
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "运行管理" });
+    await waitFor(() => expect(calls).toContain("/projects/project-restored/workflow-binding"));
+  });
+
+  it("blocks Run creation after an imported project is confirmed unbound", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+        if (url.pathname === "/projects/import") {
+          return jsonResponse({ projectId: "project-unbound", workflowVersionId: null, workflowBindingStatus: "unbound" });
+        }
+        if (url.pathname === "/projects/project-unbound/workflow-binding") return jsonResponse(null);
+        if (url.pathname === "/workflows" || url.pathname === "/agents/providers") return jsonResponse([]);
+        return jsonResponse([]);
+      }),
+    );
+
+    window.location.hash = "#/projects";
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("项目路径"), { target: { value: "G:\\Project\\unbound" } });
+    fireEvent.click(screen.getByRole("button", { name: "导入项目" }));
+    await screen.findByRole("heading", { name: "选择工作流" });
+
+    window.location.hash = "#/runs";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    expect(await screen.findByText("请先为项目选择并绑定工作流，再创建 Run。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "创建 Run" })).not.toBeInTheDocument();
+  });
+
   it("isolates a new workflow draft from the previously selected workflow version", async () => {
     window.location.hash = "#/workflow/new";
     saveWorkspaceSession({
@@ -969,7 +1036,7 @@ describe("App", () => {
           return jsonResponse({
             projectId: "project-demo",
             workflowId: "workflow-demo",
-            workflowVersionId: "workflow-version-demo",
+            workflowVersionId: "workflow-version-bound",
             actor: { id: "renderer-human" },
             boundAt: "2026-08-04T00:00:00Z",
             workflowBindingStatus: "bound",
@@ -1103,7 +1170,7 @@ describe("App", () => {
     expect(await screen.findByText("Run 已创建：run-demo")).toBeInTheDocument();
     expect(calls.find((call) => call.path === "/runs")?.body).toMatchObject({
       projectId: "project-demo",
-      workflowVersionId: "workflow-version-demo",
+      workflowVersionId: "workflow-version-bound",
     });
     fireEvent.click(screen.getByRole("button", { name: "启动节点" }));
     expect(await screen.findByText("节点已启动：plan")).toBeInTheDocument();

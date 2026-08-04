@@ -312,10 +312,9 @@ export function App() {
   }, [apiBaseUrl, currentRoute, state?.connection, workflowRoute.mode]);
 
   useEffect(() => {
-    if (state?.connection !== "connected" || currentRoute !== "projects" || !projectId) {
+    if (state?.connection !== "connected" || !projectId) {
       return;
     }
-    void refreshWorkflowLibrary();
     let isMounted = true;
     createRuntimeClient(apiBaseUrl)
       .getProjectWorkflowBinding(projectId)
@@ -328,10 +327,15 @@ export function App() {
       .catch(() => {
         if (isMounted) setProjectWorkflowBinding(null);
       });
+    return () => { isMounted = false; };
+  }, [apiBaseUrl, projectId, state?.connection]);
+
+  useEffect(() => {
+    if (currentRoute !== "projects" || !projectId) return;
+    void refreshWorkflowLibrary();
     const requestedWorkflowId = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("bindWorkflow");
     if (requestedWorkflowId) setPendingWorkflowBindingId(requestedWorkflowId);
-    return () => { isMounted = false; };
-  }, [apiBaseUrl, currentRoute, projectId, state?.connection]);
+  }, [currentRoute, projectId]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "edit") {
@@ -1062,10 +1066,10 @@ export function App() {
 
   async function handleCreateRun(title: string, configuration: RunConfiguration) {
     try {
-      const boundWorkflowVersionId = projectWorkflowBinding?.workflowVersionId ?? workflowVersionId;
-      if (!projectId || projectWorkflowBinding === null || !boundWorkflowVersionId) {
+      if (!projectId || !projectWorkflowBinding) {
         throw new Error("请先为项目绑定工作流");
       }
+      const boundWorkflowVersionId = projectWorkflowBinding.workflowVersionId;
       runSwitchInProgressRef.current = true;
       clearDisplayedAgentTerminal();
       const projection = await client.createRun(
@@ -2040,7 +2044,7 @@ export function App() {
             onCancelDeployment={handleCancelDeployment}
             operationMessage={operationMessage}
             providerDiagnostics={providerDiagnostics}
-            workflowBinding={projectWorkflowBinding}
+            {...(projectId ? { workflowBinding: projectWorkflowBinding } : {})}
             />
           ) : null}
           {currentRoute === "workflow" && workflowRoute.mode === "library" ? (

@@ -111,6 +111,8 @@ export function RunDashboard({
   const [nodeContext, setNodeContext] = useState<NodeContextPreview | null>(null);
   const projection = state?.projection;
   const workspaceReady = state?.workspaceStatus === "ready";
+  const workflowBindingLoading = Object.prototype.hasOwnProperty.call(arguments[0], "workflowBinding")
+    && workflowBinding === undefined;
   const projectWorkflowUnbound = workflowBinding === null;
   const agentJobs = Array.isArray(state?.agentJobs) ? state.agentJobs : [];
   const agentOutput = Array.isArray(state?.agentOutput) ? state.agentOutput : [];
@@ -267,6 +269,21 @@ export function RunDashboard({
             前往项目工作区
           </a>
         </div>
+      </section>
+    );
+  }
+
+  if (workflowBindingLoading) {
+    return (
+      <section id="runs" className="panel page-workspace page-runs" aria-labelledby="runs-title">
+        <div className="panel-heading">
+          <div>
+            <p className="section-kicker">运行</p>
+            <h2 id="runs-title">运行管理</h2>
+          </div>
+          <span className="status-pill status-watch">正在验证工作流</span>
+        </div>
+        <p className="body-copy">正在加载项目工作流绑定，请稍候。</p>
       </section>
     );
   }
