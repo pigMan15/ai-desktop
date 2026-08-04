@@ -6,9 +6,13 @@ type Props = {
   projectPath: string;
   onProjectPathChange: (value: string) => void;
   onImport: () => void;
+  onSelectDirectory?: () => void;
   onArchive?: () => void;
+  archived?: boolean;
+  onReimport?: () => void;
   operationMessage?: string;
   gitPanel?: ReactNode;
+  workflowBindingStep?: ReactNode;
 };
 
 export function ProjectDashboard({
@@ -16,15 +20,19 @@ export function ProjectDashboard({
   projectPath,
   onProjectPathChange,
   onImport,
+  onSelectDirectory,
   onArchive,
+  archived = false,
+  onReimport,
   operationMessage,
   gitPanel,
+  workflowBindingStep,
 }: Props) {
   const connected = state?.connection === "connected";
   const initialized = state?.workspaceStatus === "ready";
 
   return (
-    <section id="projects" className="panel panel-wide" aria-labelledby="projects-title">
+    <section id="projects" className="panel panel-wide page-workspace page-projects" aria-labelledby="projects-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Workspace</p>
@@ -34,8 +42,27 @@ export function ProjectDashboard({
           {connected ? "Runtime 已连接" : "Runtime 不可用"}
         </span>
       </div>
-      {initialized ? (
+      {archived ? (
         <>
+          <p className="body-copy">项目已归档。历史 Run、产物和知识记录会保留；重新导入目录后即可恢复为活动项目。</p>
+          <label>
+            项目路径
+            <input
+              value={projectPath}
+              onChange={(event) => onProjectPathChange(event.target.value)}
+              placeholder="例如 G:\\Project\\my-workflow"
+            />
+          </label>
+          <div className="button-row">
+            {onSelectDirectory ? <button className="quiet-button" onClick={onSelectDirectory}>选择项目目录</button> : null}
+            <button className="quiet-button" disabled={!connected || !projectPath.trim() || !onReimport} onClick={onReimport}>
+              重新导入项目
+            </button>
+          </div>
+        </>
+      ) : initialized ? (
+        <>
+          {workflowBindingStep}
           <div className="table-like" role="table" aria-label="项目状态">
             <div role="row" className="table-row table-head">
               <span role="columnheader">项目</span>
@@ -57,7 +84,7 @@ export function ProjectDashboard({
         </>
       ) : (
         <>
-          <p className="body-copy">尚未导入项目。选择包含工作流定义的项目目录后即可开始创建 Run。</p>
+          <p className="body-copy">选择任意项目目录即可导入。没有工作流文件时，导入后请选择已有工作流，或新建符合业务的工作流再绑定。</p>
           <label>
             项目路径
             <input
@@ -67,6 +94,7 @@ export function ProjectDashboard({
             />
           </label>
           <div className="button-row">
+            {onSelectDirectory ? <button className="quiet-button" onClick={onSelectDirectory}>选择项目目录</button> : null}
             <button className="quiet-button" disabled={!connected || !projectPath.trim()} onClick={onImport}>
               导入项目
             </button>

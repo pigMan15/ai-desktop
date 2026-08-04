@@ -965,6 +965,16 @@ describe("App", () => {
             workflowName: "Demo Workflow",
           });
         }
+        if (url.pathname === "/projects/project-demo/workflow-binding") {
+          return jsonResponse({
+            projectId: "project-demo",
+            workflowId: "workflow-demo",
+            workflowVersionId: "workflow-version-demo",
+            actor: { id: "renderer-human" },
+            boundAt: "2026-08-04T00:00:00Z",
+            workflowBindingStatus: "bound",
+          });
+        }
         if (url.pathname === "/runs") {
           return jsonResponse(projection("run-demo", "1", "CREATED"));
         }

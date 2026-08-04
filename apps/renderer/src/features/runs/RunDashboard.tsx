@@ -10,11 +10,19 @@ import type {
   RuntimeWorkbenchState,
   NodeArtifactRequirements,
   NodeContextPreview,
+  ProjectWorkflowBinding,
+  WorkflowDefinitionSummary,
 } from "../../app/runtimeClient";
 import { TerminalViewport, type TerminalViewportOutput } from "../terminal/TerminalViewport";
 
+export type AgentWorkspaceOption = {
+  path: string;
+  label: string;
+};
+
 type Props = {
   state: RuntimeWorkbenchState | null;
+  workflow?: WorkflowDefinitionSummary | null;
   runs?: RunSummary[];
   activeRunId?: string | null;
   onSelectRun?: (runId: string) => void;
@@ -36,7 +44,10 @@ type Props = {
     provider: AgentJobSummary["provider"],
     prompt: string,
     mode: "interactive" | "automatic",
+    allowedTools: string[],
+    cwd?: string,
   ) => void;
+  agentWorkspaces?: AgentWorkspaceOption[];
   onCancelAgent?: (jobId: string) => void;
   onAgentTerminalInput?: (jobId: string, data: string) => void;
   onAgentTerminalResize?: (jobId: string, columns: number, rows: number) => void;
@@ -47,10 +58,12 @@ type Props = {
   onCancelDeployment?: (deploymentId: string) => void;
   operationMessage?: string;
   providerDiagnostics?: AgentProviderDiagnostic[];
+  workflowBinding?: ProjectWorkflowBinding | null;
 };
 
 export function RunDashboard({
   state,
+  workflow = null,
   runs = [],
   activeRunId = null,
   onSelectRun,
@@ -68,6 +81,7 @@ export function RunDashboard({
   onResumeRun,
   onArchiveRun,
   onStartAgent,
+  agentWorkspaces = [],
   onCancelAgent,
   onAgentTerminalInput,
   onAgentTerminalResize,
@@ -78,6 +92,7 @@ export function RunDashboard({
   onCancelDeployment,
   operationMessage,
   providerDiagnostics,
+  workflowBinding,
 }: Props) {
   const [runTitle, setRunTitle] = useState("");
   const [taskGoal, setTaskGoal] = useState("");
@@ -90,10 +105,13 @@ export function RunDashboard({
   const [agentProvider, setAgentProvider] = useState<AgentJobSummary["provider"]>("codex");
   const [agentMode, setAgentMode] = useState<"interactive" | "automatic">("interactive");
   const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentWorkspacePath, setAgentWorkspacePath] = useState("");
+  const [runWorkspacePath, setRunWorkspacePath] = useState("");
   const [artifactRequirements, setArtifactRequirements] = useState<NodeArtifactRequirements | null>(null);
   const [nodeContext, setNodeContext] = useState<NodeContextPreview | null>(null);
   const projection = state?.projection;
   const workspaceReady = state?.workspaceStatus === "ready";
+  const projectWorkflowUnbound = workflowBinding === null;
   const agentJobs = Array.isArray(state?.agentJobs) ? state.agentJobs : [];
   const agentOutput = Array.isArray(state?.agentOutput) ? state.agentOutput : [];
   const activeInteractiveAgent = [...agentJobs]
@@ -117,6 +135,44 @@ export function RunDashboard({
   const currentNodeId = availableNodeIds.includes(nodeId)
     ? nodeId
     : projection?.currentNodeIds[0] ?? availableNodeIds[0] ?? null;
+  const selectedWorkflowNode = workflow?.nodes?.find((node) => node.id === currentNodeId);
+  const selectedRole = selectedWorkflowNode?.agent?.roleId
+    ? workflow?.roles?.find((role) => role.id === selectedWorkflowNode.agent?.roleId)
+    : undefined;
+  const roleAllowedTools = selectedRole?.allowedTools ?? [];
+
+  useEffect(() => {
+    if (selectedRole?.provider) {
+      setAgentProvider(selectedRole.provider);
+    }
+  }, [currentNodeId, selectedRole?.id, selectedRole?.provider]);
+
+  useEffect(() => {
+    if (agentWorkspaces.some((workspace) => workspace.path === agentWorkspacePath)) {
+      return;
+    }
+    const nonRootWorkspace = agentWorkspaces.length === 2 ? agentWorkspaces[1] : undefined;
+    setAgentWorkspacePath(nonRootWorkspace?.path ?? agentWorkspaces[0]?.path ?? "");
+  }, [agentWorkspacePath, agentWorkspaces]);
+
+  useEffect(() => {
+    if (agentWorkspaces.some((workspace) => workspace.path === runWorkspacePath)) {
+      return;
+    }
+    const nonRootWorkspace = agentWorkspaces.length === 2 ? agentWorkspaces[1] : undefined;
+    setRunWorkspacePath(nonRootWorkspace?.path ?? agentWorkspaces[0]?.path ?? "");
+  }, [agentWorkspaces, runWorkspacePath]);
+
+  useEffect(() => {
+    const nextCurrentNodeId = projection?.currentNodeIds[0] ?? "";
+    const selectedNodeState = nodeId ? projection?.nodeStates[nodeId] : undefined;
+    if (
+      nextCurrentNodeId &&
+      (!nodeId || selectedNodeState === "PASSED" || selectedNodeState === "FAILED" || selectedNodeState === "SKIPPED")
+    ) {
+      setNodeId(nextCurrentNodeId);
+    }
+  }, [nodeId, projection?.currentNodeIds, projection?.nodeStates]);
   const activeRun = runs.find((run) => run.id === activeRunId) ?? null;
   const nodeState = currentNodeId ? projection?.nodeStates[currentNodeId] : undefined;
   const blockingReason = projection?.blockingReasons[0];
@@ -188,6 +244,7 @@ export function RunDashboard({
       onCreateRun?.(runTitle.trim(), {
         taskGoal: taskGoal.trim(),
         parameters: parsed,
+        executionWorkspace: runWorkspacePath || undefined,
       });
     } catch (error) {
       setRunConfigurationError(error instanceof Error ? error.message : "运行参数格式无效。");
@@ -196,7 +253,7 @@ export function RunDashboard({
 
   if (!workspaceReady) {
     return (
-      <section id="runs" className="panel" aria-labelledby="runs-title">
+      <section id="runs" className="panel page-workspace page-runs" aria-labelledby="runs-title">
         <div className="panel-heading">
           <div>
             <p className="section-kicker">Run</p>
@@ -214,9 +271,27 @@ export function RunDashboard({
     );
   }
 
+  if (projectWorkflowUnbound) {
+    return (
+      <section id="runs" className="panel page-workspace page-runs" aria-labelledby="runs-title">
+        <div className="panel-heading">
+          <div>
+            <p className="section-kicker">运行</p>
+            <h2 id="runs-title">运行管理</h2>
+          </div>
+          <span className="status-pill status-watch">等待工作流绑定</span>
+        </div>
+        <p className="body-copy">请先为项目选择并绑定工作流，再创建 Run。</p>
+        <div className="button-row">
+          <a className="quiet-button" href="#/projects">去选择工作流</a>
+        </div>
+      </section>
+    );
+  }
+
   if (!projection) {
     return (
-      <section id="runs" className="panel" aria-labelledby="runs-title">
+      <section id="runs" className="panel page-workspace page-runs" aria-labelledby="runs-title">
         <div className="panel-heading">
           <div>
             <p className="section-kicker">运行</p>
@@ -242,6 +317,14 @@ export function RunDashboard({
           />
         </label>
         <label>
+          执行工作区
+          <select aria-label="Run 执行工作区" value={runWorkspacePath} onChange={(event) => setRunWorkspacePath(event.target.value)}>
+            {agentWorkspaces.map((workspace) => (
+              <option key={workspace.path} value={workspace.path}>{workspace.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
           运行参数（JSON 对象）
           <textarea
             value={parametersText}
@@ -264,7 +347,7 @@ export function RunDashboard({
   }
 
   return (
-    <section id="runs" className="panel" aria-labelledby="runs-title">
+    <section id="runs" className="panel page-workspace page-runs" aria-labelledby="runs-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">运行</p>
@@ -299,6 +382,14 @@ export function RunDashboard({
             onChange={(event) => setTaskGoal(event.target.value)}
             placeholder="例如：验证发布流程并生成可审计报告"
           />
+        </label>
+        <label>
+          执行工作区
+          <select aria-label="新建 Run 执行工作区" value={runWorkspacePath} onChange={(event) => setRunWorkspacePath(event.target.value)}>
+            {agentWorkspaces.map((workspace) => (
+              <option key={workspace.path} value={workspace.path}>{workspace.label}</option>
+            ))}
+          </select>
         </label>
         <label>
           运行参数（JSON 对象）
@@ -339,6 +430,10 @@ export function RunDashboard({
         <div>
           <dt>任务目标</dt>
           <dd>{activeRun?.context?.taskGoal || "未设置"}</dd>
+        </div>
+        <div>
+          <dt>执行工作区</dt>
+          <dd>{activeRun?.context?.executionWorkspace || "主工作区"}</dd>
         </div>
       </dl>
       <pre className="code-block" aria-label="运行参数">
@@ -620,6 +715,10 @@ export function RunDashboard({
             <option value="automatic">自动执行</option>
           </select>
         </label>
+        <label>
+          执行工作区
+          <input value={activeRun?.context?.executionWorkspace || agentWorkspacePath} readOnly aria-label="Agent 执行工作区" />
+        </label>
         <label className="form-wide">
           Agent 提示词
           <textarea
@@ -643,7 +742,7 @@ export function RunDashboard({
         <button
           className="quiet-button"
           disabled={!hasRun || !nodeId.trim() || !agentPrompt.trim() || !providerAvailable}
-          onClick={() => onStartAgent?.(nodeId.trim(), agentProvider, agentPrompt.trim(), agentMode)}
+          onClick={() => onStartAgent?.(nodeId.trim(), agentProvider, agentPrompt.trim(), agentMode, roleAllowedTools, activeRun?.context?.executionWorkspace || agentWorkspacePath || undefined)}
         >
           启动 Agent
         </button>

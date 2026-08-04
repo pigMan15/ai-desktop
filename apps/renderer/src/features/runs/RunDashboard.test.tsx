@@ -113,6 +113,32 @@ describe("RunDashboard", () => {
     expect(screen.queryByRole("button", { name: "启动节点" })).not.toBeInTheDocument();
   });
 
+  it("blocks Run creation until the imported project binds a workflow", () => {
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "示例项目",
+          workflowName: "未绑定工作流",
+          projection: null,
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        workflowBinding={null}
+      />,
+    );
+
+    expect(screen.getByText("请先为项目选择并绑定工作流，再创建 Run。"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去选择工作流" })).toHaveAttribute("href", "#/projects");
+    expect(screen.queryByRole("button", { name: "创建 Run" })).not.toBeInTheDocument();
+  });
+
   it("将任务目标和结构化运行参数随 Run 一起提交", () => {
     const onCreateRun = vi.fn();
     render(
@@ -201,6 +227,58 @@ describe("RunDashboard", () => {
 
     expect(onSelectRun).toHaveBeenCalledWith("run-1");
     expect(screen.getByText("第一个并发 Run（CREATED）")).toBeInTheDocument();
+  });
+
+  it("switches the selected node to the next active node after completion", () => {
+    const initialState = {
+      connection: "connected" as const,
+      workspaceStatus: "ready" as const,
+      projectName: "Demo",
+      workflowName: "Demo workflow",
+      timeline: [],
+      artifacts: [],
+      approvals: [],
+      gates: [],
+      agentJobs: [],
+      agentOutput: [],
+    };
+    const { rerender } = render(
+      <RunDashboard
+        state={{
+          ...initialState,
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["plan"],
+            nodeStates: { plan: "RUNNING", implement: "PENDING" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-08-02T00:00:00Z",
+          },
+        }}
+      />,
+    );
+
+    rerender(
+      <RunDashboard
+        state={{
+          ...initialState,
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["implement"],
+            nodeStates: { plan: "PASSED", implement: "READY" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "2",
+            updatedAt: "2026-08-02T00:01:00Z",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("节点 ID")).toHaveValue("implement");
   });
 
   it("展示 CLI Provider 检测结果并禁用不可用的选项", () => {
@@ -512,11 +590,70 @@ describe("RunDashboard", () => {
 
     fireEvent.change(screen.getByLabelText("Agent 提示词"), { target: { value: "继续开发" } });
     fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
-    expect(onStartAgent).toHaveBeenCalledWith("plan", "codex", "继续开发", "interactive");
+    expect(onStartAgent).toHaveBeenCalledWith("plan", "codex", "继续开发", "interactive", [], undefined);
 
     expect(screen.getByLabelText("Agent 交互终端")).toHaveAttribute("data-writable", "true");
     expect(screen.getByLabelText("Agent 交互终端").textContent).toContain("需要你回复 yes/no");
     fireEvent.click(screen.getByRole("button", { name: "在 Agent 终端回复" }));
     expect(onAgentTerminalInput).toHaveBeenCalledWith("job-1", "继续\r");
+  });
+
+  it("uses the selected node role defaults when starting an Agent", () => {
+    const onStartAgent = vi.fn();
+    render(
+      <RunDashboard
+        state={{
+          connection: "connected",
+          workspaceStatus: "ready",
+          projectName: "demo",
+          workflowName: "Demo Workflow",
+          projection: {
+            runId: "run-1",
+            status: "IN_PROGRESS",
+            currentNodeIds: ["implement"],
+            nodeStates: { implement: "RUNNING" },
+            allowedActions: [],
+            blockingReasons: [],
+            revision: "1",
+            updatedAt: "2026-08-01T00:00:00Z",
+          },
+          timeline: [],
+          artifacts: [],
+          approvals: [],
+          gates: [],
+          agentJobs: [],
+          agentOutput: [],
+        }}
+        workflow={{
+          id: "role-defaults-workflow",
+          name: "Role defaults",
+          version: "1",
+          sourceAdapter: "harness",
+          nodes: [{ id: "implement", name: "Implement", kind: "agent", agent: { roleId: "developer" } }],
+          edges: [],
+          roles: [{ id: "developer", name: "Developer", provider: "claude", allowedTools: ["read", "edit", "test"] }],
+          gates: [],
+          policies: {},
+          metadata: {},
+        }}
+        onStartAgent={onStartAgent}
+        agentWorkspaces={[
+          { path: "G:\\Project\\demo", label: "main（主工作区）" },
+          { path: "G:\\Project\\demo\\.workflow-platform\\worktrees\\dev", label: "dev（Worktree）" },
+        ]}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Agent 提示词"), { target: { value: "Implement the endpoint" } });
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
+
+    expect(onStartAgent).toHaveBeenCalledWith(
+      "implement",
+      "claude",
+      "Implement the endpoint",
+      "interactive",
+      ["read", "edit", "test"],
+      "G:\\Project\\demo\\.workflow-platform\\worktrees\\dev",
+    );
   });
 });

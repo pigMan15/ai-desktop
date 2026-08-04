@@ -5,6 +5,7 @@ import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
 import { GatesPage } from "../features/gates/GatesPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
 import { ProjectDashboard } from "../features/projects/ProjectDashboard";
+import { WorkflowBindingStep } from "../features/projects/WorkflowBindingStep";
 import {
   GitWorkspacePanel,
   type GitWorkspaceStatus,
@@ -59,6 +60,7 @@ import {
   type WorkflowDefinitionSummary,
   type WorkflowExportFormat,
   type WorkflowLibraryItem,
+  type ProjectWorkflowBinding,
   type WorkflowSimulation,
   type WorkflowVersionDiff,
   type WorkflowVersionSummary,
@@ -73,6 +75,8 @@ export function App() {
   const [projectPath, setProjectPath] = useState(savedSession.projectPath);
   const [projectId, setProjectId] = useState(savedSession.projectId ?? "");
   const [projectArchived, setProjectArchived] = useState(false);
+  const [projectWorkflowBinding, setProjectWorkflowBinding] = useState<ProjectWorkflowBinding | null | undefined>(undefined);
+  const [pendingWorkflowBindingId, setPendingWorkflowBindingId] = useState<string | null>(null);
   const [workflowVersionId, setWorkflowVersionId] = useState(savedSession.workflowVersionId);
   const [operationMessage, setOperationMessage] = useState("等待操作");
   const [managedRuntime, setManagedRuntime] = useState<ManagedRuntimeStatus | null>(null);
@@ -306,6 +310,28 @@ export function App() {
     }
     void refreshWorkflowLibrary();
   }, [apiBaseUrl, currentRoute, state?.connection, workflowRoute.mode]);
+
+  useEffect(() => {
+    if (state?.connection !== "connected" || currentRoute !== "projects" || !projectId) {
+      return;
+    }
+    void refreshWorkflowLibrary();
+    let isMounted = true;
+    createRuntimeClient(apiBaseUrl)
+      .getProjectWorkflowBinding(projectId)
+      .then((binding) => {
+        if (isMounted) {
+          setProjectWorkflowBinding(binding);
+          if (binding) setWorkflowVersionId(binding.workflowVersionId);
+        }
+      })
+      .catch(() => {
+        if (isMounted) setProjectWorkflowBinding(null);
+      });
+    const requestedWorkflowId = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("bindWorkflow");
+    if (requestedWorkflowId) setPendingWorkflowBindingId(requestedWorkflowId);
+    return () => { isMounted = false; };
+  }, [apiBaseUrl, currentRoute, projectId, state?.connection]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "edit") {
@@ -810,6 +836,8 @@ export function App() {
       setProjectId(imported.projectId);
       setProjectArchived(false);
       setWorkflowVersionId(imported.workflowVersionId ?? "");
+      const binding = await client.getProjectWorkflowBinding(imported.projectId);
+      setProjectWorkflowBinding(binding);
       setRuns([]);
       const projectName = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? imported.projectId;
       const workflowName = imported.workflowName ?? imported.workflowId ?? imported.workflowVersionId ?? "未绑定工作流";
@@ -829,14 +857,36 @@ export function App() {
         workflowName,
         runId: null,
       });
-      setOperationMessage(
-        imported.createdDefaultWorkflow
-          ? `已为项目创建起步工作流：${workflowName}，可在工作流模块继续编辑。`
-          : `导入完成：${workflowName}`,
-      );
+      setOperationMessage(binding ? `导入完成：已绑定${workflowName}` : "导入完成：请为项目选择工作流。");
       void refreshGitWorkspace();
     } catch (error) {
       setOperationMessage(`导入失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleBindProjectWorkflow(workflowId: string, selectedWorkflowVersionId: string) {
+    if (!projectId) return;
+    try {
+      const binding = await client.bindProjectWorkflow(projectId, workflowId, selectedWorkflowVersionId, now());
+      setProjectWorkflowBinding(binding);
+      setWorkflowVersionId(binding.workflowVersionId);
+      setPendingWorkflowBindingId(null);
+      const workflow = workflowLibrary.find((item) => item.workflowId === binding.workflowId);
+      setState((current) => current ? { ...current, workflowName: workflow?.name ?? current.workflowName } : current);
+      setOperationMessage(`已绑定工作流：${workflow?.name ?? binding.workflowId}`);
+      await refreshRuns();
+    } catch (error) {
+      setOperationMessage(`绑定工作流失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function handleCopyTemplateAndBind(workflow: WorkflowLibraryItem) {
+    try {
+      const copied = await client.copyWorkflowTemplate(workflow.workflowId, `${workflow.name}副本`, now());
+      await handleBindProjectWorkflow(copied.workflowId, copied.workflowVersionId);
+      await refreshWorkflowLibrary();
+    } catch (error) {
+      setOperationMessage(`基于模板新建并绑定失败：${errorMessage(error)}`);
     }
   }
 
@@ -1012,13 +1062,14 @@ export function App() {
 
   async function handleCreateRun(title: string, configuration: RunConfiguration) {
     try {
-      if (!projectId || !workflowVersionId) {
+      const boundWorkflowVersionId = projectWorkflowBinding?.workflowVersionId ?? workflowVersionId;
+      if (!projectId || projectWorkflowBinding === null || !boundWorkflowVersionId) {
         throw new Error("请先为项目绑定工作流");
       }
       runSwitchInProgressRef.current = true;
       clearDisplayedAgentTerminal();
       const projection = await client.createRun(
-        workflowVersionId,
+        boundWorkflowVersionId,
         title,
         now(),
         configuration,
@@ -1031,7 +1082,7 @@ export function App() {
         apiBaseUrl,
         projectPath,
         projectId,
-        workflowVersionId,
+        workflowVersionId: boundWorkflowVersionId,
         projectName: state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "未命名项目",
         workflowName: state?.workflowName ?? workflowVersionId,
         runId: projection.runId,
@@ -1672,8 +1723,14 @@ export function App() {
         const created = await client.createWorkflow(definition, false, now());
         setWorkflowVersionId(created.workflowVersionId);
         setOperationMessage(`工作流已创建：${definition.name}`);
-        window.location.hash = "#/workflow";
         await refreshWorkflowLibrary();
+        const returnProject = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("returnProject");
+        if (returnProject && returnProject === projectId) {
+          setPendingWorkflowBindingId(created.workflowId);
+          window.location.hash = `#/projects?bindWorkflow=${encodeURIComponent(created.workflowId)}`;
+          return;
+        }
+        window.location.hash = "#/workflow";
         return;
       }
       if (!editorWorkflowVersionId) throw new Error("工作流版本不存在");
@@ -1813,6 +1870,20 @@ export function App() {
               archived={projectArchived}
               onReimport={projectArchived ? handleImportProject : undefined}
               operationMessage={operationMessage}
+              workflowBindingStep={
+                state?.workspaceStatus === "ready" && projectId && projectWorkflowBinding !== undefined ? (
+                  <WorkflowBindingStep
+                    projectId={projectId}
+                    workflows={workflowLibrary}
+                    binding={projectWorkflowBinding}
+                    selectedWorkflowId={pendingWorkflowBindingId}
+                    loading={workflowLibraryLoading}
+                    onBind={(workflowId, selectedWorkflowVersionId) => void handleBindProjectWorkflow(workflowId, selectedWorkflowVersionId)}
+                    onCopyTemplate={(workflow) => void handleCopyTemplateAndBind(workflow)}
+                    onCreateBusinessWorkflow={() => { window.location.hash = `#/workflow/new?returnProject=${encodeURIComponent(projectId)}`; }}
+                  />
+                ) : null
+              }
               gitPanel={
                 desktopGitApi() ? (
                   <GitWorkspacePanel
@@ -1830,7 +1901,7 @@ export function App() {
             />
           ) : null}
           {currentRoute === "runs" ? (
-          <RunDashboard
+            <RunDashboard
             state={state}
             workflow={workflowDefinition}
               runs={runs}
@@ -1969,6 +2040,7 @@ export function App() {
             onCancelDeployment={handleCancelDeployment}
             operationMessage={operationMessage}
             providerDiagnostics={providerDiagnostics}
+            workflowBinding={projectWorkflowBinding}
             />
           ) : null}
           {currentRoute === "workflow" && workflowRoute.mode === "library" ? (
