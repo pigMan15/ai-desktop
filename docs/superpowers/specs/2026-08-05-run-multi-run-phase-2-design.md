@@ -59,6 +59,24 @@ type RunRoute =
 The Renderer client imports the Phase 0 contract types and exposes:
 
 ```ts
+type ScopedCreateRunResponse = {
+  run: {
+    id: string;
+    projectId: string;
+    workflowVersionId: string;
+    workflowSnapshot: WorkflowDefinition;
+    title: string;
+    context: { taskGoal?: string; parameters?: Record<string, unknown> };
+    executionWorkspace: string;
+    workspaceMode: WorkspaceMode;
+    status: RunStatus;
+    createdAt: string;
+    updatedAt: string;
+  };
+  projection: RunProjection;
+  workspace: WorkspaceLease;
+};
+
 listProjectRuns(projectId: string, query: RunListQuery, signal?: AbortSignal): Promise<RunListResponse>
 
 createProjectRun(
@@ -66,7 +84,7 @@ createProjectRun(
   idempotencyKey: string,
   request: CreateRunRequest,
   signal?: AbortSignal,
-): Promise<CreateRunResponse>
+): Promise<ScopedCreateRunResponse>
 ```
 
 The list method builds repeated `status` parameters and treats `cursor` as opaque. The creation method targets `/projects/{projectId}/runs`, sends `Idempotency-Key`, and returns the scoped `{ run, projection, workspace }` response.
