@@ -12,4 +12,8 @@ describe("normalizeRoute", () => {
       expect(normalizeRoute(route.hash)).toBe(route.id);
     }
   });
+
+  it.fails("recognizes a direct Run detail URL within the runs section", () => {
+    expect(normalizeRoute("#/runs/run-1")).toBe("runs");
+  });
 });
