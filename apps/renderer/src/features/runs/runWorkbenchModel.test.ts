@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import type { RunProjection } from "@workflow-platform/contracts";
 import type { WorkflowDefinitionSummary } from "../../app/runtimeClient";
-import { buildRunProgressGraph, resolveNodeGuidance } from "./runWorkbenchModel";
+import {
+  buildRunProgressGraph,
+  resolveNodeGuidance,
+  resolveRunSuccessors,
+} from "./runWorkbenchModel";
 
 function workflow(overrides: Partial<WorkflowDefinitionSummary> = {}): WorkflowDefinitionSummary {
   return {
@@ -48,6 +52,49 @@ function projection(overrides: Partial<RunProjection> = {}): RunProjection {
 }
 
 describe("runWorkbenchModel", () => {
+  it("presents one successor with its workflow edge condition", () => {
+    const result = resolveRunSuccessors(
+      workflow({
+        edges: [
+          {
+            id: "implement-review",
+            from: "implement",
+            to: "review",
+            condition: "tests pass",
+          } as WorkflowDefinitionSummary["edges"][number],
+        ],
+      }),
+      "implement",
+    );
+
+    expect(result).toEqual({
+      kind: "single",
+      items: [{ node: expect.objectContaining({ id: "review", name: "Review" }), condition: "tests pass" }],
+    });
+  });
+
+  it("preserves workflow edge order and conditions for multiple successors", () => {
+    const result = resolveRunSuccessors(
+      workflow({
+        edges: [
+          { id: "implement-verify", from: "implement", to: "verify", condition: "fast path" } as WorkflowDefinitionSummary["edges"][number],
+          { id: "implement-review", from: "implement", to: "review", condition: "review required" } as WorkflowDefinitionSummary["edges"][number],
+        ],
+      }),
+      "implement",
+    );
+
+    expect(result.kind).toBe("multiple");
+    expect(result.items.map(({ node, condition }) => ({ id: node.id, condition }))).toEqual([
+      { id: "verify", condition: "fast path" },
+      { id: "review", condition: "review required" },
+    ]);
+  });
+
+  it("presents no successor when the selected node has no outgoing edge", () => {
+    expect(resolveRunSuccessors(workflow(), "verify")).toEqual({ kind: "none", items: [] });
+  });
+
   it("builds successors from workflow edges and marks current nodes and edges", () => {
     const graph = buildRunProgressGraph(workflow(), projection({
       nodeStates: { implement: "RUNNING", review: "READY", verify: "PENDING" },
@@ -144,6 +191,7 @@ describe("runWorkbenchModel", () => {
       requiredInput: "none",
     });
     expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]?.allowedAction.id).toBe("approve-review");
     expect(result.actions.some((action) => action.eventType === "NODE_STARTED")).toBe(false);
   });
 

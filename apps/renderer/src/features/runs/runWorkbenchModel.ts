@@ -3,6 +3,9 @@ import type { RunProjection } from "@workflow-platform/contracts";
 import type { WorkflowDefinitionSummary } from "../../app/runtimeClient";
 
 type WorkflowNode = WorkflowDefinitionSummary["nodes"][number];
+type WorkflowEdgeWithCondition = WorkflowDefinitionSummary["edges"][number] & {
+  condition?: string;
+};
 type AllowedAction = RunProjection["allowedActions"][number];
 type RunEventType = AllowedAction["eventType"];
 
@@ -33,6 +36,14 @@ export type RunProgressEdge = {
 export type RunProgressGraph = {
   nodes: RunProgressNode[];
   edges: RunProgressEdge[];
+};
+
+export type RunSuccessorPresentation = {
+  kind: "none" | "single" | "multiple";
+  items: Array<{
+    node: WorkflowNode;
+    condition: string | null;
+  }>;
 };
 
 export type RequiredInputKind = "none" | "artifact" | "gate-evidence" | "waiver-reason";
@@ -125,6 +136,28 @@ export function buildRunProgressGraph(
   };
 }
 
+export function resolveRunSuccessors(
+  workflow: WorkflowDefinitionSummary,
+  nodeId: string,
+): RunSuccessorPresentation {
+  const nodesById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  const items = workflow.edges
+    .filter((edge) => edge.from === nodeId)
+    .map((edge) => {
+      const conditionedEdge = edge as WorkflowEdgeWithCondition;
+      const node = nodesById.get(edge.to);
+      return node
+        ? { node, condition: conditionedEdge.condition?.trim() || null }
+        : null;
+    })
+    .filter((item): item is RunSuccessorPresentation["items"][number] => item !== null);
+
+  return {
+    kind: items.length === 0 ? "none" : items.length === 1 ? "single" : "multiple",
+    items,
+  };
+}
+
 export function resolveNodeGuidance({
   workflow,
   projection,
@@ -164,6 +197,12 @@ export function resolveNodeGuidance({
     blockingReason,
     waitingMessage: primaryAction ? null : blockingReason?.message ?? null,
   };
+}
+
+export function resolveAllowedActionGuidance(
+  projection: RunProjection,
+): RunGuidanceAction[] {
+  return projection.allowedActions.map(toGuidanceAction);
 }
 
 function action(
