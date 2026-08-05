@@ -13,6 +13,125 @@ afterEach(() => {
 });
 
 describe("runtimeClient", () => {
+  it("loads a scoped run overview and executes an action with exact browser requests", async () => {
+    const overview = scopedRunOverview();
+    const actionResponse = {
+      projection: projection("run/one", "2", "IN_PROGRESS"),
+      emittedEvents: [{
+        id: "event-2",
+        runId: "run/one",
+        type: "NODE_STARTED",
+        nodeId: "plan",
+        actor: { id: "human-1", type: "human", source: "renderer", trusted: true },
+        payload: {},
+        createdAt: "2026-08-06T00:01:00Z",
+        revision: "2",
+      }],
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(overview))
+      .mockResolvedValueOnce(jsonResponse(actionResponse));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+    const client = createRuntimeClient("http://127.0.0.1:8765");
+    const actionBody = {
+      actionId: "complete:plan",
+      expectedRevision: "7",
+      actor: { id: "human-1", type: "human" as const, source: "renderer" as const, trusted: true },
+      payload: { artifactPath: "docs/plan.md" },
+    };
+
+    await expect(client.getProjectRunOverview("project/a", "run/one", signal))
+      .resolves.toEqual(overview);
+    await expect(client.executeProjectRunAction("project/a", "run/one", actionBody, signal))
+      .resolves.toEqual(actionResponse);
+
+    const [overviewUrl, overviewInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(overviewUrl).toBe(
+      "http://127.0.0.1:8765/projects/project%2Fa/runs/run%2Fone/overview",
+    );
+    expect(overviewInit).toMatchObject({ method: "GET", signal });
+    const [actionUrl, actionInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(actionUrl).toBe(
+      "http://127.0.0.1:8765/projects/project%2Fa/runs/run%2Fone/actions",
+    );
+    expect(actionInit).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal,
+    });
+    expect(actionInit.headers).not.toHaveProperty("Idempotency-Key");
+    expect(JSON.parse(String(actionInit.body))).toEqual(actionBody);
+  });
+
+  it("sends scoped run detail requests through the Desktop bridge", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(scopedRunOverview())
+      .mockResolvedValueOnce({ projection: projection("run/one", "2", "IN_PROGRESS"), emittedEvents: [] });
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: { request },
+    });
+    const client = createRuntimeClient("http://unused");
+    const body = {
+      actionId: "complete:plan",
+      expectedRevision: "7",
+      actor: { id: "human-1", type: "human" as const, source: "renderer" as const, trusted: true },
+      payload: { artifactPath: "docs/plan.md" },
+    };
+
+    await client.getProjectRunOverview("project/a", "run/one", new AbortController().signal);
+    await client.executeProjectRunAction(
+      "project/a",
+      "run/one",
+      body,
+      new AbortController().signal,
+    );
+
+    expect(request).toHaveBeenNthCalledWith(1, {
+      path: "/projects/project%2Fa/runs/run%2Fone/overview",
+      method: "GET",
+    });
+    expect(request).toHaveBeenNthCalledWith(2, {
+      path: "/projects/project%2Fa/runs/run%2Fone/actions",
+      method: "POST",
+      body,
+    });
+  });
+
+  it.each([
+    [404, "RUN_NOT_FOUND_IN_PROJECT"],
+    [409, "REVISION_CONFLICT"],
+    [409, "RUN_ARCHIVED"],
+    [503, "RUN_REARCHITECTURE_MAINTENANCE"],
+  ])("preserves scoped run detail error %s %s", async (status, code) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      code,
+      message: `Runtime error: ${code}`,
+      details: { runId: "run-1" },
+      correlationId: `corr-${code}`,
+    }), { status })));
+
+    const client = createRuntimeClient("http://127.0.0.1:8765");
+    const request = code === "REVISION_CONFLICT" || code === "RUN_ARCHIVED"
+      ? client.executeProjectRunAction("project-1", "run-1", {
+          actionId: "complete:plan",
+          expectedRevision: "7",
+          actor: { id: "human-1", type: "human", source: "renderer", trusted: true },
+        })
+      : client.getProjectRunOverview("project-1", "run-1");
+    const error = await request.catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RuntimeClientError);
+    expect(error).toMatchObject({
+      status,
+      code,
+      message: `Runtime error: ${code}`,
+      details: { runId: "run-1" },
+      correlationId: `corr-${code}`,
+    });
+  });
+
   it("serializes project run list filters with repeated statuses and an opaque cursor", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ items: [], nextCursor: null }));
     vi.stubGlobal("fetch", fetchMock);
@@ -958,6 +1077,19 @@ function scopedCreateRunResponse() {
       lastVerifiedAt: "2026-08-06T00:00:00Z",
       releasedAt: null,
       releaseReason: null,
+    },
+  };
+}
+
+function scopedRunOverview() {
+  const created = scopedCreateRunResponse();
+  return {
+    ...created,
+    workflow: created.run.workflowSnapshot,
+    activity: {
+      activeAgentCount: 1,
+      activeDeploymentCount: 0,
+      lastEventAt: "2026-08-06T00:00:00Z",
     },
   };
 }

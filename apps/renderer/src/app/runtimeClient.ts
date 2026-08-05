@@ -1,7 +1,10 @@
 import type {
   CreateRunRequest,
+  ExecuteRunActionRequest,
+  ExecuteRunActionResponse,
   RunListQuery,
   RunListResponse,
+  RunOverview,
   RunProjection,
   RunStatus,
   WorkspaceLease,
@@ -664,6 +667,27 @@ export function createRuntimeClient(apiBaseUrl: string) {
           headers: { "Idempotency-Key": idempotencyKey },
           signal,
         },
+      ),
+    getProjectRunOverview: (
+      projectId: string,
+      runId: string,
+      signal?: AbortSignal,
+    ) =>
+      request<RunOverview>(
+        apiBaseUrl,
+        `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/overview`,
+        { method: "GET", signal },
+      ),
+    executeProjectRunAction: (
+      projectId: string,
+      runId: string,
+      body: ExecuteRunActionRequest,
+      signal?: AbortSignal,
+    ) =>
+      request<ExecuteRunActionResponse>(
+        apiBaseUrl,
+        `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/actions`,
+        { method: "POST", body, signal },
       ),
     listAgentProviders: () =>
       request<AgentProviderDiagnostic[]>(apiBaseUrl, "/agents/providers"),
