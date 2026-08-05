@@ -4,7 +4,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ManagedRuntime,
   runtimeHealth,
+  validateRuntimeRequestPath,
   type RuntimeLogEntry,
+  type RuntimeRequestOptions,
   type RuntimeStatus
 } from "./runtime.js";
 import { TerminalManager, type TerminalCommandDecisionRecord } from "./terminal.js";
@@ -95,11 +97,8 @@ export function registerRuntimeHandlers(
   ipcMainLike.handle("runtime:status", () => runtimeManager.status());
   ipcMainLike.handle("runtime:restart", () => runtimeManager.restart());
   ipcMainLike.handle("runtime:logs", () => runtimeManager.logs());
-  ipcMainLike.handle("runtime:request", (_event, path: unknown, body: unknown) =>
-    runtimeManager.request({
-      path: requireString(path, "Runtime request path"),
-      body,
-    }),
+  ipcMainLike.handle("runtime:request", (_event, options: unknown) =>
+    runtimeManager.request(parseRuntimeRequestOptions(options)),
   );
   registeredRuntimeHandlers.add(ipcMainLike);
 }
@@ -430,6 +429,49 @@ function requireString(value: unknown, label: string): string {
     throw new Error(`${label} is required`);
   }
   return value;
+}
+
+function parseRuntimeRequestOptions(value: unknown): RuntimeRequestOptions {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Runtime request options must be an object");
+  }
+  const options = value as Record<string, unknown>;
+  const method = options.method;
+  if (method !== undefined && method !== "GET" && method !== "POST") {
+    throw new Error("Runtime request method must be GET or POST");
+  }
+  const headers = parseRuntimeRequestHeaders(options.headers);
+  return {
+    path: validateRuntimeRequestPath(requireString(options.path, "Runtime request path")),
+    ...(method === undefined ? {} : { method }),
+    ...(options.body === undefined ? {} : { body: options.body }),
+    ...(headers === undefined ? {} : { headers }),
+  };
+}
+
+function parseRuntimeRequestHeaders(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
+    throw new Error("Runtime request headers must be an object");
+  }
+  const headers: Record<string, string> = {};
+  for (const [name, headerValue] of Object.entries(value)) {
+    if (typeof headerValue !== "string") {
+      throw new Error("Runtime request header values must be strings");
+    }
+    if (name.toLowerCase() !== "idempotency-key") {
+      throw new Error(`Runtime request header is not allowed: ${name}`);
+    }
+    headers["Idempotency-Key"] = headerValue;
+  }
+  return headers;
 }
 
 function requirePositiveInteger(value: unknown, label: string): number {

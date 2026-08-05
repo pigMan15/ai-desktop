@@ -53,7 +53,9 @@ type ManagedRuntimeOptions = {
 
 export type RuntimeRequestOptions = {
   path: string;
+  method?: "GET" | "POST";
   body?: unknown;
+  headers?: Record<string, string>;
 };
 
 export function runtimeHealth(): RuntimeHealth {
@@ -168,6 +170,12 @@ export class ManagedRuntime {
   async request<T>(options: RuntimeRequestOptions): Promise<T> {
     const requestPath = validateRuntimeRequestPath(options.path);
     const headers: Record<string, string> = {};
+    const idempotencyKey = Object.entries(options.headers ?? {}).find(
+      ([name]) => name.toLowerCase() === "idempotency-key",
+    )?.[1];
+    if (idempotencyKey !== undefined) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
     if (options.body !== undefined) {
       headers["content-type"] = "application/json";
     }
@@ -175,7 +183,7 @@ export class ManagedRuntime {
       headers["X-Workflow-Platform-Token"] = this.runtimeToken;
     }
     const response = await fetch(`${this.url()}${requestPath}`, {
-      method: options.body === undefined ? "GET" : "POST",
+      method: options.method ?? (options.body === undefined ? "GET" : "POST"),
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
@@ -274,7 +282,7 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function validateRuntimeRequestPath(path: string): string {
+export function validateRuntimeRequestPath(path: string): string {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
     throw new Error("Runtime request path must be a relative API path");
   }

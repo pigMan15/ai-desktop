@@ -10,13 +10,13 @@ import {
   resolveRendererUrl,
   validateRendererUrl
 } from "../src/main/main.js";
-import { ManagedRuntime } from "../src/main/runtime.js";
+import { ManagedRuntime, type RuntimeRequestOptions } from "../src/main/runtime.js";
 import { TerminalManager, type TerminalSpawnOptions } from "../src/main/terminal.js";
 
 const registeredChannels: string[] = [];
-const handlers = new Map<string, () => unknown>();
+const handlers = new Map<string, (...args: unknown[]) => unknown>();
 const fakeIpcMain = {
-  handle(channel: string, handler: () => unknown) {
+  handle(channel: string, handler: (...args: unknown[]) => unknown) {
     registeredChannels.push(channel);
     handlers.set(channel, handler);
   }
@@ -60,6 +60,58 @@ assert.deepEqual(await handlers.get("runtime:health")?.(), {
   status: "ok",
   service: "workflow-runtime"
 });
+
+class RecordingRuntime extends ManagedRuntime {
+  readonly requests: RuntimeRequestOptions[] = [];
+
+  override async request<T>(options: RuntimeRequestOptions): Promise<T> {
+    this.requests.push(options);
+    return { accepted: true } as T;
+  }
+}
+
+const recordingRuntime = new RecordingRuntime({ externalUrl: "http://127.0.0.1:9999" });
+const requestHandlers = new Map<string, (...args: unknown[]) => unknown>();
+registerRuntimeHandlers(
+  {
+    handle(channel: string, handler: (...args: unknown[]) => unknown) {
+      requestHandlers.set(channel, handler);
+    },
+  },
+  recordingRuntime,
+);
+const runtimeRequestHandler = requestHandlers.get("runtime:request");
+const validRuntimeRequest = {
+  path: "/runs",
+  method: "POST" as const,
+  body: { workflowVersionId: "version-1" },
+  headers: { "idempotency-key": "create-run-1" },
+};
+assert.deepEqual(await runtimeRequestHandler?.(undefined, validRuntimeRequest), { accepted: true });
+assert.deepEqual(recordingRuntime.requests, [{
+  ...validRuntimeRequest,
+  headers: { "Idempotency-Key": "create-run-1" },
+}]);
+
+const invalidRuntimeRequests: Array<{ value: unknown; error: RegExp }> = [
+  { value: null, error: /options must be an object/i },
+  { value: [], error: /options must be an object/i },
+  { value: { path: "https://example.com/runs" }, error: /relative API path/i },
+  { value: { path: "/runs", method: "PUT" }, error: /method must be GET or POST/i },
+  { value: { path: "/runs", headers: [] }, error: /headers must be an object/i },
+  { value: { path: "/runs", headers: new Date() }, error: /headers must be an object/i },
+  { value: { path: "/runs", headers: { "Idempotency-Key": 123 } }, error: /header values must be strings/i },
+  { value: { path: "/runs", headers: { "x-workflow-platform-token": "spoofed" } }, error: /header is not allowed/i },
+  { value: { path: "/runs", headers: { Authorization: "Bearer spoofed" } }, error: /header is not allowed/i },
+  { value: { path: "/runs", headers: { "Content-Type": "text/plain" } }, error: /header is not allowed/i },
+];
+for (const invalidRequest of invalidRuntimeRequests) {
+  assert.throws(
+    () => runtimeRequestHandler?.(undefined, invalidRequest.value),
+    invalidRequest.error,
+  );
+}
+assert.equal(recordingRuntime.requests.length, 1);
 
 const createdWindows: Electron.BrowserWindowConstructorOptions[] = [];
 class FakeBrowserWindow {
@@ -245,6 +297,39 @@ assert.deepEqual(proxiedFetchCalls[0], {
   input: "http://127.0.0.1:8899/agents/providers",
   init: {
     method: "GET",
+    headers: { "X-Workflow-Platform-Token": "proxy-local-token" },
+    body: undefined,
+  },
+});
+assert.deepEqual(
+  await proxiedRuntime.request({
+    path: "/runs",
+    method: "POST",
+    body: { workflowVersionId: "version-1" },
+    headers: { "idempotency-key": "create-run-1" },
+  }),
+  { accepted: true },
+);
+assert.deepEqual(proxiedFetchCalls[1], {
+  input: "http://127.0.0.1:8899/runs",
+  init: {
+    method: "POST",
+    headers: {
+      "Idempotency-Key": "create-run-1",
+      "content-type": "application/json",
+      "X-Workflow-Platform-Token": "proxy-local-token",
+    },
+    body: JSON.stringify({ workflowVersionId: "version-1" }),
+  },
+});
+assert.deepEqual(
+  await proxiedRuntime.request({ path: "/runs/create", method: "POST" }),
+  { accepted: true },
+);
+assert.deepEqual(proxiedFetchCalls[2], {
+  input: "http://127.0.0.1:8899/runs/create",
+  init: {
+    method: "POST",
     headers: { "X-Workflow-Platform-Token": "proxy-local-token" },
     body: undefined,
   },

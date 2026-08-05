@@ -1,5 +1,10 @@
 import electron from "electron";
-import type { RuntimeHealth, RuntimeLogEntry, RuntimeStatus } from "../main/runtime.js";
+import type {
+  RuntimeHealth,
+  RuntimeLogEntry,
+  RuntimeRequestOptions,
+  RuntimeStatus,
+} from "../main/runtime.js";
 import type { TerminalCommandDecision, TerminalOutput, TerminalSession } from "../main/terminal.js";
 import type {
   GitWorkspaceStatus,
@@ -19,8 +24,8 @@ contextBridge.exposeInMainWorld("workflowRuntime", {
     ipcRenderer.invoke("runtime:restart") as Promise<RuntimeStatus>,
   logs: (): Promise<RuntimeLogEntry[]> =>
     ipcRenderer.invoke("runtime:logs") as Promise<RuntimeLogEntry[]>,
-  request: (path: string, body?: unknown): Promise<unknown> =>
-    ipcRenderer.invoke("runtime:request", path, body) as Promise<unknown>,
+  request: (options: RuntimeRequestOptions): Promise<unknown> =>
+    ipcRenderer.invoke("runtime:request", options) as Promise<unknown>,
 });
 
 contextBridge.exposeInMainWorld("workflowTerminal", {

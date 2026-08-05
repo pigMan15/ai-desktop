@@ -1,4 +1,9 @@
-import type { RuntimeHealth, RuntimeLogEntry, RuntimeStatus } from "../main/runtime.js";
+import type {
+  RuntimeHealth,
+  RuntimeLogEntry,
+  RuntimeRequestOptions,
+  RuntimeStatus,
+} from "../main/runtime.js";
 import type { TerminalCommandDecision, TerminalOutput, TerminalSession } from "../main/terminal.js";
 import type {
   GitWorkspaceStatus,
@@ -14,7 +19,7 @@ declare global {
       status(): Promise<RuntimeStatus>;
       restart(): Promise<RuntimeStatus>;
       logs(): Promise<RuntimeLogEntry[]>;
-      request(path: string, body?: unknown): Promise<unknown>;
+      request(options: RuntimeRequestOptions): Promise<unknown>;
     };
     workflowTerminal: {
       create(request: {
