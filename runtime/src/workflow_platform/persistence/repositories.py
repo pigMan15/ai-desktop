@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import sqlite3
 from pathlib import Path
@@ -413,46 +415,197 @@ class RunRepository:
         status: str,
         context: dict,
         now: str,
+        workflow_snapshot: WorkflowDefinition | dict | None = None,
+        execution_workspace: str | Path | None = None,
+        workspace_mode: str = "write",
     ) -> None:
+        if workflow_snapshot is None:
+            version = self._db.execute(
+                "SELECT definition_json FROM workflow_versions WHERE id = ?",
+                (workflow_version_id,),
+            ).fetchone()
+            if version is None:
+                raise KeyError(f"Workflow version not found: {workflow_version_id}")
+            snapshot_payload = json.loads(version["definition_json"])
+        elif isinstance(workflow_snapshot, WorkflowDefinition):
+            snapshot_payload = workflow_snapshot.model_dump(by_alias=True)
+        else:
+            snapshot_payload = workflow_snapshot
+        if execution_workspace is None:
+            run_context = _run_context(context)
+            execution_workspace = run_context.get("executionWorkspace")
+            if not execution_workspace:
+                project = self._db.execute(
+                    "SELECT root_path FROM projects WHERE id = ?",
+                    (project_id,),
+                ).fetchone()
+                if project is None:
+                    raise KeyError(f"Project not found: {project_id}")
+                execution_workspace = project["root_path"]
         self._db.execute(
             """
             INSERT INTO runs (
                 id,
                 project_id,
                 workflow_version_id,
+                workflow_snapshot_json,
                 title,
-                status,
                 context_json,
+                execution_workspace,
+                workspace_mode,
+                status,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 id,
                 project_id,
                 workflow_version_id,
+                json.dumps(snapshot_payload, separators=(",", ":"), sort_keys=True),
                 title,
-                status,
                 json.dumps(context, separators=(",", ":"), sort_keys=True),
+                str(execution_workspace),
+                workspace_mode,
+                status,
                 now,
                 now,
             ),
         )
 
-    def workflow_for_run(self, run_id: str) -> WorkflowDefinition:
+    def get(self, project_id: str, run_id: str) -> dict | None:
         row = self._db.execute(
             """
-            SELECT workflow_versions.definition_json
+            SELECT *
             FROM runs
-            JOIN workflow_versions ON workflow_versions.id = runs.workflow_version_id
-            WHERE runs.id = ?
+            WHERE project_id = ? AND id = ?
             """,
-            (run_id,),
+            (project_id, run_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "projectId": row["project_id"],
+            "workflowVersionId": row["workflow_version_id"],
+            "workflowSnapshot": json.loads(row["workflow_snapshot_json"]),
+            "title": row["title"],
+            "context": _run_context(json.loads(row["context_json"])),
+            "executionWorkspace": row["execution_workspace"],
+            "workspaceMode": row["workspace_mode"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def workflow_for_run(
+        self, project_id: str, run_id: str | None = None
+    ) -> WorkflowDefinition:
+        if run_id is None:
+            run_id = project_id
+            project_id = self.project_id_for_run(run_id)
+        row = self._db.execute(
+            """
+            SELECT workflow_snapshot_json
+            FROM runs
+            WHERE project_id = ? AND id = ?
+            """,
+            (project_id, run_id),
         ).fetchone()
         if row is None:
             raise KeyError(f"Run not found: {run_id}")
-        return WorkflowDefinition.model_validate(json.loads(row["definition_json"]))
+        return WorkflowDefinition.model_validate(json.loads(row["workflow_snapshot_json"]))
+
+    def list_summaries(
+        self,
+        project_id: str,
+        *,
+        statuses: list[str],
+        workflow_version_id: str | None,
+        workspace_path: str | None,
+        query: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict:
+        cursor_value = _decode_run_cursor(cursor) if cursor else None
+        conditions = ["project_id = ?"]
+        values: list[str | int] = [project_id]
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            conditions.append(f"status IN ({placeholders})")
+            values.extend(statuses)
+        if workflow_version_id:
+            conditions.append("workflow_version_id = ?")
+            values.append(workflow_version_id)
+        if workspace_path:
+            conditions.append("execution_workspace = ?")
+            values.append(workspace_path)
+        if query:
+            conditions.append("title LIKE ? COLLATE NOCASE")
+            values.append(f"%{query}%")
+        if cursor_value:
+            conditions.append(
+                "((updated_at < ?) OR (updated_at = ? AND id < ?))"
+            )
+            values.extend(
+                [
+                    cursor_value["updatedAt"],
+                    cursor_value["updatedAt"],
+                    cursor_value["id"],
+                ]
+            )
+        values.append(limit + 1)
+        rows = self._db.execute(
+            f"""
+            WITH run_summaries AS (
+                SELECT
+                    runs.id,
+                    runs.project_id,
+                    runs.workflow_version_id,
+                    runs.workflow_snapshot_json,
+                    runs.title,
+                    runs.context_json,
+                    runs.execution_workspace,
+                    COALESCE(run_projections.status, runs.status) AS status,
+                    runs.created_at,
+                    COALESCE(run_projections.updated_at, runs.updated_at) AS updated_at,
+                    run_projections.current_node_ids_json,
+                    run_projections.node_states_json,
+                    run_projections.blocking_reasons_json,
+                    run_workspace_leases.workspace_path AS lease_workspace_path,
+                    run_workspace_leases.mode AS lease_mode,
+                    run_workspace_leases.status AS lease_status,
+                    (
+                        SELECT COUNT(*) FROM agent_jobs
+                        WHERE agent_jobs.run_id = runs.id
+                          AND agent_jobs.status IN ('QUEUED', 'RUNNING')
+                    ) AS active_agent_count,
+                    (
+                        SELECT COUNT(*) FROM deployments
+                        WHERE deployments.run_id = runs.id
+                          AND deployments.status IN ('QUEUED', 'RUNNING')
+                    ) AS active_deployment_count
+                FROM runs
+                LEFT JOIN run_projections ON run_projections.run_id = runs.id
+                LEFT JOIN run_workspace_leases ON run_workspace_leases.run_id = runs.id
+            )
+            SELECT * FROM run_summaries
+            WHERE {' AND '.join(conditions)}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+        has_next_page = len(rows) > limit
+        page_rows = rows[:limit]
+        items = [_run_summary_from_row(row) for row in page_rows]
+        next_cursor = None
+        if has_next_page and page_rows:
+            next_cursor = _encode_run_cursor(
+                updated_at=page_rows[-1]["updated_at"], id=page_rows[-1]["id"]
+            )
+        return {"items": items, "nextCursor": next_cursor}
 
     def project_root_for_run(self, run_id: str) -> Path:
         row = self._db.execute(
@@ -470,13 +623,12 @@ class RunRepository:
 
     def execution_workspace_for_run(self, run_id: str) -> Path:
         row = self._db.execute(
-            "SELECT context_json FROM runs WHERE id = ?",
+            "SELECT execution_workspace FROM runs WHERE id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
             raise KeyError(f"Run not found: {run_id}")
-        context = _run_context(json.loads(row["context_json"]))
-        return Path(context.get("executionWorkspace") or self.project_root_for_run(run_id))
+        return Path(row["execution_workspace"])
 
     def project_id_for_run(self, run_id: str) -> str:
         row = self._db.execute(
@@ -548,6 +700,125 @@ def _run_context(value: object) -> dict:
     if isinstance(execution_workspace, str) and execution_workspace:
         result["executionWorkspace"] = execution_workspace
     return result
+
+
+def _encode_run_cursor(*, updated_at: str, id: str) -> str:
+    payload = json.dumps(
+        {"updatedAt": updated_at, "id": id},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_run_cursor(cursor: str) -> dict[str, str]:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = base64.b64decode(
+            cursor + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        value = json.loads(payload.decode("utf-8"))
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"updatedAt", "id"}
+            or not isinstance(value["updatedAt"], str)
+            or not isinstance(value["id"], str)
+            or not value["updatedAt"]
+            or not value["id"]
+        ):
+            raise ValueError
+        return value
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("INVALID_REQUEST: invalid cursor") from error
+
+
+def _run_summary_from_row(row: sqlite3.Row) -> dict:
+    workflow = json.loads(row["workflow_snapshot_json"])
+    nodes = workflow.get("nodes", [])
+    nodes_by_id = {node["id"]: node for node in nodes}
+    current_node_ids = json.loads(row["current_node_ids_json"] or "[]")
+    node_states = json.loads(row["node_states_json"] or "{}")
+    current_nodes = [
+        {
+            "id": node_id,
+            "name": nodes_by_id[node_id]["name"],
+            "kind": nodes_by_id[node_id]["kind"],
+            "state": node_states.get(node_id, "PENDING"),
+        }
+        for node_id in current_node_ids
+        if node_id in nodes_by_id
+    ]
+    next_nodes = []
+    seen_next_nodes: set[str] = set()
+    for edge in workflow.get("edges", []):
+        target_id = edge.get("to")
+        if (
+            edge.get("from") not in current_node_ids
+            or target_id not in nodes_by_id
+            or target_id in seen_next_nodes
+        ):
+            continue
+        seen_next_nodes.add(target_id)
+        target = nodes_by_id[target_id]
+        next_nodes.append(
+            {
+                "id": target_id,
+                "name": target["name"],
+                "kind": target["kind"],
+                "condition": edge.get("condition"),
+            }
+        )
+
+    states = [node_states.get(node["id"], "PENDING") for node in nodes]
+    passed = sum(state in {"PASSED", "SKIPPED"} for state in states)
+    running = sum(
+        state
+        in {
+            "RUNNING",
+            "AWAITING_ARTIFACT",
+            "AWAITING_APPROVAL",
+            "AWAITING_GATE",
+        }
+        for state in states
+    )
+    blocked = sum(state in {"BLOCKED", "FAILED"} for state in states)
+    context = _run_context(json.loads(row["context_json"]))
+    blockers = json.loads(row["blocking_reasons_json"] or "[]")
+    workspace = None
+    if row["lease_workspace_path"] is not None:
+        workspace = {
+            "path": row["lease_workspace_path"],
+            "label": Path(row["lease_workspace_path"]).name,
+            "leaseMode": row["lease_mode"],
+            "leaseStatus": row["lease_status"],
+        }
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "workflowVersionId": row["workflow_version_id"],
+        "workflowName": workflow.get("name", ""),
+        "workflowVersion": workflow.get("version", ""),
+        "title": row["title"],
+        "status": row["status"],
+        "taskGoal": context.get("taskGoal") or None,
+        "currentNodes": current_nodes,
+        "nextNodes": next_nodes,
+        "progress": {
+            "total": len(states),
+            "passed": passed,
+            "running": running,
+            "blocked": blocked,
+            "pending": len(states) - passed - running - blocked,
+        },
+        "blocker": blockers[0] if blockers else None,
+        "workspace": workspace,
+        "activeAgentCount": row["active_agent_count"],
+        "activeDeploymentCount": row["active_deployment_count"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
 
 
 LEASE_TRANSITIONS = {

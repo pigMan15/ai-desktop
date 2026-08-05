@@ -16,6 +16,7 @@ from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
 from workflow_platform.persistence.repositories import (
     AgentJobRepository,
+    RunRepository,
     TerminalSessionRepository,
     WorkflowVersionRepository,
 )
@@ -905,6 +906,287 @@ def test_foreign_keys_reject_orphan_workflow_version_and_run_children() -> None:
                 "sha256:workflow-1",
                 "2026-07-27T13:00:00Z",
             ),
+        )
+
+
+def insert_scoped_run_repository_fixture(db: sqlite3.Connection) -> WorkflowDefinition:
+    migrate(db)
+    workflow = WorkflowDefinition(
+        id="workflow-summary",
+        name="Release workflow",
+        version="2.0.0",
+        sourceAdapter="fixture",
+        nodes=[
+            WorkflowNode(id="build", name="Build", kind="agent"),
+            WorkflowNode(id="review", name="Review", kind="approval"),
+            WorkflowNode(id="deploy", name="Deploy", kind="deploy"),
+        ],
+        edges=[
+            WorkflowEdge(id="edge-build-review", from_="build", to="review", condition="built"),
+            WorkflowEdge(id="edge-review-deploy", from_="review", to="deploy"),
+        ],
+        roles=[],
+        gates=[],
+        policies={},
+        metadata={},
+    )
+    snapshot_json = json.dumps(workflow.model_dump(by_alias=True), separators=(",", ":"))
+    for project_id in ("project-a", "project-b"):
+        db.execute(
+            """
+            INSERT INTO projects (
+                id, name, root_path, active_protocol, created_at, updated_at
+            ) VALUES (?, ?, ?, NULL, '2026-08-05T01:00:00Z', '2026-08-05T01:00:00Z')
+            """,
+            (project_id, project_id, f"G:/Project/{project_id}"),
+        )
+        db.execute(
+            """
+            INSERT INTO workflow_assets (
+                id, name, is_builtin, created_by_json, created_at, updated_at
+            ) VALUES (?, 'Release workflow', 0, '{}',
+                      '2026-08-05T01:00:00Z', '2026-08-05T01:00:00Z')
+            """,
+            (f"workflow-{project_id}",),
+        )
+        db.execute(
+            """
+            INSERT INTO workflow_versions (
+                id, project_id, adapter_id, name, version, definition_json,
+                content_hash, workflow_asset_id, created_at
+            ) VALUES (?, ?, 'fixture', 'Release workflow', '2.0.0', ?, ?, ?,
+                      '2026-08-05T01:00:00Z')
+            """,
+            (
+                f"version-{project_id}",
+                project_id,
+                snapshot_json,
+                f"sha256:{project_id}",
+                f"workflow-{project_id}",
+            ),
+        )
+
+    runs = (
+        ("run-a1", "project-a", "Alpha release", "C:/Work/Alpha-1", "IN_PROGRESS", "2026-08-05T03:00:00Z"),
+        ("run-a2", "project-a", "Beta release", "C:/Work/Beta", "CREATED", "2026-08-05T02:00:00Z"),
+        ("run-a3", "project-a", "Alpha recovery", "C:/Work/Alpha-3", "BLOCKED", "2026-08-05T03:00:00Z"),
+        ("run-b1", "project-b", "Other project", "C:/Work/Other", "CREATED", "2026-08-05T04:00:00Z"),
+    )
+    for run_id, project_id, title, workspace, status, updated_at in runs:
+        version_id = f"version-{project_id}"
+        db.execute(
+            """
+            INSERT INTO runs (
+                id, project_id, workflow_version_id, workflow_snapshot_json,
+                title, context_json, execution_workspace, workspace_mode,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'write', ?,
+                      '2026-08-05T01:00:00Z', ?)
+            """,
+            (
+                run_id,
+                project_id,
+                version_id,
+                snapshot_json,
+                title,
+                json.dumps({"taskGoal": f"Goal for {run_id}"}),
+                workspace,
+                status,
+                updated_at,
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO run_workspace_leases (
+                id, project_id, run_id, workspace_path, mode, status,
+                acquired_at, last_verified_at
+            ) VALUES (?, ?, ?, ?, 'write', 'active',
+                      '2026-08-05T01:00:00Z', '2026-08-05T01:00:00Z')
+            """,
+            (f"lease-{run_id}", project_id, run_id, workspace),
+        )
+
+    projections = {
+        "run-a1": ("IN_PROGRESS", ["build"], {"build": "RUNNING", "review": "PENDING", "deploy": "PENDING"}, []),
+        "run-a2": ("CREATED", ["build"], {"build": "READY", "review": "PENDING", "deploy": "PENDING"}, []),
+        "run-a3": (
+            "BLOCKED",
+            ["review"],
+            {"build": "PASSED", "review": "BLOCKED", "deploy": "PENDING"},
+            [{"code": "APPROVAL_REJECTED", "message": "Review rejected", "nodeId": "review"}],
+        ),
+        "run-b1": ("CREATED", ["build"], {"build": "READY", "review": "PENDING", "deploy": "PENDING"}, []),
+    }
+    for run_id, (status, current_nodes, node_states, blockers) in projections.items():
+        updated_at = next(row[5] for row in runs if row[0] == run_id)
+        db.execute(
+            """
+            INSERT INTO run_projections (
+                run_id, status, current_node_ids_json, node_states_json,
+                allowed_actions_json, blocking_reasons_json, revision, updated_at
+            ) VALUES (?, ?, ?, ?, '[]', ?, ?, ?)
+            """,
+            (
+                run_id,
+                status,
+                json.dumps(current_nodes),
+                json.dumps(node_states),
+                json.dumps(blockers),
+                f"revision-{run_id}",
+                updated_at,
+            ),
+        )
+
+    for job_id, status in (("agent-active", "RUNNING"), ("agent-done", "COMPLETED")):
+        db.execute(
+            """
+            INSERT INTO agent_jobs (
+                id, run_id, node_id, provider, status, command_json, cwd,
+                created_at, updated_at
+            ) VALUES (?, 'run-a3', 'review', 'fake', ?, '[]', 'C:/Work/Alpha-3',
+                      '2026-08-05T02:00:00Z', '2026-08-05T02:00:00Z')
+            """,
+            (job_id, status),
+        )
+    for deployment_id, status in (("deployment-active", "RUNNING"), ("deployment-done", "COMPLETED")):
+        db.execute(
+            """
+            INSERT INTO deployments (
+                id, run_id, node_id, command_json, cwd, status, created_at, updated_at
+            ) VALUES (?, 'run-a3', 'deploy', '[]', 'C:/Work/Alpha-3', ?,
+                      '2026-08-05T02:00:00Z', '2026-08-05T02:00:00Z')
+            """,
+            (deployment_id, status),
+        )
+    db.commit()
+    return workflow
+
+
+def test_scoped_run_repository_uses_snapshot_and_hides_cross_project_run() -> None:
+    db = connect(fresh_db_path("scoped_run"))
+    workflow = insert_scoped_run_repository_fixture(db)
+    repository = RunRepository(db)
+
+    repository.save(
+        id="run-a4",
+        project_id="project-a",
+        workflow_version_id="version-project-a",
+        workflow_snapshot=workflow,
+        title="Explicit snapshot",
+        status="CREATED",
+        context={"taskGoal": "Use immutable inputs"},
+        execution_workspace="C:/Work/Explicit",
+        workspace_mode="read",
+        now="2026-08-05T05:00:00Z",
+    )
+
+    assert repository.get("project-a", "run-b1") is None
+    assert repository.get("project-a", "run-a1")["executionWorkspace"] == "C:/Work/Alpha-1"
+    assert repository.get("project-a", "run-a4")["workspaceMode"] == "read"
+    assert repository.get("project-a", "run-a4")["workflowSnapshot"]["name"] == "Release workflow"
+
+    changed_workflow = workflow.model_copy(update={"name": "Mutable name changed"})
+    db.execute(
+        "UPDATE workflow_versions SET definition_json = ? WHERE id = 'version-project-a'",
+        (json.dumps(changed_workflow.model_dump(by_alias=True)),),
+    )
+
+    assert repository.workflow_for_run("project-a", "run-a1").name == "Release workflow"
+    with pytest.raises(KeyError, match="Run not found"):
+        repository.workflow_for_run("project-a", "run-b1")
+
+
+def test_run_summary_filters_orders_pages_and_aggregates_in_one_query() -> None:
+    db = connect(fresh_db_path("run_summary"))
+    insert_scoped_run_repository_fixture(db)
+    repository = RunRepository(db)
+    statements: list[str] = []
+    db.set_trace_callback(statements.append)
+
+    first_page = repository.list_summaries(
+        "project-a",
+        statuses=[],
+        workflow_version_id=None,
+        workspace_path=None,
+        query=None,
+        cursor=None,
+        limit=2,
+    )
+
+    assert [item["id"] for item in first_page["items"]] == ["run-a3", "run-a1"]
+    assert first_page["nextCursor"] is not None
+    assert sum("WITH run_summaries" in statement for statement in statements) == 1
+
+    blocked = first_page["items"][0]
+    assert blocked["currentNodes"] == [
+        {"id": "review", "name": "Review", "kind": "approval", "state": "BLOCKED"}
+    ]
+    assert blocked["nextNodes"] == [
+        {"id": "deploy", "name": "Deploy", "kind": "deploy", "condition": None}
+    ]
+    assert blocked["progress"] == {
+        "total": 3,
+        "passed": 1,
+        "running": 0,
+        "blocked": 1,
+        "pending": 1,
+    }
+    assert blocked["blocker"] == {
+        "code": "APPROVAL_REJECTED",
+        "message": "Review rejected",
+        "nodeId": "review",
+    }
+    assert blocked["workspace"] == {
+        "path": "C:/Work/Alpha-3",
+        "label": "Alpha-3",
+        "leaseMode": "write",
+        "leaseStatus": "active",
+    }
+    assert blocked["activeAgentCount"] == 1
+    assert blocked["activeDeploymentCount"] == 1
+
+    second_page = repository.list_summaries(
+        "project-a",
+        statuses=[],
+        workflow_version_id=None,
+        workspace_path=None,
+        query=None,
+        cursor=first_page["nextCursor"],
+        limit=2,
+    )
+    assert [item["id"] for item in second_page["items"]] == ["run-a2"]
+    assert second_page["nextCursor"] is None
+
+    filtered = repository.list_summaries(
+        "project-a",
+        statuses=["BLOCKED", "CREATED"],
+        workflow_version_id="version-project-a",
+        workspace_path=None,
+        query="release",
+        cursor=None,
+        limit=10,
+    )
+    assert [item["id"] for item in filtered["items"]] == ["run-a2"]
+    workspace_filtered = repository.list_summaries(
+        "project-a",
+        statuses=[],
+        workflow_version_id=None,
+        workspace_path="C:/Work/Alpha-3",
+        query="ALPHA",
+        cursor=None,
+        limit=10,
+    )
+    assert [item["id"] for item in workspace_filtered["items"]] == ["run-a3"]
+
+    with pytest.raises(ValueError, match="^INVALID_REQUEST: invalid cursor$"):
+        repository.list_summaries(
+            "project-a",
+            statuses=[],
+            workflow_version_id=None,
+            workspace_path=None,
+            query=None,
+            cursor="not-a-cursor",
+            limit=2,
         )
 
     with pytest.raises(sqlite3.IntegrityError):
