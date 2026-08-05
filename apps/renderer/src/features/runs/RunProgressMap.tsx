@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Controls,
@@ -8,6 +8,7 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 
 import type { RunProjection } from "@workflow-platform/contracts";
@@ -51,8 +52,11 @@ type RunProgressMapNode = Node<RunProgressMapNodeData, "run-progress">;
 type RunProgressMapEdge = Edge<{ status: RunProgressEdge["status"] }>;
 
 const NODE_TYPES = { "run-progress": RunProgressMapNodeButton };
+const FIT_VIEW_OPTIONS = { padding: 0.2, minZoom: 0.2, maxZoom: 1 };
 
 export function RunProgressMap({ workflow, projection, selectedNodeId, onSelectNode }: RunProgressMapProps) {
+  const containerRef = useRef<HTMLElement | null>(null);
+  const flowRef = useRef<ReactFlowInstance<RunProgressMapNode, RunProgressMapEdge> | null>(null);
   const graph = useMemo(() => buildRunProgressGraph(workflow, projection), [projection, workflow]);
   const { nodes, edges } = useMemo(() => toFlowGraph(graph.nodes, graph.edges, workflow, projection, selectedNodeId, onSelectNode), [
     graph.edges,
@@ -63,14 +67,47 @@ export function RunProgressMap({ workflow, projection, selectedNodeId, onSelectN
     workflow,
   ]);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return undefined;
+
+    let previousSize: { width: number; height: number } | null = null;
+    let animationFrame: number | null = null;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const nextSize = { width: entry.contentRect.width, height: entry.contentRect.height };
+      if (previousSize === null) {
+        previousSize = nextSize;
+        return;
+      }
+      if (previousSize.width === nextSize.width && previousSize.height === nextSize.height) return;
+
+      previousSize = nextSize;
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(() => {
+        animationFrame = null;
+        void flowRef.current?.fitView(FIT_VIEW_OPTIONS);
+      });
+    });
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+    };
+  }, []);
+
   return (
-    <section className="run-progress-map" aria-label="运行进度图">
+    <section ref={containerRef} className="run-progress-map" aria-label="运行进度图">
       <ReactFlow<RunProgressMapNode, RunProgressMapEdge>
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
         fitView
-        fitViewOptions={{ padding: 0.2, minZoom: 0.2, maxZoom: 1 }}
+        fitViewOptions={FIT_VIEW_OPTIONS}
+        onInit={(instance) => {
+          flowRef.current = instance;
+        }}
         nodesDraggable={false}
         nodesConnectable={false}
         nodesFocusable={false}

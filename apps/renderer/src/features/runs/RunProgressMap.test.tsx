@@ -1,28 +1,36 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RunProjection } from "@workflow-platform/contracts";
 import type { WorkflowDefinitionSummary } from "../../app/runtimeClient";
 import { RunProgressMap } from "./RunProgressMap";
 
+const { fitViewMock } = vi.hoisted(() => ({ fitViewMock: vi.fn() }));
+
 vi.mock("@xyflow/react", async () => {
   const React = await import("react");
 
   return {
-    ReactFlow: ({ children, elementsSelectable, fitViewOptions, nodeTypes, nodes, panOnDrag }: { children: React.ReactNode; elementsSelectable?: boolean; fitViewOptions?: { minZoom?: number }; nodeTypes: Record<string, React.ComponentType<{ data: unknown }>>; nodes: Array<{ id: string; type?: string; data: unknown }>; panOnDrag?: boolean }) => (
-      <div
-        data-testid="react-flow"
-        data-elements-selectable={String(elementsSelectable)}
-        data-fit-view-min-zoom={String(fitViewOptions?.minZoom)}
-        data-pan-on-drag={String(panOnDrag)}
-      >
-        {nodes.map((node) => {
-          const NodeComponent = nodeTypes[node.type ?? ""];
-          return <NodeComponent key={node.id} data={node.data} />;
-        })}
-        {children}
-      </div>
-    ),
+    ReactFlow: ({ children, elementsSelectable, fitViewOptions, nodeTypes, nodes, onInit, panOnDrag }: { children: React.ReactNode; elementsSelectable?: boolean; fitViewOptions?: { minZoom?: number }; nodeTypes: Record<string, React.ComponentType<{ data: unknown }>>; nodes: Array<{ id: string; type?: string; data: unknown }>; onInit?: (instance: { fitView: typeof fitViewMock }) => void; panOnDrag?: boolean }) => {
+      React.useEffect(() => {
+        onInit?.({ fitView: fitViewMock });
+      }, [onInit]);
+
+      return (
+        <div
+          data-testid="react-flow"
+          data-elements-selectable={String(elementsSelectable)}
+          data-fit-view-min-zoom={String(fitViewOptions?.minZoom)}
+          data-pan-on-drag={String(panOnDrag)}
+        >
+          {nodes.map((node) => {
+            const NodeComponent = nodeTypes[node.type ?? ""];
+            return <NodeComponent key={node.id} data={node.data} />;
+          })}
+          {children}
+        </div>
+      );
+    },
     Background: () => null,
     Controls: () => null,
     Handle: () => null,
@@ -30,7 +38,11 @@ vi.mock("@xyflow/react", async () => {
   };
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  fitViewMock.mockClear();
+});
 
 function workflow(): WorkflowDefinitionSummary {
   return {
@@ -218,5 +230,51 @@ describe("RunProgressMap", () => {
 
     expect(screen.getByTestId("react-flow")).toHaveAttribute("data-pan-on-drag", "true");
     expect(Number(screen.getByTestId("react-flow").getAttribute("data-fit-view-min-zoom"))).toBeLessThanOrEqual(0.25);
+  });
+
+  it("refits the graph when its container size changes and disconnects on unmount", () => {
+    let resizeCallback: ResizeObserverCallback | undefined;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    let frameCallback: FrameRequestCallback | undefined;
+    class ResizeObserverMock {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+
+      observe = observe;
+      disconnect = disconnect;
+      unobserve = vi.fn();
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frameCallback = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    fitViewMock.mockClear();
+
+    const { unmount } = render(
+      <RunProgressMap
+        workflow={workflow()}
+        projection={projection()}
+        selectedNodeId="implement"
+        onSelectNode={vi.fn()}
+      />,
+    );
+
+    const entry = (width: number) => ({ contentRect: { width, height: 360 } }) as ResizeObserverEntry;
+    act(() => resizeCallback?.([entry(800)], {} as ResizeObserver));
+    expect(fitViewMock).not.toHaveBeenCalled();
+
+    act(() => resizeCallback?.([entry(360)], {} as ResizeObserver));
+    expect(fitViewMock).not.toHaveBeenCalled();
+    act(() => frameCallback?.(performance.now()));
+    expect(fitViewMock).toHaveBeenCalledTimes(1);
+    expect(fitViewMock).toHaveBeenCalledWith({ padding: 0.2, minZoom: 0.2, maxZoom: 1 });
+
+    unmount();
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(disconnect).toHaveBeenCalledTimes(1);
   });
 });
