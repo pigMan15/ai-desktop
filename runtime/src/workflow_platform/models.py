@@ -258,6 +258,100 @@ class RunProjection(CanonicalModel):
     updatedAt: str
 
 
+WorkspaceMode = Literal["write", "read"]
+WorkspaceLeaseStatus = Literal["active", "released", "expired"]
+
+
+class WorkspaceLease(CanonicalModel):
+    id: str
+    projectId: str
+    runId: str
+    workspacePath: str
+    mode: WorkspaceMode
+    status: WorkspaceLeaseStatus
+    acquiredAt: str
+    lastVerifiedAt: str
+    releasedAt: str | None
+    releaseReason: str | None
+
+
+class RunSummaryNode(CanonicalModel):
+    id: str
+    name: str
+    kind: str
+    state: NodeState
+
+
+class RunSummaryNextNode(CanonicalModel):
+    id: str
+    name: str
+    kind: str
+    condition: str | None = None
+
+
+class RunProgress(CanonicalModel):
+    total: int
+    passed: int
+    running: int
+    blocked: int
+    pending: int
+
+
+class RunWorkspaceSummary(CanonicalModel):
+    path: str
+    label: str
+    leaseMode: WorkspaceMode
+    leaseStatus: WorkspaceLeaseStatus
+
+
+class RunSummaryProjection(CanonicalModel):
+    id: str
+    projectId: str
+    workflowVersionId: str
+    workflowName: str
+    workflowVersion: str
+    title: str
+    status: RunStatus
+    taskGoal: str | None
+    currentNodes: list[RunSummaryNode]
+    nextNodes: list[RunSummaryNextNode]
+    progress: RunProgress
+    blocker: BlockingReason | None
+    workspace: RunWorkspaceSummary | None
+    activeAgentCount: int
+    activeDeploymentCount: int
+    createdAt: str
+    updatedAt: str
+
+
+class ExecutionWorkspace(CanonicalModel):
+    path: str
+    mode: WorkspaceMode
+
+
+class CreateRunRequest(CanonicalModel):
+    workflowVersionId: str
+    title: str = Field(min_length=1, max_length=120)
+    taskGoal: str | None = None
+    parameters: dict[str, Any] | None = None
+    executionWorkspace: ExecutionWorkspace
+    actor: Actor
+
+
+class ExecuteRunActionRequest(CanonicalModel):
+    actionId: str
+    expectedRevision: str
+    actor: Actor
+    payload: dict[str, Any] | None = None
+
+
+class RuntimeError(CanonicalModel):
+    code: str
+    message: str
+    details: dict[str, Any] | None = None
+    correlationId: str
+
+
 class AgentJob(CanonicalModel):
     id: str
     runId: str

@@ -8,12 +8,17 @@ from workflow_platform.models import (
     Actor,
     AllowedAction,
     ArtifactOutputSpec,
+    CreateRunRequest,
+    ExecuteRunActionRequest,
     NodeKind,
     NodeState,
     RequirementSpec,
     RunEvent,
     RunEventType,
     RunProjection,
+    RunSummaryProjection,
+    RuntimeError,
+    WorkspaceLease,
     WorkflowDefinition,
     WorkflowEdge,
     WorkflowNode,
@@ -280,4 +285,79 @@ def test_invalid_node_state_raises_validation_error() -> None:
             blockingReasons=[],
             revision="rev-1",
             updatedAt="2026-07-27T13:05:00Z",
+        )
+
+
+def test_multi_run_models_validate_scoped_contracts() -> None:
+    lease = WorkspaceLease(
+        id="lease-1",
+        projectId="project-1",
+        runId="run-1",
+        workspacePath="C:/repo/run-1",
+        mode="write",
+        status="active",
+        acquiredAt="2026-08-05T00:00:00Z",
+        lastVerifiedAt="2026-08-05T00:01:00Z",
+        releasedAt=None,
+        releaseReason=None,
+    )
+    summary = RunSummaryProjection(
+        id="run-1",
+        projectId="project-1",
+        workflowVersionId="version-1",
+        workflowName="Release",
+        workflowVersion="1.0.0",
+        title="Ship release",
+        status="IN_PROGRESS",
+        taskGoal="Publish safely",
+        currentNodes=[{"id": "build", "name": "Build", "kind": "agent", "state": "RUNNING"}],
+        nextNodes=[{"id": "review", "name": "Review", "kind": "approval"}],
+        progress={"total": 2, "passed": 0, "running": 1, "blocked": 0, "pending": 1},
+        blocker=None,
+        workspace={
+            "path": "C:/repo/run-1",
+            "label": "run-1",
+            "leaseMode": "write",
+            "leaseStatus": "active",
+        },
+        activeAgentCount=1,
+        activeDeploymentCount=0,
+        createdAt="2026-08-05T00:00:00Z",
+        updatedAt="2026-08-05T00:01:00Z",
+    )
+    request = CreateRunRequest(
+        workflowVersionId="version-1",
+        title="Ship release",
+        executionWorkspace={"path": lease.workspacePath, "mode": "write"},
+        actor=Actor(id="user-1", type="human", source="renderer", trusted=True),
+    )
+    action = ExecuteRunActionRequest(
+        actionId="complete:build",
+        expectedRevision="rev-1",
+        actor=request.actor,
+    )
+    error = RuntimeError(
+        code="WORKSPACE_LEASE_CONFLICT",
+        message="Workspace is already leased",
+        correlationId="c-1",
+    )
+
+    assert summary.currentNodes[0].state == "RUNNING"
+    assert action.actionId == "complete:build"
+    assert error.code == "WORKSPACE_LEASE_CONFLICT"
+
+
+def test_workspace_lease_rejects_unknown_mode_and_status() -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceLease(
+            id="lease-1",
+            projectId="project-1",
+            runId="run-1",
+            workspacePath="C:/repo/run-1",
+            mode="exclusive",
+            status="unknown",
+            acquiredAt="2026-08-05T00:00:00Z",
+            lastVerifiedAt="2026-08-05T00:00:00Z",
+            releasedAt=None,
+            releaseReason=None,
         )
