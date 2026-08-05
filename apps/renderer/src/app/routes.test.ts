@@ -13,6 +13,7 @@ describe("parseRunRoute", () => {
 
   it("decodes a non-empty run ID from one path segment", () => {
     expect(parseRunRoute("#/runs/run%201")).toEqual({ mode: "detail", runId: "run 1" });
+    expect(parseRunRoute("#/runs/run%2Fone?tab=overview")).toEqual({ mode: "detail", runId: "run/one" });
   });
 
   it("rejects malformed, empty, trailing-slash, and deeper run paths", () => {
