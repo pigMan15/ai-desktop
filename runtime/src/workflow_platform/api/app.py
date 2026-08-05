@@ -41,16 +41,6 @@ class ArchiveProjectRequest(BaseModel):
     now: str
 
 
-class CreateRunRequest(BaseModel):
-    projectId: str
-    workflowVersionId: str | None = None
-    title: str
-    taskGoal: str | None = None
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    executionWorkspace: str | None = None
-    now: str
-
-
 class ScopedCreateRunRequest(BaseModel):
     workflowVersionId: str
     title: str = Field(min_length=1, max_length=120)
@@ -114,15 +104,6 @@ class BindProjectWorkflowRequest(BaseModel):
     workflowId: str
     workflowVersionId: str
     actor: dict[str, Any]
-    now: str
-
-
-class TransitionRequest(BaseModel):
-    eventType: str
-    nodeId: str | None = None
-    actor: dict[str, Any]
-    payload: dict[str, Any] | None = None
-    expectedRevision: str
     now: str
 
 
@@ -331,10 +312,45 @@ def create_app(
     *,
     cli_diagnostics: Callable[[str], dict[str, str | bool | None]] = diagnose_cli_provider,
     local_token: str | None = None,
+    maintenance: bool = False,
 ) -> FastAPI:
     application = FastAPI(title="AI Workflow Platform Runtime")
     expected_local_token = local_token.strip() if local_token else None
     runtime_request_lock = Lock()
+
+    def require_runtime_available() -> None:
+        if maintenance:
+            raise RuntimeContractError(
+                "RUN_REARCHITECTURE_MAINTENANCE",
+                "Runtime migration is in progress",
+                status=503,
+            )
+
+    def is_maintenance_blocked_start(request: Request) -> bool:
+        if not maintenance or request.method != "POST":
+            return False
+        parts = [part for part in request.url.path.split("/") if part]
+        if len(parts) == 3:
+            return parts[0] == "projects" and parts[2] == "runs"
+        return (
+            len(parts) == 5
+            and parts[0] == "projects"
+            and parts[2] == "runs"
+            and parts[4] in {"agents", "terminals", "deployments"}
+        )
+
+    def runtime_contract_response(
+        request: Request, error: RuntimeContractError
+    ) -> JSONResponse:
+        correlation_id = request.headers.get("X-Correlation-Id") or str(uuid4())
+        content: dict[str, Any] = {
+            "code": error.code,
+            "message": error.message,
+            "correlationId": correlation_id,
+        }
+        if error.details is not None:
+            content["details"] = error.details
+        return JSONResponse(status_code=error.status, content=content)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -347,15 +363,7 @@ def create_app(
     async def runtime_contract_error_handler(
         request: Request, error: RuntimeContractError
     ) -> JSONResponse:
-        correlation_id = request.headers.get("X-Correlation-Id") or str(uuid4())
-        content: dict[str, Any] = {
-            "code": error.code,
-            "message": error.message,
-            "correlationId": correlation_id,
-        }
-        if error.details is not None:
-            content["details"] = error.details
-        return JSONResponse(status_code=error.status, content=content)
+        return runtime_contract_response(request, error)
 
     @application.middleware("http")
     async def require_local_runtime_token(request: Request, call_next: Callable):
@@ -370,6 +378,15 @@ def create_app(
                     status_code=401,
                     content={"detail": "LOCAL_AUTH_REQUIRED: Runtime 本地认证令牌无效或缺失。"},
                 )
+        if is_maintenance_blocked_start(request):
+            return runtime_contract_response(
+                request,
+                RuntimeContractError(
+                    "RUN_REARCHITECTURE_MAINTENANCE",
+                    "Runtime migration is in progress",
+                    status=503,
+                ),
+            )
         # The Runtime owns one SQLite connection, so one request retains the lock
         # until its endpoint has completed all repository operations.
         await asyncio.to_thread(runtime_request_lock.acquire)
@@ -851,6 +868,7 @@ def create_app(
         request: ScopedCreateRunRequest,
         idempotency_key: str = Header(alias="Idempotency-Key"),
     ) -> JSONResponse:
+        require_runtime_available()
         service = _require_service(runtime_service)
         workspace_path = request.executionWorkspace.get("path")
         workspace_mode = request.executionWorkspace.get("mode")
@@ -861,18 +879,31 @@ def create_app(
                 status=400,
             )
         now = request.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        projection = service.create_run(
-            project_id,
-            request.workflowVersionId,
-            title=request.title,
-            task_goal=request.taskGoal,
-            parameters=request.parameters,
-            execution_workspace=workspace_path,
-            workspace_mode=workspace_mode,
-            actor=request.actor,
-            idempotency_key=idempotency_key,
-            now=now,
-        )
+        try:
+            projection = service.create_run(
+                project_id,
+                request.workflowVersionId,
+                title=request.title,
+                task_goal=request.taskGoal,
+                parameters=request.parameters,
+                execution_workspace=workspace_path,
+                workspace_mode=workspace_mode,
+                actor=request.actor,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+        except KeyError as error:
+            raise RuntimeContractError(
+                "INVALID_REQUEST", str(error), status=404
+            ) from error
+        except ValueError as error:
+            legacy_error = _http_error_from_value_error(error)
+            code, _, message = str(error).partition(":")
+            raise RuntimeContractError(
+                code,
+                message.strip() or str(error),
+                status=legacy_error.status_code,
+            ) from error
         overview = service.get_scoped_overview(project_id, projection.runId)
         return JSONResponse(
             status_code=201,
@@ -948,6 +979,7 @@ def create_app(
     def start_project_agent_job(
         project_id: str, run_id: str, request: StartAgentJobRequest
     ) -> dict[str, Any]:
+        require_runtime_available()
         return _require_service(runtime_service).start_agent_job(
             run_id,
             project_id=project_id,
@@ -967,6 +999,7 @@ def create_app(
     def start_project_terminal_session(
         project_id: str, run_id: str, request: RegisterTerminalSessionRequest
     ) -> dict[str, Any]:
+        require_runtime_available()
         return _require_service(runtime_service).register_terminal_session(
             run_id,
             project_id=project_id,
@@ -981,6 +1014,7 @@ def create_app(
     def start_project_deployment(
         project_id: str, run_id: str, request: StartDeploymentRequest
     ) -> dict[str, Any]:
+        require_runtime_available()
         return _require_service(runtime_service).start_deployment(
             run_id,
             project_id=project_id,
@@ -989,56 +1023,6 @@ def create_app(
             expected_revision=request.expectedRevision,
             now=request.now,
         )
-
-    @application.post("/runs")
-    def create_run(request: CreateRunRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            projection = service.create_run(
-                request.projectId,
-                request.workflowVersionId,
-                title=request.title,
-                task_goal=request.taskGoal,
-                parameters=request.parameters,
-                execution_workspace=request.executionWorkspace,
-                now=request.now,
-            )
-            return projection.model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-        except sqlite3.IntegrityError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-
-    @application.get("/workflow-versions/{workflow_version_id}/runs")
-    def list_runs_for_workflow_version(workflow_version_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_runs_for_workflow_version(workflow_version_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/transition")
-    def transition_run(run_id: str, request: TransitionRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            projection = service.transition_run(
-                run_id,
-                request.eventType,
-                node_id=request.nodeId,
-                actor=request.actor,
-                payload=request.payload,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-            return projection.model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-        except sqlite3.IntegrityError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @application.post("/runs/{run_id}/artifacts")
     def submit_artifact(run_id: str, request: SubmitArtifactRequest) -> dict[str, Any]:
@@ -1088,14 +1072,6 @@ def create_app(
             raise _http_error_from_value_error(error) from error
         except sqlite3.IntegrityError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}")
-    def get_run(run_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_run(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @application.get("/runs/{run_id}/timeline")
     def get_timeline(run_id: str) -> list[dict[str, Any]]:
@@ -1739,14 +1715,6 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/projection")
-    def get_projection(run_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_projection(run_id).model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
 
     return application
 

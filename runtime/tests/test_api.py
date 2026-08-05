@@ -67,22 +67,83 @@ def copy_harness_project(tmp_path):
     return project_path
 
 
+def post_scoped_run(
+    client: TestClient,
+    *,
+    project_id: str,
+    workflow_version_id: str,
+    workspace: Path,
+    title: str,
+    idempotency_key: str,
+    task_goal: str | None = None,
+    parameters: dict | None = None,
+    now: str = NOW,
+):
+    return client.post(
+        f"/projects/{project_id}/runs",
+        headers={"Idempotency-Key": idempotency_key},
+        json={
+            "workflowVersionId": workflow_version_id,
+            "title": title,
+            "taskGoal": task_goal,
+            "parameters": parameters or {},
+            "executionWorkspace": {"path": str(workspace), "mode": "write"},
+            "actor": HUMAN_ACTOR,
+            "now": now,
+        },
+    )
+
+
+def scoped_projection(response, project_id: str) -> dict:
+    return {**response.json()["projection"], "projectId": project_id}
+
+
 def import_project_and_create_run(client: TestClient, tmp_path, *, title: str = "P1 API"):
     project_path = copy_harness_project(tmp_path)
     imported = client.post(
         "/projects/import",
         json={"projectPath": str(project_path), "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
+    created = post_scoped_run(
+        client,
+        project_id=imported["projectId"],
+        workflow_version_id=imported["workflowVersionId"],
+        workspace=project_path,
+        title=title,
+        idempotency_key=f"test-run-{title}",
+    )
+    assert created.status_code == 201
+    run = scoped_projection(created, imported["projectId"])
+    return project_path, run
+
+
+def execute_scoped_action(
+    client: TestClient,
+    run: dict,
+    *,
+    event_type: str,
+    node_id: str | None,
+    actor: dict,
+    expected_revision: str,
+    payload: dict | None = None,
+) -> dict:
+    action = next(
+        candidate
+        for candidate in run["allowedActions"]
+        if candidate["eventType"] == event_type and candidate.get("nodeId") == node_id
+    )
+    response = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
         json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": title,
+            "actionId": action["id"],
+            "expectedRevision": expected_revision,
+            "actor": actor,
+            "payload": payload,
             "now": NOW,
         },
-    ).json()
-    return project_path, run
+    )
+    assert response.status_code == 200
+    return {**response.json(), "projectId": run["projectId"]}
 
 
 def test_runtime_api_persists_run_objective_and_parameters(tmp_path) -> None:
@@ -96,23 +157,27 @@ def test_runtime_api_persists_run_objective_and_parameters(tmp_path) -> None:
     ).json()
 
     created = client.post(
-        "/runs",
+        f"/projects/{imported['projectId']}/runs",
+        headers={"Idempotency-Key": "run-objective-and-parameters"},
         json={
-            "projectId": imported["projectId"],
             "workflowVersionId": imported["workflowVersionId"],
             "title": "生产发布准备",
             "taskGoal": "验证发布流程并生成可审计报告",
             "parameters": {"dryRun": True, "region": "cn-north-1"},
+            "executionWorkspace": {"path": str(project_path), "mode": "write"},
+            "actor": HUMAN_ACTOR,
             "now": NOW,
         },
     )
-    runs = client.get(f"/workflow-versions/{imported['workflowVersionId']}/runs")
+    run_id = created.json()["projection"]["runId"]
+    detail = client.get(f"/projects/{imported['projectId']}/runs/{run_id}")
 
-    assert created.status_code == 200
-    assert runs.status_code == 200
-    assert runs.json()[0]["context"] == {
-        "taskGoal": "验证发布流程并生成可审计报告",
-        "parameters": {"dryRun": True, "region": "cn-north-1"},
+    assert created.status_code == 201
+    assert detail.status_code == 200
+    assert detail.json()["context"]["taskGoal"] == "验证发布流程并生成可审计报告"
+    assert detail.json()["context"]["parameters"] == {
+        "dryRun": True,
+        "region": "cn-north-1",
     }
 
 
@@ -142,23 +207,30 @@ def test_runtime_api_scans_declared_node_artifacts(tmp_path) -> None:
         f"/workflow-versions/{imported['workflowVersionId']}/save",
         json={"definition": definition, "actor": HUMAN_ACTOR, "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
-        json={"projectId": imported["projectId"], "workflowVersionId": saved["workflowVersionId"], "title": "扫描产物", "now": NOW},
-    ).json()
+    run_response = client.post(
+        f"/projects/{imported['projectId']}/runs",
+        headers={"Idempotency-Key": "scan-node-artifacts"},
+        json={
+            "workflowVersionId": saved["workflowVersionId"],
+            "title": "扫描产物",
+            "executionWorkspace": {"path": str(project_path), "mode": "write"},
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert run_response.status_code == 201
+    run = {**run_response.json()["projection"], "projectId": imported["projectId"]}
     artifact = project_path / "docs" / "runs" / run["runId"] / "plan" / "plan.md"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("# 计划\n", encoding="utf-8")
-    started = client.post(
-        f"/runs/{run['runId']}/transition",
-        json={
-            "eventType": "NODE_STARTED",
-            "nodeId": "plan",
-            "actor": AGENT_ACTOR,
-            "expectedRevision": run["revision"],
-            "now": NOW,
-        },
-    ).json()
+    started = execute_scoped_action(
+        client,
+        run,
+        event_type="NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run["revision"],
+    )
 
     response = client.post(
         f"/runs/{run['runId']}/nodes/plan/artifacts/scan",
@@ -180,16 +252,14 @@ def test_runtime_api_scans_declared_node_artifacts(tmp_path) -> None:
 
 
 def start_and_submit_plan(client: TestClient, run: dict, artifact_path) -> dict:
-    started = client.post(
-        f"/runs/{run['runId']}/transition",
-        json={
-            "eventType": "NODE_STARTED",
-            "nodeId": "plan",
-            "actor": AGENT_ACTOR,
-            "expectedRevision": run["revision"],
-            "now": NOW,
-        },
-    ).json()
+    started = execute_scoped_action(
+        client,
+        run,
+        event_type="NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run["revision"],
+    )
     return client.post(
         f"/runs/{run['runId']}/artifacts",
         json={
@@ -235,7 +305,9 @@ def test_runtime_api_serializes_concurrent_database_requests(tmp_path) -> None:
     with ThreadPoolExecutor(max_workers=6) as executor:
         responses = list(
             executor.map(
-                lambda _index: client.get(f"/runs/{run['runId']}/projection"),
+                lambda _index: client.get(
+                    f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
+                ),
                 range(6),
             )
         )
@@ -403,11 +475,6 @@ def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp
 
     assert imported["workflowBindingStatus"] == "unbound"
     assert imported["workflowVersionId"] is None
-    assert client.post("/runs", json={"title": "missing project", "now": NOW}).status_code == 400
-    assert client.post(
-        "/runs",
-        json={"projectId": imported["projectId"], "title": "unbound", "now": NOW},
-    ).status_code == 400
 
     definition = yaml.safe_load(
         (FIXTURES / "harness_project" / ".harness" / "workflow.yaml").read_text(encoding="utf-8")
@@ -420,6 +487,22 @@ def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp
     )
     assert template.status_code == 200, template.text
     template_id = template.json()["workflowId"]
+    assert post_scoped_run(
+        client,
+        project_id="project-missing",
+        workflow_version_id=template.json()["workflowVersionId"],
+        workspace=project_path,
+        title="missing project",
+        idempotency_key="missing-project",
+    ).status_code == 404
+    assert post_scoped_run(
+        client,
+        project_id=imported["projectId"],
+        workflow_version_id=template.json()["workflowVersionId"],
+        workspace=project_path,
+        title="unbound",
+        idempotency_key="unbound-project",
+    ).status_code == 400
     assert client.get("/workflows").json()[0]["isBuiltin"] is True
     assert client.post(
         f"/workflow-versions/{template.json()['workflowVersionId']}/save",
@@ -446,13 +529,21 @@ def test_runtime_api_manages_workflow_library_templates_and_project_bindings(tmp
     assert bound.status_code == 200
     assert bound.json()["workflowBindingStatus"] == "bound"
     assert client.get(f"/projects/{imported['projectId']}/workflow-binding").json()["workflowId"] == copied.json()["workflowId"]
-    assert client.post(
-        "/runs",
-        json={"projectId": imported["projectId"], "title": "bound default", "now": NOW},
-    ).status_code == 200
-    assert client.post(
-        "/runs",
-        json={"projectId": imported["projectId"], "workflowVersionId": template.json()["workflowVersionId"], "title": "cross asset", "now": NOW},
+    assert post_scoped_run(
+        client,
+        project_id=imported["projectId"],
+        workflow_version_id=copied.json()["workflowVersionId"],
+        workspace=project_path,
+        title="bound default",
+        idempotency_key="bound-default",
+    ).status_code == 201
+    assert post_scoped_run(
+        client,
+        project_id=imported["projectId"],
+        workflow_version_id=template.json()["workflowVersionId"],
+        workspace=project_path / "cross-asset",
+        title="cross asset",
+        idempotency_key="cross-asset",
     ).status_code == 400
 
 
@@ -535,14 +626,15 @@ def test_runtime_api_project_archive_and_reimport_reactivates_it(tmp_path) -> No
         "/projects/import",
         json={"projectPath": str(project_path), "now": NOW},
     ).json()
-    historical_run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "归档前历史 Run",
-            "now": NOW,
-        },
+    (project_path / "historical").mkdir()
+    (project_path / "archived").mkdir()
+    historical_run = post_scoped_run(
+        client,
+        project_id=imported["projectId"],
+        workflow_version_id=imported["workflowVersionId"],
+        workspace=project_path / "historical",
+        title="归档前历史 Run",
+        idempotency_key="historical-run",
     )
 
     archived = client.post(
@@ -550,39 +642,38 @@ def test_runtime_api_project_archive_and_reimport_reactivates_it(tmp_path) -> No
         json={"actor": HUMAN_ACTOR, "now": NOW},
     )
     definition = client.get(f"/workflow-versions/{imported['workflowVersionId']}")
-    rejected_run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "归档后不应创建",
-            "now": NOW,
-        },
+    rejected_run = post_scoped_run(
+        client,
+        project_id=imported["projectId"],
+        workflow_version_id=imported["workflowVersionId"],
+        workspace=project_path / "archived",
+        title="归档后不应创建",
+        idempotency_key="archived-run",
     )
     reimported = client.post(
         "/projects/import",
         json={"projectPath": str(project_path), "now": "2026-07-28T00:00:00Z"},
     )
-    restored_run = client.post(
-        "/runs",
-        json={
-            "projectId": reimported.json()["projectId"],
-            "workflowVersionId": reimported.json()["workflowVersionId"],
-            "title": "重导入后创建",
-            "now": "2026-07-28T00:00:00Z",
-        },
+    restored_run = post_scoped_run(
+        client,
+        project_id=reimported.json()["projectId"],
+        workflow_version_id=reimported.json()["workflowVersionId"],
+        workspace=project_path,
+        title="重导入后创建",
+        idempotency_key="restored-run",
+        now="2026-07-28T00:00:00Z",
     )
     audit = client.get("/audit-records?action=project.archived")
 
-    assert historical_run.status_code == 200
+    assert historical_run.status_code == 201
     assert archived.status_code == 200
     assert archived.json()["projectId"] == imported["projectId"]
     assert definition.status_code == 200
     assert rejected_run.status_code == 409
-    assert "PROJECT_ARCHIVED" in rejected_run.json()["detail"]
+    assert rejected_run.json()["code"] == "PROJECT_ARCHIVED"
     assert reimported.status_code == 200
     assert reimported.json()["projectId"] == imported["projectId"]
-    assert restored_run.status_code == 200
+    assert restored_run.status_code == 201
     assert audit.json()[0]["resource"] == f"project:{imported['projectId']}"
 
 
@@ -627,7 +718,9 @@ def test_runtime_api_simulates_a_workflow_version_without_creating_a_run(tmp_pat
     assert simulation.status_code == 200
     assert simulation.json()["status"] == "ready"
     assert simulation.json()["steps"][0] == {"nodeId": "plan", "state": "READY"}
-    assert client.get("/runs/run-does-not-exist").status_code == 404
+    assert client.get(
+        f"/projects/{imported['projectId']}/runs/run-does-not-exist"
+    ).status_code == 404
 
 
 def test_runtime_api_lists_workflow_version_history_and_semantic_diff(tmp_path) -> None:
@@ -699,15 +792,17 @@ def test_runtime_api_returns_recovery_diagnostics_for_a_run(tmp_path) -> None:
         "/projects/import",
         json={"projectPath": str(project_path), "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "恢复诊断",
-            "now": NOW,
-        },
-    ).json()
+    run = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=imported["workflowVersionId"],
+            workspace=project_path,
+            title="恢复诊断",
+            idempotency_key="recovery-diagnostics",
+        ),
+        imported["projectId"],
+    )
 
     diagnostics = client.get(f"/runs/{run['runId']}/recovery-diagnostics")
 
@@ -866,15 +961,17 @@ def test_runtime_api_cleans_orphan_agent_jobs_during_recovery(tmp_path) -> None:
         "/projects/import",
         json={"projectPath": str(project_path), "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "清理遗留 Agent",
-            "now": NOW,
-        },
-    ).json()
+    run = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=imported["workflowVersionId"],
+            workspace=project_path,
+            title="清理遗留 Agent",
+            idempotency_key="cleanup-orphan-agent",
+        ),
+        imported["projectId"],
+    )
     service._agent_jobs.create(
         id="job-orphan",
         run_id=run["runId"],
@@ -936,46 +1033,43 @@ def test_runtime_api_imports_project_creates_run_and_transitions(tmp_path) -> No
         "/projects/import",
         json={"projectPath": str(project_path), "now": "2026-07-27T13:00:00Z"},
     )
-    run = client.post(
-        "/runs",
-        json={
-            "projectId": imported.json()["projectId"],
-            "workflowVersionId": imported.json()["workflowVersionId"],
-            "title": "API 纵向验证",
-            "now": "2026-07-27T13:00:00Z",
-        },
+    run_response = post_scoped_run(
+        client,
+        project_id=imported.json()["projectId"],
+        workflow_version_id=imported.json()["workflowVersionId"],
+        workspace=project_path,
+        title="API 纵向验证",
+        idempotency_key="vertical-api",
     )
-    started = client.post(
-        f"/runs/{run.json()['runId']}/transition",
-        json={
-            "eventType": "NODE_STARTED",
-            "nodeId": "plan",
-            "actor": {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
-            "expectedRevision": run.json()["revision"],
-            "now": "2026-07-27T13:00:00Z",
-        },
+    run = scoped_projection(run_response, imported.json()["projectId"])
+    started = execute_scoped_action(
+        client,
+        run,
+        event_type="NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run["revision"],
     )
     submitted = client.post(
-        f"/runs/{run.json()['runId']}/artifacts",
+        f"/runs/{run['runId']}/artifacts",
         json={
             "nodeId": "plan",
             "artifactPath": str(artifact_path),
             "artifactType": "plan",
             "actor": {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
-            "expectedRevision": started.json()["revision"],
+            "expectedRevision": started["revision"],
             "now": "2026-07-27T13:00:00Z",
         },
     )
 
     assert imported.status_code == 200
-    assert run.status_code == 200
-    assert started.status_code == 200
+    assert run_response.status_code == 201
     assert submitted.status_code == 200
     assert submitted.json()["status"] == "REVIEWING"
     assert submitted.json()["nodeStates"]["plan"] == "AWAITING_APPROVAL"
 
 
-def test_runtime_api_rejects_direct_artifact_transition_and_maps_conflicts(tmp_path) -> None:
+def test_runtime_api_rejects_unknown_scoped_action_and_maps_conflicts(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)
     client = TestClient(create_app(WorkflowRuntimeService(db)))
@@ -985,50 +1079,57 @@ def test_runtime_api_rejects_direct_artifact_transition_and_maps_conflicts(tmp_p
         "/projects/import",
         json={"projectPath": str(project_path), "now": "2026-07-27T13:00:00Z"},
     )
-    run_payload = {
-        "projectId": imported.json()["projectId"],
-        "workflowVersionId": imported.json()["workflowVersionId"],
-        "title": "重复 Run",
-        "now": "2026-07-27T13:00:00Z",
-    }
-    run = client.post("/runs", json=run_payload)
-    duplicate_run = client.post("/runs", json=run_payload)
-    started = client.post(
-        f"/runs/{run.json()['runId']}/transition",
-        json={
-            "eventType": "NODE_STARTED",
-            "nodeId": "plan",
-            "actor": {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
-            "expectedRevision": run.json()["revision"],
-            "now": "2026-07-27T13:00:00Z",
-        },
+    run_response = post_scoped_run(
+        client,
+        project_id=imported.json()["projectId"],
+        workflow_version_id=imported.json()["workflowVersionId"],
+        workspace=project_path,
+        title="重复 Run",
+        idempotency_key="duplicate-run",
+    )
+    run = scoped_projection(run_response, imported.json()["projectId"])
+    (project_path / "duplicate").mkdir()
+    duplicate_run = post_scoped_run(
+        client,
+        project_id=imported.json()["projectId"],
+        workflow_version_id=imported.json()["workflowVersionId"],
+        workspace=project_path / "duplicate",
+        title="不同请求",
+        idempotency_key="duplicate-run",
+    )
+    started = execute_scoped_action(
+        client,
+        run,
+        event_type="NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run["revision"],
     )
     direct_artifact = client.post(
-        f"/runs/{run.json()['runId']}/transition",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
         json={
-            "eventType": "ARTIFACT_SUBMITTED",
-            "nodeId": "plan",
-            "actor": {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
+            "actionId": "submit-artifact-directly",
+            "actor": AGENT_ACTOR,
             "payload": {"artifactUri": "file:///unsafe.md", "artifactType": "plan"},
-            "expectedRevision": started.json()["revision"],
+            "expectedRevision": started["revision"],
             "now": "2026-07-27T13:00:00Z",
         },
     )
     missing_artifact = client.post(
-        f"/runs/{run.json()['runId']}/artifacts",
+        f"/runs/{run['runId']}/artifacts",
         json={
             "nodeId": "plan",
             "artifactPath": str(project_path / "missing.md"),
             "artifactType": "plan",
             "actor": {"id": "agent-1", "type": "agent", "source": "agent", "trusted": False},
-            "expectedRevision": started.json()["revision"],
+            "expectedRevision": started["revision"],
             "now": "2026-07-27T13:00:00Z",
         },
     )
 
-    assert duplicate_run.status_code == 409
-    assert direct_artifact.status_code == 400
-    assert "artifacts endpoint" in direct_artifact.json()["detail"]
+    assert duplicate_run.status_code == 400
+    assert direct_artifact.status_code == 409
+    assert direct_artifact.json()["code"] == "INVALID_REQUEST"
     assert missing_artifact.status_code == 404
 
 
@@ -1095,25 +1196,25 @@ def test_runtime_api_automatically_passes_configured_gate_with_artifact_evidence
         f"/workflow-versions/{imported['workflowVersionId']}/save",
         json={"definition": definition, "actor": HUMAN_ACTOR, "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": saved["workflowVersionId"],
-            "title": "自动 Gate 验收",
-            "now": NOW,
-        },
-    ).json()
-    started = client.post(
-        f"/runs/{run['runId']}/transition",
-        json={
-            "eventType": "NODE_STARTED",
-            "nodeId": "plan",
-            "actor": AGENT_ACTOR,
-            "expectedRevision": run["revision"],
-            "now": NOW,
-        },
-    ).json()
+    run = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=saved["workflowVersionId"],
+            workspace=project_path,
+            title="自动 Gate 验收",
+            idempotency_key="automatic-gate",
+        ),
+        imported["projectId"],
+    )
+    started = execute_scoped_action(
+        client,
+        run,
+        event_type="NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run["revision"],
+    )
     submitted = client.post(
         f"/runs/{run['runId']}/artifacts",
         json={
@@ -1627,7 +1728,9 @@ def test_runtime_api_get_run_and_rebuild_projection_match_current_events(tmp_pat
 
     submitted = start_and_submit_plan(client, run, artifact_path)
 
-    current = client.get(f"/runs/{run['runId']}").json()
+    current = client.get(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
+    ).json()
     rebuilt = client.post(
         f"/runs/{run['runId']}/rebuild-projection",
         json={"now": "2026-07-27T13:05:00Z"},
@@ -1646,45 +1749,43 @@ def test_runtime_api_lists_multiple_runs_for_one_workflow_version(tmp_path) -> N
         "/projects/import",
         json={"projectPath": str(project_path), "now": NOW},
     ).json()
-    first = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "第一个并发 Run",
-            "now": "2026-07-27T13:00:00Z",
-        },
-    ).json()
-    second = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "第二个并发 Run",
-            "now": "2026-07-27T13:01:00Z",
-        },
-    ).json()
+    (project_path / "first").mkdir()
+    (project_path / "second").mkdir()
+    first = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=imported["workflowVersionId"],
+            workspace=project_path / "first",
+            title="第一个并发 Run",
+            idempotency_key="first-concurrent-run",
+            now="2026-07-27T13:00:00Z",
+        ),
+        imported["projectId"],
+    )
+    second = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=imported["workflowVersionId"],
+            workspace=project_path / "second",
+            title="第二个并发 Run",
+            idempotency_key="second-concurrent-run",
+            now="2026-07-27T13:01:00Z",
+        ),
+        imported["projectId"],
+    )
 
-    response = client.get(f"/workflow-versions/{imported['workflowVersionId']}/runs")
+    response = client.get(f"/projects/{imported['projectId']}/runs")
 
     assert response.status_code == 200
-    assert response.json() == [
-        {
-            "id": second["runId"],
-            "title": "第二个并发 Run",
-            "context": {"taskGoal": "", "parameters": {}},
-            "status": "CREATED",
-            "createdAt": "2026-07-27T13:01:00Z",
-            "updatedAt": "2026-07-27T13:01:00Z",
-        },
-        {
-            "id": first["runId"],
-            "title": "第一个并发 Run",
-            "context": {"taskGoal": "", "parameters": {}},
-            "status": "CREATED",
-            "createdAt": "2026-07-27T13:00:00Z",
-            "updatedAt": "2026-07-27T13:00:00Z",
-        },
+    assert [item["id"] for item in response.json()["items"]] == [
+        second["runId"],
+        first["runId"],
+    ]
+    assert [item["title"] for item in response.json()["items"]] == [
+        "第二个并发 Run",
+        "第一个并发 Run",
     ]
 
 
@@ -1692,19 +1793,23 @@ def test_runtime_api_lists_runs_from_previous_versions_of_the_same_workflow(tmp_
     db = connect(tmp_path / "workflow.db")
     migrate(db)
     client = TestClient(create_app(WorkflowRuntimeService(db)))
+    project_path = copy_harness_project(tmp_path)
     imported = client.post(
         "/projects/import",
-        json={"projectPath": str(copy_harness_project(tmp_path)), "now": NOW},
+        json={"projectPath": str(project_path), "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "已完成的历史 Run",
-            "now": "2026-07-27T13:00:00Z",
-        },
-    ).json()
+    run = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=imported["workflowVersionId"],
+            workspace=project_path,
+            title="已完成的历史 Run",
+            idempotency_key="historical-version-run",
+            now="2026-07-27T13:00:00Z",
+        ),
+        imported["projectId"],
+    )
     definition = client.get(f"/workflow-versions/{imported['workflowVersionId']}").json()
     definition["nodes"][0]["name"] = "保存后的工作流版本"
     saved = client.post(
@@ -1712,11 +1817,11 @@ def test_runtime_api_lists_runs_from_previous_versions_of_the_same_workflow(tmp_
         json={"definition": definition, "actor": HUMAN_ACTOR, "now": "2026-07-27T13:01:00Z"},
     ).json()
 
-    response = client.get(f"/workflow-versions/{saved['workflowVersionId']}/runs")
+    response = client.get(f"/projects/{imported['projectId']}/runs")
 
     assert response.status_code == 200
-    assert [item["id"] for item in response.json()] == [run["runId"]]
-    assert response.json()[0]["title"] == "已完成的历史 Run"
+    assert [item["id"] for item in response.json()["items"]] == [run["runId"]]
+    assert response.json()["items"][0]["title"] == "已完成的历史 Run"
 
 
 def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
@@ -1748,7 +1853,9 @@ def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
             "now": NOW,
         },
     )
-    missing_run = client.get("/runs/run-missing")
+    missing_run = client.get(
+        f"/projects/{run['projectId']}/runs/run-missing"
+    )
     validation_error = client.post(
         f"/runs/{run['runId']}/gates",
         json={
@@ -1796,7 +1903,9 @@ def test_runtime_api_runs_agent_job_and_returns_output_without_advancing_run(tmp
         sleep(0.02)
     jobs = client.get(f"/runs/{run['runId']}/agents")
     output = client.get(f"/runs/{run['runId']}/agents/{job_id}/output")
-    current = client.get(f"/runs/{run['runId']}")
+    current = client.get(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
+    )
 
     assert started.status_code == 200
     assert started.json()["status"] == "QUEUED"
@@ -1953,15 +2062,17 @@ def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp
         f"/workflow-versions/{imported['workflowVersionId']}/save",
         json={"definition": definition, "actor": HUMAN_ACTOR, "now": NOW},
     ).json()
-    run = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": saved["workflowVersionId"],
-            "title": "部署验收",
-            "now": NOW,
-        },
-    ).json()
+    run = scoped_projection(
+        post_scoped_run(
+            client,
+            project_id=imported["projectId"],
+            workflow_version_id=saved["workflowVersionId"],
+            workspace=project_path,
+            title="部署验收",
+            idempotency_key="deployment-run",
+        ),
+        imported["projectId"],
+    )
 
     denied = client.post(
         f"/runs/{run['runId']}/deployments",
@@ -1990,7 +2101,9 @@ def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp
         sleep(0.02)
     output = client.get(f"/runs/{run['runId']}/deployments/{deployment_id}/output")
     artifacts = client.get(f"/runs/{run['runId']}/artifacts")
-    projection = client.get(f"/runs/{run['runId']}/projection")
+    projection = client.get(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
+    )
 
     assert denied.status_code == 403
     assert started.status_code == 200

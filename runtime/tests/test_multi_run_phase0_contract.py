@@ -25,20 +25,6 @@ def import_project(client: TestClient, root: Path, name: str) -> dict:
     return response.json()
 
 
-def create_legacy_run(client: TestClient, imported: dict) -> dict:
-    response = client.post(
-        "/runs",
-        json={
-            "projectId": imported["projectId"],
-            "workflowVersionId": imported["workflowVersionId"],
-            "title": "Phase 0 baseline",
-            "now": NOW,
-        },
-    )
-    assert response.status_code == 200
-    return response.json()
-
-
 def create_scoped_run(
     client: TestClient,
     project_id: str,
@@ -77,7 +63,13 @@ def two_projects_client(tmp_path):
     client = TestClient(create_app(WorkflowRuntimeService(db)))
     project_a = import_project(client, tmp_path, "project-a")
     project_b = import_project(client, tmp_path, "project-b")
-    run_a = create_legacy_run(client, project_a)
+    run_a = create_scoped_run(
+        client,
+        project_a["projectId"],
+        project_a["workflowVersionId"],
+        tmp_path / "project-a",
+        "project-a-run",
+    ).json()["projection"]
     yield client, project_a["projectId"], project_b["projectId"], run_a["runId"]
     client.close()
     db.close()
@@ -141,3 +133,135 @@ def test_scoped_agent_rejects_read_execution_lease(project_client) -> None:
 
     assert response.status_code == 423
     assert response.json()["code"] == "WORKSPACE_RECOVERY_REQUIRED"
+
+
+def test_legacy_core_run_routes_are_absent_and_scoped_routes_work(project_client) -> None:
+    client, project_id, workflow_version_id, workspace = project_client
+    created = create_scoped_run(
+        client, project_id, workflow_version_id, workspace, "scoped-contract"
+    )
+    projection = created.json()["projection"]
+    run_id = projection["runId"]
+
+    listed = client.get(f"/projects/{project_id}/runs")
+    detail = client.get(f"/projects/{project_id}/runs/{run_id}")
+    scoped_projection = client.get(
+        f"/projects/{project_id}/runs/{run_id}/projection"
+    )
+    overview = client.get(f"/projects/{project_id}/runs/{run_id}/overview")
+    action = client.post(
+        f"/projects/{project_id}/runs/{run_id}/actions",
+        json={
+            "actionId": projection["allowedActions"][0]["id"],
+            "expectedRevision": projection["revision"],
+            "actor": ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert created.status_code == 201
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["id"] == run_id
+    assert detail.status_code == 200
+    assert detail.json()["id"] == run_id
+    assert scoped_projection.status_code == 200
+    assert scoped_projection.json()["runId"] == run_id
+    assert overview.status_code == 200
+    assert overview.json()["projection"]["runId"] == run_id
+    assert action.status_code == 200
+    assert action.json()["revision"] != projection["revision"]
+
+    legacy_responses = [
+        client.post("/runs", json={}),
+        client.get(f"/workflow-versions/{workflow_version_id}/runs"),
+        client.get(f"/runs/{run_id}"),
+        client.get(f"/runs/{run_id}/projection"),
+        client.post(f"/runs/{run_id}/transition", json={}),
+    ]
+    assert all(response.status_code == 404 for response in legacy_responses)
+
+
+def test_maintenance_mode_blocks_all_scoped_run_starts(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    setup_client = TestClient(create_app(service))
+    imported = import_project(setup_client, tmp_path, "project-maintenance")
+    workspace = tmp_path / "project-maintenance"
+    run_id = create_scoped_run(
+        setup_client,
+        imported["projectId"],
+        imported["workflowVersionId"],
+        workspace,
+        "before-maintenance",
+    ).json()["projection"]["runId"]
+    setup_client.close()
+
+    client = TestClient(create_app(service, maintenance=True))
+    requests = [
+        client.post(
+            f"/projects/{imported['projectId']}/runs",
+            headers={"Idempotency-Key": "during-maintenance"},
+            json={
+                "workflowVersionId": imported["workflowVersionId"],
+                "title": "Blocked Run",
+                "executionWorkspace": {"path": str(workspace), "mode": "write"},
+                "actor": ACTOR,
+                "now": NOW,
+            },
+        ),
+        client.post(
+            f"/projects/{imported['projectId']}/runs/{run_id}/agents",
+            json={
+                "nodeId": "plan",
+                "provider": "fake",
+                "prompt": "blocked",
+                "cwd": str(workspace),
+                "actor": ACTOR,
+                "now": NOW,
+            },
+        ),
+        client.post(
+            f"/projects/{imported['projectId']}/runs/{run_id}/terminals",
+            json={
+                "nodeId": "plan",
+                "kind": "shell",
+                "cwd": str(workspace),
+                "pid": 1234,
+                "now": NOW,
+            },
+        ),
+        client.post(
+            f"/projects/{imported['projectId']}/runs/{run_id}/deployments",
+            json={
+                "nodeId": "plan",
+                "actor": ACTOR,
+                "expectedRevision": "0",
+                "now": NOW,
+            },
+        ),
+    ]
+
+    assert [response.status_code for response in requests] == [503, 503, 503, 503]
+    assert {
+        response.json()["code"] for response in requests
+    } == {"RUN_REARCHITECTURE_MAINTENANCE"}
+
+    invalid_requests = [
+        client.post(f"/projects/{imported['projectId']}/runs", json={}),
+        client.post(
+            f"/projects/{imported['projectId']}/runs/{run_id}/agents", json={}
+        ),
+        client.post(
+            f"/projects/{imported['projectId']}/runs/{run_id}/terminals", json={}
+        ),
+        client.post(
+            f"/projects/{imported['projectId']}/runs/{run_id}/deployments", json={}
+        ),
+    ]
+    assert [response.status_code for response in invalid_requests] == [503, 503, 503, 503]
+    assert {
+        response.json()["code"] for response in invalid_requests
+    } == {"RUN_REARCHITECTURE_MAINTENANCE"}
+    client.close()
+    db.close()
