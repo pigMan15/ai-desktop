@@ -142,6 +142,58 @@ describe("runtimeClient", () => {
   });
 
   it.each([
+    [
+      "a malformed runtime-error",
+      {
+        __workflowPlatformRuntimeIpc: "workflow-platform.runtime-ipc.v1#7f8c2a61",
+        kind: "runtime-error",
+        error: { status: 409, message: "Missing code", correlationId: "corr-malformed" },
+      },
+    ],
+    [
+      "an unknown kind",
+      {
+        __workflowPlatformRuntimeIpc: "workflow-platform.runtime-ipc.v1#7f8c2a61",
+        kind: "partial-success",
+        value: { items: [], nextCursor: null },
+      },
+    ],
+    [
+      "an unsupported version",
+      {
+        __workflowPlatformRuntimeIpc: "workflow-platform.runtime-ipc.v2#7f8c2a61",
+        kind: "success",
+        value: { items: [], nextCursor: null },
+      },
+    ],
+  ])("rejects Desktop envelopes with %s", async (_label, envelope) => {
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: { request: vi.fn(async () => envelope) },
+    });
+
+    await expect(
+      createRuntimeClient("http://unused").listProjectRuns("project-1", {}),
+    ).rejects.toMatchObject({
+      status: null,
+      code: "DESKTOP_ERROR",
+      correlationId: null,
+    });
+  });
+
+  it("accepts an untagged Desktop payload for legacy bridge compatibility", async () => {
+    const payload = { items: [], nextCursor: "legacy-cursor" };
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: { request: vi.fn(async () => payload) },
+    });
+
+    await expect(
+      createRuntimeClient("http://unused").listProjectRuns("project-1", {}),
+    ).resolves.toEqual(payload);
+  });
+
+  it.each([
     ["canonical", { code: "PROJECT_ARCHIVED", message: "Project is archived", details: { projectId: "project-1" }, correlationId: "corr-1" }],
     ["FastAPI", { detail: { code: "REVISION_CONFLICT", message: "Revision changed", correlationId: "corr-2" } }],
   ])("parses %s Runtime errors into RuntimeClientError", async (_label, payload) => {

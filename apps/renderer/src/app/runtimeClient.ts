@@ -1228,10 +1228,7 @@ async function request<T>(
     };
     try {
       const result = await desktopRuntime.request(desktopOptions);
-      const runtimeError = readDesktopRuntimeError(result);
-      if (runtimeError) throw runtimeError;
-      if (isDesktopRuntimeSuccess(result)) return result.value as T;
-      return result as T;
+      return decodeDesktopRuntimeResponse<T>(result);
     } catch (error) {
       throw normalizeTransportError(error, "DESKTOP_ERROR");
     }
@@ -1298,6 +1295,25 @@ function normalizeTransportError(error: unknown, code: string): unknown {
   if (isAbortError(error) || error instanceof RuntimeClientError) return error;
   const message = error instanceof Error && error.message ? error.message : "Runtime request failed";
   return new RuntimeClientError(null, code, message, undefined, null);
+}
+
+function decodeDesktopRuntimeResponse<T>(value: unknown): T {
+  if (!hasDesktopRuntimeMarker(value)) return value as T;
+  const runtimeError = readDesktopRuntimeError(value);
+  if (runtimeError) throw runtimeError;
+  if (isDesktopRuntimeSuccess(value)) return value.value as T;
+  throw new RuntimeClientError(
+    null,
+    "DESKTOP_ERROR",
+    "Invalid Desktop Runtime response envelope",
+    undefined,
+    null,
+  );
+}
+
+function hasDesktopRuntimeMarker(value: unknown): value is Record<string, unknown> {
+  return isRecord(value)
+    && Object.prototype.hasOwnProperty.call(value, "__workflowPlatformRuntimeIpc");
 }
 
 function readDesktopRuntimeError(value: unknown): RuntimeClientError | null {
