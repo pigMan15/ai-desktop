@@ -111,3 +111,33 @@ def test_cleaned_run_link_returns_controlled_not_found(project_client) -> None:
     assert response.status_code == 404
     assert response.json()["code"] == "RUN_NOT_FOUND_IN_PROJECT"
     assert response.json()["correlationId"]
+
+
+def test_scoped_agent_rejects_read_execution_lease(project_client) -> None:
+    client, project_id, workflow_version_id, workspace = project_client
+    created = client.post(
+        f"/projects/{project_id}/runs",
+        headers={"Idempotency-Key": "read-agent"},
+        json={
+            "workflowVersionId": workflow_version_id,
+            "title": "Read-only Agent",
+            "executionWorkspace": {"path": str(workspace), "mode": "read"},
+            "actor": ACTOR,
+        },
+    )
+    run_id = created.json()["projection"]["runId"]
+
+    response = client.post(
+        f"/projects/{project_id}/runs/{run_id}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "fake",
+            "prompt": "must not start",
+            "cwd": str(workspace),
+            "actor": ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert response.status_code == 423
+    assert response.json()["code"] == "WORKSPACE_RECOVERY_REQUIRED"

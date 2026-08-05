@@ -944,6 +944,52 @@ def create_app(
             project_id, run_id, reason=request.reason, now=now
         )
 
+    @application.post("/projects/{project_id}/runs/{run_id}/agents")
+    def start_project_agent_job(
+        project_id: str, run_id: str, request: StartAgentJobRequest
+    ) -> dict[str, Any]:
+        return _require_service(runtime_service).start_agent_job(
+            run_id,
+            project_id=project_id,
+            node_id=request.nodeId,
+            provider=request.provider,
+            prompt=request.prompt,
+            cwd=request.cwd,
+            actor=request.actor,
+            allowed_tools=request.allowedTools,
+            timeout_seconds=request.timeoutSeconds,
+            max_output_bytes=request.maxOutputBytes,
+            mode=request.mode,
+            now=request.now,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/terminals")
+    def start_project_terminal_session(
+        project_id: str, run_id: str, request: RegisterTerminalSessionRequest
+    ) -> dict[str, Any]:
+        return _require_service(runtime_service).register_terminal_session(
+            run_id,
+            project_id=project_id,
+            node_id=request.nodeId,
+            kind=request.kind,
+            cwd=Path(request.cwd),
+            pid=request.pid,
+            now=request.now,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/deployments")
+    def start_project_deployment(
+        project_id: str, run_id: str, request: StartDeploymentRequest
+    ) -> dict[str, Any]:
+        return _require_service(runtime_service).start_deployment(
+            run_id,
+            project_id=project_id,
+            node_id=request.nodeId,
+            actor=request.actor,
+            expected_revision=request.expectedRevision,
+            now=request.now,
+        )
+
     @application.post("/runs")
     def create_run(request: CreateRunRequest) -> dict[str, Any]:
         service = _require_service(runtime_service)

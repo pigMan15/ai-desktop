@@ -453,6 +453,171 @@ def test_atomic_run_creation_rejects_invalid_title_before_writes(
     assert db.execute("SELECT COUNT(*) FROM run_workspace_leases").fetchone()[0] == 0
 
 
+def test_execution_lease_rejects_cross_project_released_and_read_leases(
+    tmp_path: Path,
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_a_path = copy_harness_project(tmp_path / "a")
+    project_b_path = copy_harness_project(tmp_path / "b")
+    project_a = service.import_project(project_a_path, now=NOW)
+    project_b = service.import_project(project_b_path, now=NOW)
+    write_run = service.create_run(
+        project_a["projectId"],
+        title="Write lease",
+        execution_workspace=str(project_a_path),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="write-lease",
+        now="2026-08-05T01:00:00Z",
+    )
+
+    with pytest.raises(RuntimeContractError) as cross_project:
+        service._require_execution_lease(
+            project_b["projectId"], write_run.runId, write_required=True
+        )
+    assert cross_project.value.code == "RUN_NOT_FOUND_IN_PROJECT"
+
+    service._workspace_leases.transition(
+        write_run.runId,
+        status="released",
+        reason="test release",
+        transitioned_at="2026-08-05T01:01:00Z",
+    )
+    db.commit()
+    with pytest.raises(RuntimeContractError) as released:
+        service._require_execution_lease(
+            project_a["projectId"], write_run.runId, write_required=True
+        )
+    assert released.value.code == "WORKSPACE_RECOVERY_REQUIRED"
+
+    read_workspace = project_a_path / "read-workspace"
+    read_workspace.mkdir()
+    read_run = service.create_run(
+        project_a["projectId"],
+        title="Read lease",
+        execution_workspace=str(read_workspace),
+        workspace_mode="read",
+        actor=trusted_human(),
+        idempotency_key="read-lease",
+        now="2026-08-05T01:02:00Z",
+    )
+    with pytest.raises(RuntimeContractError) as read_only:
+        service._require_execution_lease(
+            project_a["projectId"], read_run.runId, write_required=True
+        )
+    assert read_only.value.code == "WORKSPACE_RECOVERY_REQUIRED"
+
+    service._workspace_leases.transition(
+        read_run.runId,
+        status="expired",
+        reason="recovery required",
+        transitioned_at="2026-08-05T01:03:00Z",
+    )
+    db.commit()
+    with pytest.raises(RuntimeContractError) as expired:
+        service._require_execution_lease(
+            project_a["projectId"], read_run.runId, write_required=False
+        )
+    assert expired.value.code == "WORKSPACE_RECOVERY_REQUIRED"
+    db.execute("DELETE FROM run_workspace_leases WHERE run_id = ?", (read_run.runId,))
+    db.commit()
+    with pytest.raises(RuntimeContractError) as missing:
+        service._require_execution_lease(
+            project_a["projectId"], read_run.runId, write_required=False
+        )
+    assert missing.value.code == "WORKSPACE_RECOVERY_REQUIRED"
+
+    archived_workspace = project_b_path / "archived-workspace"
+    archived_workspace.mkdir()
+    archived_project_run = service.create_run(
+        project_b["projectId"],
+        title="Archived project",
+        execution_workspace=str(archived_workspace),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="archived-project",
+        now="2026-08-05T01:04:00Z",
+    )
+    service.archive_project(
+        project_b["projectId"], actor=trusted_human().model_dump(), now="2026-08-05T01:05:00Z"
+    )
+    with pytest.raises(RuntimeContractError) as archived_project:
+        service._require_execution_lease(
+            project_b["projectId"], archived_project_run.runId, write_required=True
+        )
+    assert archived_project.value.code == "PROJECT_ARCHIVED"
+
+    archived_run_workspace = project_a_path / "archived-run-workspace"
+    archived_run_workspace.mkdir()
+    archived_run = service.create_run(
+        project_a["projectId"],
+        title="Archived Run",
+        execution_workspace=str(archived_run_workspace),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="archived-run",
+        now="2026-08-05T01:06:00Z",
+    )
+    db.execute(
+        "UPDATE run_projections SET status = 'ARCHIVED' WHERE run_id = ?",
+        (archived_run.runId,),
+    )
+    db.commit()
+    with pytest.raises(RuntimeContractError) as archived_run_error:
+        service._require_execution_lease(
+            project_a["projectId"], archived_run.runId, write_required=True
+        )
+    assert archived_run_error.value.code == "RUN_ARCHIVED"
+
+
+def test_scoped_agent_execution_lease_requires_exact_run_workspace(
+    tmp_path: Path,
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider())
+    project_path = copy_harness_project(tmp_path)
+    project = service.import_project(project_path, now=NOW)
+    run = service.create_run(
+        project["projectId"],
+        title="Scoped agent",
+        execution_workspace=str(project_path),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="scoped-agent",
+        now="2026-08-05T01:00:00Z",
+    )
+    mismatched_cwd = project_path / "other"
+    mismatched_cwd.mkdir()
+
+    with pytest.raises(RuntimeContractError) as mismatch:
+        service.start_agent_job(
+            run.runId,
+            project_id=project["projectId"],
+            node_id="plan",
+            provider="fake",
+            prompt="test",
+            cwd=str(mismatched_cwd),
+            actor=AGENT_ACTOR,
+            now="2026-08-05T01:01:00Z",
+        )
+    assert mismatch.value.code == "EXECUTION_WORKSPACE_MISMATCH"
+
+    job = service.start_agent_job(
+        run.runId,
+        project_id=project["projectId"],
+        node_id="plan",
+        provider="fake",
+        prompt="test",
+        cwd=str(project_path),
+        actor=AGENT_ACTOR,
+        now="2026-08-05T01:02:00Z",
+    )
+    assert os.path.normcase(job["cwd"]) == os.path.normcase(str(project_path.resolve()))
+
+
 def test_migration_backfills_project_scoped_assets_and_bindings(tmp_path: Path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)

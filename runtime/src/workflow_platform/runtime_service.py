@@ -413,6 +413,34 @@ class WorkflowRuntimeService:
             )
         return run
 
+    def _require_execution_lease(
+        self, project_id: str, run_id: str, *, write_required: bool
+    ) -> dict:
+        run = self.get_scoped_run(project_id, run_id)
+        if self._projects.is_archived(project_id):
+            raise RuntimeContractError(
+                "PROJECT_ARCHIVED", "Project is archived", status=409
+            )
+        projection = self._projections.get(run_id)
+        if projection is None or projection.status == "ARCHIVED":
+            raise RuntimeContractError(
+                "RUN_ARCHIVED", "Run is archived", status=409
+            )
+        lease = self._workspace_leases.get_for_run(run_id)
+        if lease is None or lease["status"] != "active":
+            raise RuntimeContractError(
+                "WORKSPACE_RECOVERY_REQUIRED",
+                "Workspace lease is not active",
+                status=423,
+            )
+        if write_required and lease["mode"] != "write":
+            raise RuntimeContractError(
+                "WORKSPACE_RECOVERY_REQUIRED",
+                "Write execution requires a write lease",
+                status=423,
+            )
+        return {"run": run, "lease": lease}
+
     def list_project_runs(
         self,
         project_id: str,
@@ -1715,6 +1743,7 @@ class WorkflowRuntimeService:
         self,
         run_id: str,
         *,
+        project_id: str | None = None,
         node_id: str,
         kind: str,
         cwd: Path,
@@ -1724,12 +1753,36 @@ class WorkflowRuntimeService:
         if kind not in {"shell", "codex"}:
             raise ValueError(f"TERMINAL_KIND_INVALID: unsupported terminal kind {kind}")
 
+        execution_guard = (
+            self._require_execution_lease(project_id, run_id, write_required=True)
+            if project_id is not None
+            else None
+        )
+
         with self._lock:
-            workflow = self._runs.workflow_for_run(run_id)
+            workflow = self._runs.workflow_for_run(project_id, run_id) if project_id else self._runs.workflow_for_run(run_id)
             if node_id not in {node.id for node in workflow.nodes}:
                 raise ValueError(f"TERMINAL_UNKNOWN_NODE: Node not found in workflow: {node_id}")
             project_root = self._runs.execution_workspace_for_run(run_id)
-            safe_cwd = validate_safe_path(project_root, cwd)
+            if execution_guard is not None:
+                lease_path = execution_guard["lease"]["workspacePath"]
+                try:
+                    normalized_cwd = normalize_workspace_path(cwd)
+                except ValueError as error:
+                    raise RuntimeContractError(
+                        "EXECUTION_WORKSPACE_MISMATCH",
+                        "Terminal CWD is not the Run workspace",
+                        status=409,
+                    ) from error
+                if normalized_cwd != lease_path:
+                    raise RuntimeContractError(
+                        "EXECUTION_WORKSPACE_MISMATCH",
+                        "Terminal CWD is not the Run workspace",
+                        status=409,
+                    )
+                safe_cwd = Path(lease_path)
+            else:
+                safe_cwd = validate_safe_path(project_root, cwd)
             session_id = f"terminal-session-{uuid4()}"
             project_id = self._runs.project_id_for_run(run_id)
             try:
@@ -2257,6 +2310,7 @@ class WorkflowRuntimeService:
         self,
         run_id: str,
         *,
+        project_id: str | None = None,
         node_id: str,
         provider: str,
         prompt: str,
@@ -2270,20 +2324,45 @@ class WorkflowRuntimeService:
         mode: str = "automatic",
         parent_job_id: str | None = None,
     ) -> dict:
-        self._assert_run_project_active(run_id)
+        execution_guard = (
+            self._require_execution_lease(project_id, run_id, write_required=True)
+            if project_id is not None
+            else None
+        )
+        if project_id is None:
+            self._assert_run_project_active(run_id)
         if mode not in {"automatic", "interactive"}:
             raise ValueError(f"AGENT_MODE_INVALID: unsupported mode {mode}")
         if mode == "interactive":
             actor_model = require_trusted_human(actor, operation="启动交互式 Agent")
         else:
             actor_model = Actor.model_validate(actor)
-        workflow = self._runs.workflow_for_run(run_id)
+        workflow = self._runs.workflow_for_run(project_id, run_id) if project_id else self._runs.workflow_for_run(run_id)
         if node_id not in {node.id for node in workflow.nodes}:
             raise ValueError(f"AGENT_UNKNOWN_NODE: Node not found in workflow: {node_id}")
 
         project_root = self._runs.project_root_for_run(run_id)
         configured_workspace = self._runs.execution_workspace_for_run(run_id)
-        execution_cwd = validate_safe_path(project_root, cwd or configured_workspace)
+        if execution_guard is not None:
+            lease_path = execution_guard["lease"]["workspacePath"]
+            try:
+                requested_cwd = normalize_workspace_path(cwd or lease_path)
+            except ValueError as error:
+                raise RuntimeContractError(
+                    "EXECUTION_WORKSPACE_MISMATCH",
+                    "Execution CWD is not the Run workspace",
+                    status=409,
+                ) from error
+            if requested_cwd != lease_path:
+                raise RuntimeContractError(
+                    "EXECUTION_WORKSPACE_MISMATCH",
+                    "Execution CWD is not the Run workspace",
+                    status=409,
+                    details={"expected": lease_path, "actual": requested_cwd},
+                )
+            execution_cwd = Path(lease_path)
+        else:
+            execution_cwd = validate_safe_path(project_root, cwd or configured_workspace)
         if not execution_cwd.is_dir():
             raise ValueError(f"AGENT_CWD_INVALID: Agent 工作目录不存在：{execution_cwd}")
         job_id = f"agent-job-{uuid4()}"
@@ -2982,14 +3061,21 @@ class WorkflowRuntimeService:
         self,
         run_id: str,
         *,
+        project_id: str | None = None,
         node_id: str,
         actor: dict,
         expected_revision: str,
         now: str,
     ) -> dict:
-        self._assert_run_project_active(run_id)
+        execution_guard = (
+            self._require_execution_lease(project_id, run_id, write_required=True)
+            if project_id is not None
+            else None
+        )
+        if project_id is None:
+            self._assert_run_project_active(run_id)
         human_actor = require_trusted_human(actor, operation="启动部署")
-        workflow = self._runs.workflow_for_run(run_id)
+        workflow = self._runs.workflow_for_run(project_id, run_id) if project_id else self._runs.workflow_for_run(run_id)
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
         if node is None:
             raise ValueError(f"DEPLOY_UNKNOWN_NODE: 未找到部署节点 {node_id}。")
@@ -2999,6 +3085,14 @@ class WorkflowRuntimeService:
         project_root = self._runs.project_root_for_run(run_id)
         execution_workspace = self._runs.execution_workspace_for_run(run_id)
         command, cwd, timeout_seconds, max_output_bytes = _deployment_configuration(node, execution_workspace)
+        if execution_guard is not None:
+            lease_path = execution_guard["lease"]["workspacePath"]
+            if normalize_workspace_path(cwd) != lease_path:
+                raise RuntimeContractError(
+                    "EXECUTION_WORKSPACE_MISMATCH",
+                    "Deployment CWD is not the Run workspace",
+                    status=409,
+                )
         deployment_id = f"deployment-{uuid4()}"
         output_sequence = 0
 
