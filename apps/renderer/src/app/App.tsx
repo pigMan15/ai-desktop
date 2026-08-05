@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RunListQuery } from "@workflow-platform/contracts";
+import type { Actor, ExecuteRunActionRequest, RunListQuery } from "@workflow-platform/contracts";
 
 import { ApprovalInbox } from "../features/approvals/ApprovalInbox";
 import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
@@ -14,7 +14,7 @@ import {
 } from "../features/projects/GitWorkspacePanel";
 import { RecoveryPage } from "../features/recovery/RecoveryPage";
 import { NewRunPage } from "../features/runs/NewRunPage";
-import { RunDashboard } from "../features/runs/RunDashboard";
+import { RunDetailPage } from "../features/runs/RunDetailPage";
 import { RunListPage } from "../features/runs/RunListPage";
 import { AuditPage } from "../features/audit/AuditPage";
 import {
@@ -75,11 +75,20 @@ import {
 } from "./runtimeClient";
 import { loadWorkspaceSession, saveWorkspaceSession } from "./workspaceSession";
 
+const RENDERER_ACTOR = {
+  id: "renderer-human",
+  type: "human",
+  source: "renderer",
+  trusted: true,
+} satisfies Actor;
+
 export function App() {
   const [savedSession] = useState(loadWorkspaceSession);
   const [state, setState] = useState<RuntimeWorkbenchState | null>(null);
   const [routeLocation, setRouteLocation] = useState(() => window.location.hash);
+  const [initialRouteIsRun] = useState(() => parseRunRoute(window.location.hash).mode !== "unknown");
   const [initialRunId] = useState(() => {
+    if (initialRouteIsRun) return null;
     const initialRunRoute = parseRunRoute(window.location.hash);
     if (initialRunRoute.mode === "detail") return initialRunRoute.runId;
     if (initialRunRoute.mode === "list" || initialRunRoute.mode === "new") return null;
@@ -211,7 +220,7 @@ export function App() {
   useEffect(() => {
     let isMounted = true;
 
-    const initialRunSession = initialRunId && apiBaseUrl === savedSession.apiBaseUrl
+    const initialRunSession = !initialRouteIsRun && initialRunId && apiBaseUrl === savedSession.apiBaseUrl
       ? { ...savedSession, runId: initialRunId }
       : null;
     const initialLoad = initialRunSession
@@ -237,7 +246,7 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [apiBaseUrl, initialRunId, savedSession]);
+  }, [apiBaseUrl, initialRouteIsRun, initialRunId, savedSession]);
 
   useEffect(() => {
     void refreshManagedRuntimeDiagnostics();
@@ -335,26 +344,6 @@ export function App() {
     setResolvedWorkflowAssetId(null);
     setWorkflowRouteError(null);
   }, [currentRoute, workflowRoute.mode]);
-
-  useEffect(() => {
-    if (runRoute.mode !== "detail" || state?.connection !== "connected" || !workflowVersionId) {
-      return;
-    }
-    let isMounted = true;
-    setWorkflowDefinition(null);
-    createRuntimeClient(apiBaseUrl)
-      .getWorkflowDefinition(workflowVersionId)
-      .then((definition) => {
-        if (!isMounted) return;
-        setWorkflowDefinition(isWorkflowDefinitionSummary(definition) ? definition : null);
-      })
-      .catch(() => {
-        if (isMounted) setWorkflowDefinition(null);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, [apiBaseUrl, runRoute.mode, state?.connection, workflowVersionId]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "library") {
@@ -458,7 +447,7 @@ export function App() {
 
   useEffect(() => {
     if (
-      (currentRoute === "runs" && runRoute.mode !== "detail") ||
+      currentRoute === "runs" ||
       !workflowVersionId ||
       state?.connection !== "connected"
     ) {
@@ -483,26 +472,26 @@ export function App() {
     };
   }, [apiBaseUrl, currentRoute, runRoute.mode, state?.connection, workflowVersionId]);
 
-  const activeRunId = currentRoute === "runs"
-    ? state?.projection?.runId === routeRunId ? routeRunId : null
-    : state?.projection?.runId ?? null;
+  const activeRunId = currentRoute === "runs" ? null : state?.projection?.runId ?? null;
   const loadProjectRuns = useCallback(
     (query: RunListQuery, signal: AbortSignal) =>
       createRuntimeClient(apiBaseUrl).listProjectRuns(projectId, query, signal),
     [apiBaseUrl, projectId],
   );
-
-  useEffect(() => {
-    if (
-      !routeRunId ||
-      state?.connection !== "connected" ||
-      state.projection?.runId === routeRunId ||
-      runSwitchInProgressRef.current
-    ) {
-      return;
-    }
-    void handleSelectRun(routeRunId);
-  }, [routeRunId, state?.connection, state?.projection?.runId]);
+  const loadRunOverview = useCallback(
+    (signal: AbortSignal) => {
+      if (!routeRunId) return Promise.reject(new Error("Run detail route is unavailable"));
+      return createRuntimeClient(apiBaseUrl).getProjectRunOverview(projectId, routeRunId, signal);
+    },
+    [apiBaseUrl, projectId, routeRunId],
+  );
+  const executeRunAction = useCallback(
+    (request: ExecuteRunActionRequest, signal: AbortSignal) => {
+      if (!routeRunId) return Promise.reject(new Error("Run detail route is unavailable"));
+      return createRuntimeClient(apiBaseUrl).executeProjectRunAction(projectId, routeRunId, request, signal);
+    },
+    [apiBaseUrl, projectId, routeRunId],
+  );
 
   const agentJobSignature = (state?.agentJobs ?? [])
     .map((job) => `${job.id}:${job.status}`)
@@ -2107,147 +2096,15 @@ export function App() {
             </section>
           ) : null}
           {currentRoute === "runs" && runRoute.mode === "detail" ? (
-            <RunDashboard
-            state={state}
-            workflow={workflowDefinition}
-              runs={runs}
-              activeRunId={routeRunId}
-              onSelectRun={handleSelectRun}
-              onCreateRun={handleCreateRun}
-            onStartNode={(selectedNodeId) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.startNode(runId, selectedNodeId, revision, timestamp),
-                `节点已启动：${selectedNodeId}`,
-              )
-            }
-            onCompleteNode={(selectedNodeId) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.completeNode(runId, selectedNodeId, revision, timestamp),
-                `节点已完成：${selectedNodeId}`,
-              )
-            }
-            onScanNodeArtifacts={(selectedNodeId) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.scanNodeArtifacts(runId, selectedNodeId, revision, timestamp)
-                    .then((result) => result.projection),
-                `已检查节点产物：${selectedNodeId}`,
-              )
-            }
-            onLoadNodeArtifactRequirements={(selectedNodeId) => {
-              const runId = state?.projection?.runId;
-              return runId
-                ? client.getNodeArtifactRequirements(runId, selectedNodeId)
-                : Promise.reject(new Error("当前没有可用 Run"));
-            }}
-            onLoadNodeContext={(selectedNodeId) => {
-              const runId = state?.projection?.runId;
-              return runId
-                ? client.getNodeContext(runId, selectedNodeId)
-                : Promise.reject(new Error("当前没有可用 Run"));
-            }}
-            onSubmitArtifact={(selectedNodeId, selectedArtifactPath, selectedArtifactType) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.submitArtifact(
-                    runId,
-                    selectedNodeId,
-                    selectedArtifactPath,
-                    selectedArtifactType,
-                    revision,
-                    timestamp,
-                  ),
-                `Artifact 已提交：${selectedNodeId}`,
-              )
-            }
-            onApprove={(selectedNodeId) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.decideApproval(
-                    runId,
-                    selectedNodeId,
-                    "approved",
-                    "中文审批",
-                    revision,
-                    timestamp,
-                  ),
-                `审批已通过：${selectedNodeId}`,
-              )
-            }
-            onPassGate={(selectedNodeId, selectedArtifactUri) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.submitGate(
-                    runId,
-                    selectedNodeId,
-                    "plan-ready",
-                    "passed",
-                    [selectedArtifactUri],
-                    null,
-                    revision,
-                    timestamp,
-                  ),
-                `Gate 已通过：${selectedNodeId}`,
-              )
-            }
-            onWaiveGate={(selectedNodeId, waiverReason) =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.submitGate(
-                    runId,
-                    selectedNodeId,
-                    "plan-ready",
-                    "waived",
-                    [],
-                    waiverReason,
-                    revision,
-                    timestamp,
-                  ),
-                `Gate 已豁免：${selectedNodeId}`,
-              )
-            }
-            onPauseRun={() =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.controlRun(runId, "RUN_PAUSED", revision, timestamp),
-                "Run 已暂停。",
-              )
-            }
-            onResumeRun={() =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.controlRun(runId, "RUN_RESUMED", revision, timestamp),
-                "Run 已恢复。",
-              )
-            }
-            onArchiveRun={() =>
-              updateProjection(
-                (runId, revision, timestamp) =>
-                  client.controlRun(runId, "RUN_ARCHIVED", revision, timestamp),
-                "Run 已归档。",
-              )
-            }
-            onStartAgent={handleStartAgent}
-            agentWorkspaces={[
-              { path: gitWorkspaceStatus?.rootPath ?? projectPath, label: `${gitWorkspaceStatus?.branch ?? "main"}（主工作区）` },
-              ...gitWorktrees
-                .filter((worktree) => !worktree.bare && worktree.path !== (gitWorkspaceStatus?.rootPath ?? projectPath))
-                .map((worktree) => ({ path: worktree.path, label: `${worktree.branch ?? "分离 HEAD"}（Worktree）` })),
-            ]}
-            onCancelAgent={handleCancelAgent}
-            onAgentTerminalInput={handleAgentTerminalInput}
-            onAgentTerminalResize={handleAgentTerminalResize}
-            liveAgentOutput={activeRunId ? liveAgentOutput[activeRunId] ?? {} : {}}
-            deployments={deployments}
-            deploymentOutput={deploymentOutput}
-            onStartDeployment={handleStartDeployment}
-            onCancelDeployment={handleCancelDeployment}
-            operationMessage={operationMessage}
-              providerDiagnostics={providerDiagnostics}
-            projectArchived={projectArchived}
-            {...(projectId ? { workflowBinding: projectWorkflowBinding } : {})}
+            <RunDetailPage
+              key={`${projectId}:${runRoute.runId}`}
+              projectId={projectId}
+              runId={runRoute.runId}
+              projectName={state?.projectName ?? savedSession.projectName}
+              actor={RENDERER_ACTOR}
+              loadOverview={loadRunOverview}
+              executeAction={executeRunAction}
+              onReturnToList={() => { window.location.hash = "#/runs"; }}
             />
           ) : null}
           {currentRoute === "workflow" && workflowRoute.mode === "library" ? (

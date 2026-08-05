@@ -145,8 +145,7 @@ describe("App", () => {
         return jsonResponse({ run: { id: "run created" }, projection: {}, workspace: {} });
       }
       if (url.pathname === "/projects/project-1/runs") return jsonResponse({ items: [], nextCursor: null });
-      if (url.pathname === "/runs/run%20created/projection") return jsonResponse(projection("run created", "1", "CREATED"));
-      if (url.pathname.startsWith("/runs/run%20created/")) return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/runs/run%20created/overview") return jsonResponse(runOverview("run created"));
       return jsonResponse([]);
     }));
 
@@ -158,6 +157,7 @@ describe("App", () => {
     fireEvent.click(createButton);
 
     await waitFor(() => expect(window.location.hash).toBe("#/runs/run%20created"));
+    expect(await screen.findByRole("heading", { name: "Scoped run created" })).toBeInTheDocument();
     expect(createRequest?.method).toBe("POST");
     expect(new Headers(createRequest?.headers).get("Idempotency-Key")).toBeTruthy();
     expect(JSON.parse(String(createRequest?.body))).toMatchObject({
@@ -168,8 +168,8 @@ describe("App", () => {
     expect(loadWorkspaceSession().runId).toBe("run created");
   });
 
-  it("uses the detail route Run ID instead of the previously saved Run", async () => {
-    window.location.hash = "#/runs/url-run";
+  it("loads only the project-scoped overview for the encoded detail route Run", async () => {
+    window.location.hash = "#/runs/run%2Fone";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
@@ -185,20 +185,85 @@ describe("App", () => {
       calls.push(url.pathname);
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
-      if (url.pathname.endsWith("/projection")) {
-        const runId = url.pathname.includes("url-run") ? "url-run" : "saved-run";
-        return jsonResponse(projection(runId, "1", "CREATED"));
-      }
-      if (url.pathname.endsWith("/timeline") || url.pathname.endsWith("/artifacts") || url.pathname.endsWith("/approvals") || url.pathname.endsWith("/gates") || url.pathname.endsWith("/agents")) return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/runs/run%2Fone/overview") return jsonResponse(runOverview("run/one"));
       if (url.pathname === "/agents/providers") return jsonResponse([]);
       return jsonResponse([]);
     }));
 
     render(<App />);
 
-    await waitFor(() => expect(calls).toContain("/runs/url-run/projection"));
+    expect(await screen.findByRole("heading", { name: "Scoped run/one" })).toBeInTheDocument();
+    expect(calls).toContain("/projects/project-1/runs/run%2Fone/overview");
+    expect(calls.some((path) => path.startsWith("/runs/"))).toBe(false);
+    expect(calls.some((path) => path.includes("/workflow-versions/") && path.endsWith("/runs"))).toBe(false);
+  });
+
+  it("posts detail actions through the project-scoped route with the exact Runtime action", async () => {
+    window.location.hash = "#/runs/run-one";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "saved-run",
+    });
+    let actionRequest: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/projects/project-1/runs/run-one/overview") return jsonResponse(runOverview("run-one"));
+      if (url.pathname === "/projects/project-1/runs/run-one/actions") {
+        actionRequest = init;
+        return jsonResponse({ projection: { ...projection("run-one", "2", "IN_PROGRESS") }, emittedEvents: [] });
+      }
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "启动当前节点" }));
+
+    await waitFor(() => expect(actionRequest).toBeDefined());
+    expect(actionRequest?.method).toBe("POST");
+    expect(JSON.parse(String(actionRequest?.body))).toEqual({
+      actionId: "start:plan",
+      expectedRevision: "1",
+      actor: { id: "renderer-human", type: "human", source: "renderer", trusted: true },
+    });
+  });
+
+  it("shows scoped not-found state without restoring a saved Run projection", async () => {
+    window.location.hash = "#/runs/missing-run";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "saved-run",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      calls.push(url.pathname);
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/projects/project-1/runs/missing-run/overview") {
+        return new Response(JSON.stringify({ code: "RUN_NOT_FOUND_IN_PROJECT", message: "Missing scoped Run" }), { status: 404 });
+      }
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "此项目中不存在该 Run" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回 Run 列表" })).toBeInTheDocument();
     expect(calls).not.toContain("/runs/saved-run/projection");
-    await waitFor(() => expect(loadWorkspaceSession().runId).toBe("url-run"));
   });
 
   it("reloads the scoped Run list after leaving and returning to the route", async () => {
@@ -352,22 +417,9 @@ describe("App", () => {
             workflowBindingStatus: "bound",
           });
         }
-        if (url.pathname === "/workflow-versions/workflow-version-bound") {
-          return jsonResponse({
-            id: "workflow-restored",
-            name: "Restored workflow",
-            version: "1",
-            sourceAdapter: "manual",
-            nodes: [{ id: "plan", name: "Plan", kind: "task" }],
-            edges: [],
-            roles: [],
-            gates: [],
-            policies: {},
-            metadata: {},
-          });
+        if (url.pathname === "/projects/project-restored/runs/run-restored/overview") {
+          return jsonResponse({ ...runOverview("run-restored"), run: { ...runOverview("run-restored").run, projectId: "project-restored" } });
         }
-        if (url.pathname === "/runs/run-restored/projection") return jsonResponse(projection("run-restored", "1", "IN_PROGRESS"));
-        if (url.pathname.endsWith("/timeline") || url.pathname.endsWith("/artifacts") || url.pathname.endsWith("/approvals") || url.pathname.endsWith("/gates") || url.pathname.endsWith("/agents")) return jsonResponse([]);
         if (url.pathname === "/agents/providers") return jsonResponse([]);
         return jsonResponse([]);
       }),
@@ -375,10 +427,9 @@ describe("App", () => {
 
     render(<App />);
 
-    await screen.findByRole("heading", { name: "运行管理" });
+    await screen.findByRole("heading", { name: "Scoped run-restored" });
     await waitFor(() => expect(calls).toContain("/projects/project-restored/workflow-binding"));
-    expect((await screen.findAllByText("Plan")).length).toBeGreaterThan(0);
-    expect(calls).toContain("/workflow-versions/workflow-version-bound");
+    expect(calls).not.toContain("/workflow-versions/workflow-version-bound");
   });
 
   it("blocks Run creation after an imported project is confirmed unbound", async () => {
@@ -633,6 +684,7 @@ describe("App", () => {
   });
 
   it("restores the saved Run from Runtime when the application starts", async () => {
+    window.location.hash = "#/projects";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
@@ -669,13 +721,10 @@ describe("App", () => {
     render(<App />);
 
     expect((await screen.findAllByText("REVIEWING")).length).toBeGreaterThan(0);
-    expect((await screen.findByLabelText("CLI Provider 状态")).textContent).toContain(
-      "已检测到 Codex CLI。",
-    );
   });
 
   it("keeps the Runtime connected when restoring a stale saved Run fails", async () => {
-    window.location.hash = "#/runs/run-missing";
+    window.location.hash = "#/projects";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
@@ -1011,126 +1060,6 @@ describe("App", () => {
     );
   });
 
-  it("switches between persisted Runs by reloading the selected Runtime projection", async () => {
-    window.location.hash = "#/runs/run-2";
-    saveWorkspaceSession({
-      apiBaseUrl: "http://127.0.0.1:8765",
-      projectPath: "G:\\Project\\demo",
-      workflowVersionId: "workflow-version-demo",
-      projectName: "demo",
-      workflowName: "Demo Workflow",
-      runId: "run-2",
-    });
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input));
-        calls.push(url.pathname);
-        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
-        if (url.pathname === "/workflow-versions/workflow-version-demo/runs") {
-          return jsonResponse([
-            {
-              id: "run-2",
-              title: "第二个并发 Run",
-              status: "IN_PROGRESS",
-              createdAt: "2026-07-28T00:01:00Z",
-              updatedAt: "2026-07-28T00:01:00Z",
-            },
-            {
-              id: "run-1",
-              title: "第一个并发 Run",
-              status: "CREATED",
-              createdAt: "2026-07-28T00:00:00Z",
-              updatedAt: "2026-07-28T00:00:00Z",
-            },
-          ]);
-        }
-        if (url.pathname === "/runs/run-2/projection") return jsonResponse(projection("run-2", "1", "IN_PROGRESS"));
-        if (url.pathname === "/runs/run-1/projection") return jsonResponse(projection("run-1", "1", "CREATED"));
-        if (url.pathname.endsWith("/timeline")) return jsonResponse([]);
-        if (url.pathname.endsWith("/artifacts")) return jsonResponse([]);
-        if (url.pathname.endsWith("/approvals")) return jsonResponse([]);
-        if (url.pathname.endsWith("/gates")) return jsonResponse([]);
-        if (url.pathname.endsWith("/agents")) return jsonResponse([]);
-        if (url.pathname === "/agents/providers") return jsonResponse([]);
-        return jsonResponse([]);
-      }),
-    );
-
-    render(<App />);
-
-    fireEvent.change(await screen.findByLabelText("切换 Run"), { target: { value: "run-1" } });
-
-    expect(await screen.findByText("已切换到 Run：run-1")).toBeInTheDocument();
-    expect(calls).toContain("/runs/run-1/projection");
-  });
-
-  it("clears the previous Run's Agent terminal while an empty Run is loading", async () => {
-    window.location.hash = "#/runs/run-with-agent";
-    saveWorkspaceSession({
-      apiBaseUrl: "http://127.0.0.1:8765",
-      projectPath: "G:\\Project\\demo",
-      workflowVersionId: "workflow-version-demo",
-      projectName: "demo",
-      workflowName: "Demo Workflow",
-      runId: "run-with-agent",
-    });
-    let resolveEmptyRunProjection!: (response: Promise<Response>) => void;
-    const emptyRunProjection = new Promise<Promise<Response>>((resolve) => {
-      resolveEmptyRunProjection = resolve;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input));
-        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
-        if (url.pathname === "/workflow-versions/workflow-version-demo/runs") {
-          return jsonResponse([
-            { id: "run-with-agent", title: "有 Agent 的 Run", status: "IN_PROGRESS", createdAt: "2026-07-29T00:00:00Z", updatedAt: "2026-07-29T00:00:00Z" },
-            { id: "run-empty", title: "空 Run", status: "CREATED", createdAt: "2026-07-29T00:01:00Z", updatedAt: "2026-07-29T00:01:00Z" },
-          ]);
-        }
-        if (url.pathname === "/runs/run-with-agent/projection") return jsonResponse(projection("run-with-agent", "1", "IN_PROGRESS"));
-        if (url.pathname === "/runs/run-empty/projection") return emptyRunProjection;
-        if (url.pathname.endsWith("/timeline")) return jsonResponse([]);
-        if (url.pathname.endsWith("/artifacts")) return jsonResponse([]);
-        if (url.pathname.endsWith("/approvals")) return jsonResponse([]);
-        if (url.pathname.endsWith("/gates")) return jsonResponse([]);
-        if (url.pathname === "/runs/run-with-agent/agents") {
-          return jsonResponse([{
-            id: "agent-old",
-            runId: "run-with-agent",
-            nodeId: "plan",
-            provider: "codex",
-            mode: "interactive",
-            status: "RUNNING",
-            command: ["codex.cmd"],
-            cwd: "G:\\Project\\demo",
-            summary: null,
-            createdAt: "2026-07-29T00:00:00Z",
-            updatedAt: "2026-07-29T00:00:00Z",
-          }]);
-        }
-        if (url.pathname === "/runs/run-empty/agents") return jsonResponse([]);
-        if (url.pathname === "/runs/run-with-agent/agents/agent-old/output") {
-          return jsonResponse([{ id: "out-old", jobId: "agent-old", sequence: 1, kind: "terminal_raw", payload: { text: "旧 Run 的 Agent 输出" }, createdAt: "2026-07-29T00:00:00Z" }]);
-        }
-        if (url.pathname === "/agents/providers") return jsonResponse([]);
-        return jsonResponse([]);
-      }),
-    );
-
-    render(<App />);
-
-    expect(await screen.findByText("旧 Run 的 Agent 输出")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("切换 Run"), { target: { value: "run-empty" } });
-
-    expect(screen.getByLabelText("Agent 交互终端").textContent).not.toContain("旧 Run 的 Agent 输出");
-    resolveEmptyRunProjection(jsonResponse(projection("run-empty", "1", "CREATED")));
-    expect(await screen.findByText("已切换到 Run：run-empty")).toBeInTheDocument();
-  });
-
   it("does not record a Runtime Git publication when the desktop push fails", async () => {
     window.location.hash = "#/knowledge";
     saveWorkspaceSession({
@@ -1193,6 +1122,7 @@ describe("App", () => {
   });
 
   it("loads two Runtime-backed text previews before showing an artifact comparison", async () => {
+    window.location.hash = "#/artifacts";
     const calls: string[] = [];
     const originalCreateObjectUrl = URL.createObjectURL;
     const originalRevokeObjectUrl = URL.revokeObjectURL;
@@ -1275,8 +1205,6 @@ describe("App", () => {
     );
 
     render(<App />);
-    window.location.hash = "#/artifacts";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
 
     fireEvent.change(await screen.findByLabelText("基准产物"), { target: { value: "artifact-1" } });
     fireEvent.change(screen.getByLabelText("对比产物"), { target: { value: "artifact-2" } });
@@ -1301,392 +1229,6 @@ describe("App", () => {
     anchorClick.mockRestore();
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectUrl });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectUrl });
-  });
-
-  it("lets operators drive the Runtime API from Chinese controls", async () => {
-    const calls: Array<{ path: string; body?: unknown }> = [];
-    let agentStarted = false;
-    let projectionRevision = "1";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input));
-        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-        calls.push({ path: url.pathname + url.search, body });
-
-        if (url.pathname === "/health") {
-          return jsonResponse({ status: "ok" });
-        }
-        if (url.pathname === "/agents/providers") {
-          return jsonResponse([{
-            id: "codex",
-            executable: "codex.cmd",
-            available: true,
-            path: "C:\\Tools\\codex.cmd",
-            version: "1.0.0",
-            message: "已检测到 Codex CLI。",
-          }]);
-        }
-        if (url.pathname === "/projects/import") {
-          return jsonResponse({
-            projectId: "project-demo",
-            workflowVersionId: "workflow-version-demo",
-            workflowName: "Demo Workflow",
-          });
-        }
-        if (url.pathname === "/projects/project-demo/workflow-binding") {
-          return jsonResponse({
-            projectId: "project-demo",
-            workflowId: "workflow-demo",
-            workflowVersionId: "workflow-version-bound",
-            actor: { id: "renderer-human" },
-            boundAt: "2026-08-04T00:00:00Z",
-            workflowBindingStatus: "bound",
-          });
-        }
-        if (url.pathname === "/runs") {
-          return jsonResponse(projection("run-demo", "1", "CREATED"));
-        }
-        if (url.pathname === "/runs/run-demo/transition") {
-          projectionRevision = "2";
-          return jsonResponse(projection("run-demo", "2", "IN_PROGRESS"));
-        }
-        if (url.pathname === "/runs/run-demo/nodes/plan/artifact-requirements") {
-          return jsonResponse({
-            runId: "run-demo",
-            nodeId: "plan",
-            requirements: [{
-              id: "artifact-plan",
-              name: "实施计划",
-              type: "plan",
-              required: true,
-              relativePath: "docs/plan.md",
-              artifacts: [{ id: "artifact-1", runId: "run-demo", nodeId: "plan", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test", status: "verified" }],
-            }],
-          });
-        }
-        if (url.pathname === "/runs/run-demo/artifacts" && init?.method === "POST") {
-          projectionRevision = "3";
-          return jsonResponse(projection("run-demo", "3", "REVIEWING"));
-        }
-        if (url.pathname === "/runs/run-demo/approvals/plan/decide") {
-          projectionRevision = "4";
-          return jsonResponse(projection("run-demo", "4", "REVIEWING"));
-        }
-        if (url.pathname === "/runs/run-demo/gates" && init?.method === "POST") {
-          projectionRevision = "5";
-          return jsonResponse(projection("run-demo", "5", "IN_PROGRESS"));
-        }
-        if (url.pathname === "/runs/run-demo/nodes/plan/complete") {
-          projectionRevision = "6";
-          return jsonResponse(projection("run-demo", "6", "IN_PROGRESS"));
-        }
-        if (url.pathname === "/runs/run-demo/timeline") {
-          return jsonResponse([{ id: "event-1", type: "GATE_PASSED", nodeId: "plan", createdAt: "2026-07-28T00:00:00Z" }]);
-        }
-        if (url.pathname === "/runs/run-demo/projection") {
-          return jsonResponse(
-            projection(
-              "run-demo",
-              projectionRevision,
-              projectionRevision === "1" ? "CREATED" : projectionRevision === "2" ? "IN_PROGRESS" : "REVIEWING",
-            ),
-          );
-        }
-        if (url.pathname === "/runs/run-demo/artifacts" && init?.method === "GET") {
-          return jsonResponse([{ id: "artifact-1", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test" }]);
-        }
-        if (url.pathname === "/runs/run-demo/approvals") {
-          return jsonResponse([{ id: "approval-1", status: "approved", comment: "中文审批" }]);
-        }
-        if (url.pathname === "/runs/run-demo/gates" && init?.method === "GET") {
-          return jsonResponse([{ id: "gate-1", status: "passed", evidence: ["file:///plan.md"] }]);
-        }
-        if (url.pathname === "/runs/run-demo/agents" && init?.method === "GET") {
-          return jsonResponse(
-            agentStarted
-              ? [{
-                  id: "job-1",
-                  runId: "run-demo",
-                  nodeId: "plan",
-                  provider: "fake",
-                  status: "RUNNING",
-                  command: ["fake-cli"],
-                  cwd: "G:\\Project\\demo",
-                  summary: null,
-                  createdAt: "2026-07-28T00:00:00Z",
-                  updatedAt: "2026-07-28T00:00:00Z",
-                }]
-              : [],
-          );
-        }
-        if (url.pathname === "/runs/run-demo/agents") {
-          agentStarted = true;
-          return jsonResponse({
-            id: "job-1",
-            runId: "run-demo",
-            nodeId: "plan",
-            provider: "fake",
-            status: "RUNNING",
-            command: ["fake-cli"],
-            cwd: "G:\\Project\\demo",
-            summary: "Agent 完成",
-            createdAt: "2026-07-28T00:00:00Z",
-            updatedAt: "2026-07-28T00:00:00Z",
-          });
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/output") {
-          return jsonResponse([{ id: "out-1", jobId: "job-1", sequence: 1, kind: "message", payload: { text: "Agent 日志" }, createdAt: "2026-07-28T00:00:00Z" }]);
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/cancel") {
-          return jsonResponse({ id: "job-1", status: "CANCELLED" });
-        }
-
-        return jsonResponse([]);
-      }),
-    );
-
-    render(<App />);
-
-    window.location.hash = "#/settings";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
-    fireEvent.change(await screen.findByLabelText("Runtime API 地址"), {
-      target: { value: "http://127.0.0.1:8765" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "检测连接" }));
-
-    window.location.hash = "#/projects";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
-    fireEvent.change(await screen.findByLabelText("项目路径"), {
-      target: { value: "G:\\Project\\demo" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "导入项目" }));
-    expect(await screen.findByText("Demo Workflow")).toBeInTheDocument();
-
-    window.location.hash = "#/runs/run-demo";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
-    fireEvent.click(await screen.findByRole("button", { name: "启动节点" }));
-    expect(await screen.findByText("节点已启动：plan")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Artifact 路径"), {
-      target: { value: "G:\\Project\\demo\\plan.md" },
-    });
-    fireEvent.change(await screen.findByLabelText("Artifact 类型"), {
-      target: { value: "plan" },
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "提交 Artifact" }));
-    expect(await screen.findByText("Artifact 已提交：plan")).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "人工批准" }));
-    expect(await screen.findByText("审批已通过：plan")).toBeInTheDocument();
-    const passGateButton = await screen.findByRole("button", { name: "通过 Gate" });
-    await waitFor(() => expect(passGateButton).toBeEnabled());
-    fireEvent.click(passGateButton);
-    expect(await screen.findByText("GATE_PASSED：plan")).toBeInTheDocument();
-    const completeButton = await screen.findByRole("button", { name: "完成当前节点" });
-    await waitFor(() => expect(completeButton).toBeEnabled());
-    fireEvent.click(completeButton);
-    expect(await screen.findByText("节点已完成：plan")).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("Agent 提示词"), {
-      target: { value: "请用中文开发剩余内容" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
-    expect(await screen.findByText("Agent 日志")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "取消 Agent：job-1" }));
-    expect(await screen.findByText("Agent 已取消：job-1")).toBeInTheDocument();
-
-    expect(calls.map((call) => call.path)).toContain("/runs/run-demo/agents/job-1/cancel");
-  });
-
-  it("持续刷新运行中 Agent 的状态与新增日志", async () => {
-    vi.useFakeTimers();
-    let outputReadCount = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = new URL(String(input));
-        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
-        if (url.pathname === "/runs/run-demo/projection") return jsonResponse(projection("run-demo", "1", "IN_PROGRESS"));
-        if (url.pathname === "/runs/run-demo/timeline") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/artifacts") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/approvals") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/gates") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/agents") {
-          return jsonResponse([{
-            id: "job-1",
-            runId: "run-demo",
-            nodeId: "plan",
-            provider: "codex",
-            status: outputReadCount === 0 ? "RUNNING" : "COMPLETED",
-            command: ["codex.cmd", "exec"],
-            cwd: "G:\\Project\\demo",
-            summary: outputReadCount === 0 ? null : "已完成",
-            createdAt: "2026-07-28T00:00:00Z",
-            updatedAt: "2026-07-28T00:00:01Z",
-          }]);
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/output") {
-          outputReadCount += 1;
-          return jsonResponse(
-            outputReadCount === 1
-              ? [{ id: "out-1", jobId: "job-1", sequence: 1, kind: "message", payload: { text: "第一条日志" }, createdAt: "2026-07-28T00:00:00Z" }]
-              : [{ id: "out-2", jobId: "job-1", sequence: 2, kind: "final", payload: { text: "第二条日志" }, createdAt: "2026-07-28T00:00:01Z" }],
-          );
-        }
-        return jsonResponse([]);
-      }),
-    );
-    saveWorkspaceSession({
-      apiBaseUrl: "http://127.0.0.1:8765",
-      projectPath: "G:\\Project\\demo",
-      workflowVersionId: "workflow-version-demo",
-      projectName: "demo",
-      workflowName: "Demo Workflow",
-      runId: "run-demo",
-    });
-
-    render(<App />);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(screen.getByText("第一条日志")).toBeInTheDocument();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_500);
-    });
-    expect(screen.getByText("第二条日志")).toBeInTheDocument();
-    expect(screen.getByLabelText("Agent 任务").textContent).toContain("COMPLETED");
-  });
-
-  it("在桌面环境用交互式 PTY 启动 Agent，并从 Agent 终端直接回复", async () => {
-    const calls: Array<{ path: string; body?: unknown }> = [];
-    let agentStarted = false;
-    Object.defineProperty(window, "workflowTerminal", {
-      configurable: true,
-      value: {
-        create: vi.fn(async () => ({
-          id: "terminal-1",
-          kind: "codex",
-          cwd: "G:\\Project\\demo",
-          pid: 4321,
-          columns: 100,
-          rows: 30,
-        })),
-        read: vi.fn(async () => [{ sequence: 1, data: "Agent 需要回复\r\n" }]),
-        writeInput: vi.fn(async () => undefined),
-        interrupt: vi.fn(async () => undefined),
-        stop: vi.fn(async () => undefined),
-      },
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input));
-        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-        calls.push({ path: url.pathname + url.search, body });
-        if (url.pathname === "/health") return jsonResponse({ status: "ok" });
-        if (url.pathname === "/runs/run-demo/projection") return jsonResponse(projection("run-demo", "1", "IN_PROGRESS"));
-        if (url.pathname === "/runs/run-demo/timeline") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/artifacts") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/approvals") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/gates") return jsonResponse([]);
-        if (url.pathname === "/agents/providers") {
-          return jsonResponse([{ id: "codex", executable: "codex.cmd", available: true, path: "C:\\Tools\\codex.cmd", version: "1.0.0", message: "已检测到 Codex CLI。" }]);
-        }
-        if (url.pathname === "/runs/run-demo/agents" && init?.method === "GET") {
-          return jsonResponse(
-            agentStarted
-              ? [{
-                  id: "job-1",
-                  runId: "run-demo",
-                  nodeId: "plan",
-                  provider: "codex",
-                  mode: "interactive",
-                  status: "RUNNING",
-                  command: ["codex.cmd"],
-                  cwd: "G:\\Project\\demo",
-                  pid: 4321,
-                  sessionId: "agent-session-1",
-                  summary: null,
-                  error: null,
-                  createdAt: "2026-07-29T00:00:00Z",
-                  updatedAt: "2026-07-29T00:00:00Z",
-                }]
-              : [],
-          );
-        }
-        if (url.pathname === "/runs/run-demo/agents") {
-          agentStarted = true;
-          return jsonResponse({
-            id: "job-1",
-            runId: "run-demo",
-            nodeId: "plan",
-            provider: "codex",
-            mode: "interactive",
-            status: "RUNNING",
-            command: ["codex.cmd"],
-            cwd: "G:\\Project\\demo",
-            sessionId: "agent-session-1",
-            summary: null,
-            error: null,
-            createdAt: "2026-07-29T00:00:00Z",
-            updatedAt: "2026-07-29T00:00:00Z",
-          });
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/interactive-session/start") {
-          return jsonResponse({ id: "agent-session-1", status: "RUNNING" });
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/interactive-session/output") {
-          return jsonResponse([{ id: "out-1", jobId: "job-1", sequence: 1, kind: "terminal_raw", payload: { text: "Agent 需要回复\r\n" }, createdAt: "2026-07-29T00:00:01Z" }]);
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/interactive-session/input") {
-          return jsonResponse({ id: "input-1", content: body?.content });
-        }
-        if (url.pathname === "/runs/run-demo/agents/job-1/output") return jsonResponse([]);
-        return jsonResponse([]);
-      }),
-    );
-    saveWorkspaceSession({
-      apiBaseUrl: "http://127.0.0.1:8765",
-      projectPath: "G:\\Project\\demo",
-      workflowVersionId: "workflow-version-demo",
-      projectName: "demo",
-      workflowName: "Demo Workflow",
-      runId: "run-demo",
-    });
-
-    render(<App />);
-    fireEvent.change(await screen.findByLabelText("Agent 提示词"), { target: { value: "请继续实现剩余内容" } });
-    fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
-    expect(await screen.findByText("交互式 Agent 已启动：job-1")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByLabelText("Agent 交互终端").textContent).toContain("Agent 需要回复"));
-    fireEvent.click(screen.getByRole("button", { name: "在 Agent 终端回复" }));
-
-    const terminal = (window as unknown as {
-      workflowTerminal: { create: ReturnType<typeof vi.fn>; writeInput: ReturnType<typeof vi.fn> };
-    }).workflowTerminal;
-    expect(terminal.create).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "codex",
-      initialPrompt: "请继续实现剩余内容",
-    }));
-    expect(terminal.writeInput).toHaveBeenCalledWith("terminal-1", "继续\r");
-    expect(calls).toContainEqual(expect.objectContaining({
-      path: "/runs/run-demo/agents",
-      body: expect.objectContaining({ mode: "interactive" }),
-    }));
-    expect(calls).toContainEqual(expect.objectContaining({
-      path: "/runs/run-demo/agents/job-1/interactive-session/start",
-      body: expect.objectContaining({ desktopSessionId: "terminal-1", pid: 4321 }),
-    }));
-    await waitFor(() =>
-      expect(
-        calls.some(
-          (call) =>
-            call.path === "/runs/run-demo/agents/job-1/interactive-session/input" &&
-            isRecord(call.body) &&
-            call.body.content === "继续",
-        ),
-      ).toBe(true),
-    );
   });
 
   it("renders the MVP workbench navigation", () => {
@@ -1783,6 +1325,45 @@ function runSummary() {
     activeDeploymentCount: 0,
     createdAt: "2026-08-06T00:00:00Z",
     updatedAt: "2026-08-06T00:00:00Z",
+  };
+}
+
+function runOverview(runId: string) {
+  const workflow = {
+    id: "workflow-1",
+    name: "Immutable scoped workflow",
+    version: "1",
+    sourceAdapter: "harness",
+    nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+    edges: [],
+    roles: [],
+    gates: [],
+    policies: {},
+    metadata: {},
+  };
+  return {
+    run: {
+      id: runId,
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      workflowSnapshot: workflow,
+      title: `Scoped ${runId}`,
+      context: { taskGoal: "Verify scoped detail", parameters: {} },
+      executionWorkspace: "G:\\Project\\demo",
+      workspaceMode: "write",
+      status: "CREATED",
+      createdAt: "2026-08-06T00:00:00Z",
+      updatedAt: "2026-08-06T00:00:00Z",
+    },
+    projection: {
+      ...projection(runId, "1", "CREATED"),
+      allowedActions: [
+        { id: "start:plan", label: "Start plan", eventType: "NODE_STARTED", nodeId: "plan", risk: "low" },
+      ],
+    },
+    workflow,
+    workspace: null,
+    activity: { activeAgentCount: 0, activeDeploymentCount: 0, lastEventAt: "2026-08-06T00:00:00Z" },
   };
 }
 
