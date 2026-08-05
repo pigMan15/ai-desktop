@@ -20,7 +20,16 @@ export type WorkflowRoute =
   | { mode: "new" }
   | { mode: "edit"; workflowId: string };
 
+export type RunRoute =
+  | { mode: "list" }
+  | { mode: "new" }
+  | { mode: "detail"; runId: string }
+  | { mode: "unknown" };
+
 export function normalizeRoute(hash: string): RouteId {
+  if (parseRunRoute(hash).mode !== "unknown") {
+    return "runs";
+  }
   if (parseWorkflowRoute(hash).mode !== "library" || hash.split("?")[0] === "#/workflow") {
     return "workflow";
   }
@@ -29,6 +38,22 @@ export function normalizeRoute(hash: string): RouteId {
 
 export function routeHash(routeId: RouteId): string {
   return routes.find((route) => route.id === routeId)?.hash ?? "#/projects";
+}
+
+export function parseRunRoute(hash: string): RunRoute {
+  const pathname = hash.split("?")[0];
+  if (pathname === "#/runs") return { mode: "list" };
+  if (pathname === "#/runs/new") return { mode: "new" };
+
+  const detailMatch = pathname.match(/^#\/runs\/([^/]+)$/);
+  if (!detailMatch) return { mode: "unknown" };
+
+  try {
+    const runId = decodeURIComponent(detailMatch[1]);
+    return runId ? { mode: "detail", runId } : { mode: "unknown" };
+  } catch {
+    return { mode: "unknown" };
+  }
 }
 
 export function parseWorkflowRoute(hash: string): WorkflowRoute {
@@ -41,5 +66,10 @@ export function parseWorkflowRoute(hash: string): WorkflowRoute {
 
 export function isKnownRouteHash(hash: string) {
   const pathname = hash.split("?")[0];
-  return routes.some((route) => route.hash === pathname) || pathname === "#/workflow/new" || /^#\/workflow\/[^/]+$/.test(pathname);
+  return (
+    parseRunRoute(hash).mode !== "unknown" ||
+    routes.some((route) => route.hash === pathname) ||
+    pathname === "#/workflow/new" ||
+    /^#\/workflow\/[^/]+$/.test(pathname)
+  );
 }
