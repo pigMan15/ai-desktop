@@ -550,6 +550,138 @@ def _run_context(value: object) -> dict:
     return result
 
 
+LEASE_TRANSITIONS = {
+    "active": {"released", "expired"},
+    "expired": {"released"},
+    "released": set(),
+}
+
+
+class WorkspaceLeaseRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def acquire(
+        self,
+        *,
+        id: str,
+        project_id: str,
+        run_id: str,
+        workspace_path: str,
+        mode: str,
+        acquired_at: str,
+    ) -> None:
+        try:
+            self._db.execute(
+                """
+                INSERT INTO run_workspace_leases (
+                    id, project_id, run_id, workspace_path, mode, status,
+                    acquired_at, last_verified_at
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    id,
+                    project_id,
+                    run_id,
+                    workspace_path,
+                    mode,
+                    acquired_at,
+                    acquired_at,
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            if (
+                "run_workspace_leases.project_id, "
+                "run_workspace_leases.workspace_path"
+            ) in str(error):
+                raise ValueError("WORKSPACE_LEASE_CONFLICT") from error
+            raise
+
+    def get_for_run(self, run_id: str) -> dict | None:
+        row = self._db.execute(
+            "SELECT * FROM run_workspace_leases WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
+    def active_for_path(self, project_id: str, workspace_path: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM run_workspace_leases
+            WHERE project_id = ? AND workspace_path = ? AND status = 'active'
+            ORDER BY acquired_at, id
+            """,
+            (project_id, workspace_path),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def verify(self, run_id: str, *, verified_at: str) -> None:
+        cursor = self._db.execute(
+            """
+            UPDATE run_workspace_leases
+            SET last_verified_at = ?
+            WHERE run_id = ?
+            """,
+            (verified_at, run_id),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Workspace lease not found for Run: {run_id}")
+
+    def transition(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        reason: str,
+        transitioned_at: str,
+    ) -> None:
+        current = self._db.execute(
+            "SELECT status FROM run_workspace_leases WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if current is None:
+            raise KeyError(f"Workspace lease not found for Run: {run_id}")
+        if status not in LEASE_TRANSITIONS.get(current["status"], set()):
+            raise ValueError("WORKSPACE_LEASE_TRANSITION_INVALID")
+        if status in {"expired", "released"} and not reason.strip():
+            raise ValueError("WORKSPACE_LEASE_RELEASE_REASON_REQUIRED")
+
+        self._db.execute(
+            """
+            UPDATE run_workspace_leases
+            SET status = ?, released_at = ?, release_reason = ?
+            WHERE run_id = ?
+            """,
+            (status, transitioned_at, reason.strip(), run_id),
+        )
+
+    def list_for_project(self, project_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM run_workspace_leases
+            WHERE project_id = ?
+            ORDER BY acquired_at, id
+            """,
+            (project_id,),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "projectId": row["project_id"],
+            "runId": row["run_id"],
+            "workspacePath": row["workspace_path"],
+            "mode": row["mode"],
+            "status": row["status"],
+            "acquiredAt": row["acquired_at"],
+            "lastVerifiedAt": row["last_verified_at"],
+            "releasedAt": row["released_at"],
+            "releaseReason": row["release_reason"],
+        }
+
+
 class RunEventRepository:
     def __init__(self, db: sqlite3.Connection) -> None:
         self._db = db
