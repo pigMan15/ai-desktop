@@ -28,6 +28,7 @@ export type RunDetailPageProps = {
   runId: string;
   projectName: string;
   actor: Actor;
+  gateActor: Actor;
   loadOverview(signal: AbortSignal): Promise<RunOverview>;
   executeAction(
     request: ExecuteRunActionRequest,
@@ -45,6 +46,7 @@ function RunDetailPageContent({
   runId,
   projectName,
   actor,
+  gateActor,
   loadOverview,
   executeAction,
   onReturnToList,
@@ -139,7 +141,7 @@ function RunDetailPageContent({
     const request: ExecuteRunActionRequest = {
       actionId: action.id,
       expectedRevision: state.overview.projection.revision,
-      actor,
+      actor: isGateAction(action) ? gateActor : actor,
       ...actionPayload(action, inputs),
     };
 
@@ -172,7 +174,7 @@ function RunDetailPageContent({
       .finally(() => {
         if (abortRef.current === controller) busyRef.current = false;
       });
-  }, [actionInputsById, actor, executeAction, performLoad, state.overview]);
+  }, [actionInputsById, actor, executeAction, gateActor, performLoad, state.overview]);
 
   const returnLink = (
     <a
@@ -466,6 +468,10 @@ function renderActionInputs(action: RunGuidanceAction, inputs: ActionInputState)
     return <label>豁免原因<textarea value={inputs.waiverReason} onChange={(event) => inputs.setInput("waiverReason", event.target.value)} /></label>;
   }
   return null;
+}
+
+function isGateAction(action: RunGuidanceAction): boolean {
+  return ["GATE_PASSED", "GATE_FAILED", "GATE_WAIVED"].includes(action.eventType);
 }
 
 function actionPayload(action: RunGuidanceAction, inputs: ActionInputValues): Pick<ExecuteRunActionRequest, "payload"> | Record<string, never> {

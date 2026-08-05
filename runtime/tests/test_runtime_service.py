@@ -359,6 +359,40 @@ def test_scoped_overview_includes_snapshot_workspace_and_active_run_activity(
     }
 
 
+def test_scoped_projection_and_overview_hide_actions_for_an_archived_project(
+    tmp_path: Path,
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path / "project")
+    imported = service.import_project(project_path, now=NOW)
+    projection = service.create_run(
+        imported["projectId"],
+        imported["workflowVersionId"],
+        title="Archived project run",
+        execution_workspace=str(project_path),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="archived-project-overview",
+        now=NOW,
+    )
+    assert projection.allowedActions
+    service.archive_project(
+        imported["projectId"],
+        actor=trusted_human().model_dump(),
+        now="2026-08-06T00:01:00Z",
+    )
+
+    scoped_projection = service.get_scoped_projection(
+        imported["projectId"], projection.runId
+    )
+    overview = service.get_scoped_overview(imported["projectId"], projection.runId)
+
+    assert scoped_projection.allowedActions == []
+    assert overview["projection"]["allowedActions"] == []
+
+
 def test_scoped_overview_is_a_consistent_snapshot_during_a_transition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

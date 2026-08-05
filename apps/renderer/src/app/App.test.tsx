@@ -235,6 +235,48 @@ describe("App", () => {
     });
   });
 
+  it("posts Gate detail actions with the canonical verifier actor", async () => {
+    window.location.hash = "#/runs/run-one";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "saved-run",
+    });
+    const scopedOverview = runOverview("run-one");
+    scopedOverview.projection.allowedActions = [
+      { id: "gate-pass:plan", label: "Pass gate", eventType: "GATE_PASSED", nodeId: "plan", risk: "low" },
+    ];
+    let actionRequest: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/projects/project-1/runs/run-one/overview") return jsonResponse(scopedOverview);
+      if (url.pathname === "/projects/project-1/runs/run-one/actions") {
+        actionRequest = init;
+        return jsonResponse({ projection: scopedOverview.projection, emittedEvents: [] });
+      }
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("证据 URI"), { target: { value: "artifact://quality/report" } });
+    fireEvent.click(screen.getByRole("button", { name: "通过检查关卡" }));
+
+    await waitFor(() => expect(actionRequest).toBeDefined());
+    expect(JSON.parse(String(actionRequest?.body))).toEqual({
+      actionId: "gate-pass:plan",
+      expectedRevision: "1",
+      actor: { id: "renderer-verifier", type: "verifier", source: "runtime", trusted: true },
+      payload: { evidenceUri: "artifact://quality/report" },
+    });
+  });
+
   it("shows scoped not-found state without restoring a saved Run projection", async () => {
     window.location.hash = "#/runs/missing-run";
     saveWorkspaceSession({

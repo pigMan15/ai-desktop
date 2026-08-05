@@ -82,6 +82,13 @@ const RENDERER_ACTOR = {
   trusted: true,
 } satisfies Actor;
 
+const RENDERER_VERIFIER_ACTOR = {
+  id: "renderer-verifier",
+  type: "verifier",
+  source: "runtime",
+  trusted: true,
+} satisfies Actor;
+
 export function App() {
   const [savedSession] = useState(loadWorkspaceSession);
   const [state, setState] = useState<RuntimeWorkbenchState | null>(null);
@@ -2102,6 +2109,7 @@ export function App() {
               runId={runRoute.runId}
               projectName={state?.projectName ?? savedSession.projectName}
               actor={RENDERER_ACTOR}
+              gateActor={RENDERER_VERIFIER_ACTOR}
               loadOverview={loadRunOverview}
               executeAction={executeRunAction}
               onReturnToList={() => { window.location.hash = "#/runs"; }}

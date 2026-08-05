@@ -26,6 +26,13 @@ const actor: Actor = {
   trusted: true,
 };
 
+const gateActor: Actor = {
+  id: "renderer-verifier",
+  type: "verifier",
+  source: "runtime",
+  trusted: true,
+};
+
 beforeEach(() => {
   vi.useRealTimers();
 });
@@ -117,7 +124,7 @@ describe("RunDetailPage", () => {
     expect(executeAction.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
   });
 
-  it("preserves the injected actor for Gate actions without accepting a client Gate id", async () => {
+  it("uses the injected verifier actor for Gate actions without accepting a client Gate id", async () => {
     const executeAction = vi.fn().mockResolvedValue(actionResponse("12"));
     renderPage({
       executeAction,
@@ -139,7 +146,7 @@ describe("RunDetailPage", () => {
     expect(executeAction.mock.calls[0]?.[0]).toEqual({
       actionId: "pass-quality",
       expectedRevision: "11",
-      actor,
+      actor: gateActor,
       payload: { evidenceUri: "artifact://quality/report" },
     });
     expect(executeAction.mock.calls[0]?.[0].payload).not.toHaveProperty("gateId");
@@ -399,6 +406,7 @@ function page(options: Partial<React.ComponentProps<typeof RunDetailPage>> & { o
       runId={options.runId ?? "run/one"}
       projectName={options.projectName ?? "Desktop"}
       actor={options.actor ?? actor}
+      gateActor={options.gateActor ?? gateActor}
       loadOverview={options.loadOverview ?? vi.fn().mockResolvedValue(value)}
       executeAction={options.executeAction ?? vi.fn().mockResolvedValue(actionResponse("12"))}
       onReturnToList={options.onReturnToList ?? vi.fn()}

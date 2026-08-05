@@ -477,12 +477,15 @@ class WorkflowRuntimeService:
 
     def get_scoped_projection(self, project_id: str, run_id: str) -> RunProjection:
         self.get_scoped_run(project_id, run_id)
-        return self.get_projection(run_id)
+        projection = self.get_projection(run_id)
+        if self._projects.is_archived(project_id):
+            return projection.model_copy(update={"allowedActions": []})
+        return projection
 
     def get_scoped_overview(self, project_id: str, run_id: str) -> dict:
         with self._lock:
             run = self.get_scoped_run(project_id, run_id)
-            projection = self.get_projection(run_id)
+            projection = self.get_scoped_projection(project_id, run_id)
             lease = self._workspace_leases.get_for_run(run_id)
             events = self._events.list_for_run(run_id)
             activity = {
