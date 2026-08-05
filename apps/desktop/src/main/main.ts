@@ -432,7 +432,12 @@ function requireString(value: unknown, label: string): string {
 }
 
 function parseRuntimeRequestOptions(value: unknown): RuntimeRequestOptions {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
     throw new Error("Runtime request options must be an object");
   }
   const options = value as Record<string, unknown>;

@@ -96,6 +96,10 @@ assert.deepEqual(recordingRuntime.requests, [{
 const invalidRuntimeRequests: Array<{ value: unknown; error: RegExp }> = [
   { value: null, error: /options must be an object/i },
   { value: [], error: /options must be an object/i },
+  {
+    value: Object.assign(new Date(), { path: "/runs" }),
+    error: /options must be an object/i,
+  },
   { value: { path: "https://example.com/runs" }, error: /relative API path/i },
   { value: { path: "/runs", method: "PUT" }, error: /method must be GET or POST/i },
   { value: { path: "/runs", headers: [] }, error: /headers must be an object/i },
