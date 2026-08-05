@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock, Thread
 from typing import Any, Callable
@@ -39,10 +40,13 @@ from workflow_platform.persistence.repositories import (
     RunEventRepository,
     RunRepository,
     TerminalSessionRepository,
+    WorkspaceLeaseRepository,
     WorkflowVersionRepository,
     WorkflowAssetRepository,
     RoleAssetRepository,
 )
+from workflow_platform.runtime_errors import RuntimeContractError
+from workflow_platform.workspaces import normalize_workspace_path
 
 
 class WorkflowRuntimeService:
@@ -59,6 +63,7 @@ class WorkflowRuntimeService:
         self._role_assets = RoleAssetRepository(db)
         self._workflow_bindings = ProjectWorkflowBindingRepository(db)
         self._runs = RunRepository(db)
+        self._workspace_leases = WorkspaceLeaseRepository(db)
         self._events = RunEventRepository(db)
         self._projections = ProjectionRepository(db)
         self._artifacts = ArtifactRepository(db)
@@ -168,8 +173,28 @@ class WorkflowRuntimeService:
         task_goal: str | None = None,
         parameters: dict[str, Any] | None = None,
         execution_workspace: str | None = None,
+        workspace_mode: str | None = None,
+        actor: Actor | dict | None = None,
+        idempotency_key: str | None = None,
         now: str,
     ) -> RunProjection:
+        if not 1 <= len(title) <= 120:
+            raise RuntimeContractError(
+                "INVALID_REQUEST",
+                "Run title must contain between 1 and 120 characters",
+                status=400,
+            )
+        if workspace_mode is not None and workspace_mode not in {"write", "read"}:
+            raise RuntimeContractError(
+                "INVALID_REQUEST",
+                "Workspace mode must be 'write' or 'read'",
+                status=400,
+            )
+        request_actor = (
+            Actor.model_validate(actor)
+            if actor is not None
+            else Actor(id="runtime", type="system", source="runtime", trusted=True)
+        )
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -180,12 +205,16 @@ class WorkflowRuntimeService:
                     task_goal=task_goal,
                     parameters=parameters,
                     execution_workspace=execution_workspace,
+                    workspace_mode=workspace_mode,
+                    actor=request_actor,
+                    idempotency_key=idempotency_key,
                     now=now,
                 )
                 self._db.commit()
                 return result
             except Exception:
-                self._db.rollback()
+                if self._db.in_transaction:
+                    self._db.rollback()
                 raise
 
     def _create_run_in_transaction(
@@ -197,6 +226,9 @@ class WorkflowRuntimeService:
         task_goal: str | None = None,
         parameters: dict[str, Any] | None = None,
         execution_workspace: str | None = None,
+        workspace_mode: str | None = None,
+        actor: Actor,
+        idempotency_key: str | None = None,
         now: str,
     ) -> RunProjection:
         # Keep direct service callers from older integrations working while all
@@ -221,6 +253,7 @@ class WorkflowRuntimeService:
         workflow = self._workflow_versions.get(workflow_version_id)
         if workflow is None:
             raise KeyError(f"Workflow version not found: {workflow_version_id}")
+        workflow = self._resolve_role_snapshots(workflow)
         _require_valid_workflow(workflow)
 
         asset = self._workflow_assets.get(binding["workflow_id"])
@@ -235,15 +268,64 @@ class WorkflowRuntimeService:
         ).fetchone()
         if project_root_row is None:
             raise KeyError(f"Project not found: {project_id}")
-        workspace = validate_safe_path(project_root_row["root_path"], execution_workspace or ".")
-        if not workspace.is_dir():
-            raise ValueError(f"RUN_WORKSPACE_INVALID: 执行工作区不存在：{workspace}")
+        workspace_value = execution_workspace or project_root_row["root_path"]
+        try:
+            workspace = normalize_workspace_path(workspace_value)
+        except ValueError as error:
+            raise RuntimeContractError(
+                "INVALID_REQUEST",
+                "Execution workspace is invalid",
+                status=400,
+                details={"workspacePath": str(workspace_value)},
+            ) from error
+        resolved_workspace_mode = workspace_mode or "read"
+        normalized_task_goal = (task_goal or "").strip()
+        normalized_parameters = dict(parameters or {})
+        request_hash = _run_request_hash(
+            project_id=project_id,
+            workflow_version_id=workflow_version_id,
+            title=title,
+            task_goal=normalized_task_goal,
+            parameters=normalized_parameters,
+            execution_workspace=workspace,
+            workspace_mode=resolved_workspace_mode,
+            actor=actor,
+        )
+        if idempotency_key:
+            existing_key = self._db.execute(
+                """
+                SELECT run_id, request_hash, created_at
+                FROM run_idempotency_keys
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, idempotency_key),
+            ).fetchone()
+            if existing_key is not None:
+                if _within_idempotency_window(existing_key["created_at"], now):
+                    if existing_key["request_hash"] != request_hash:
+                        raise RuntimeContractError(
+                            "INVALID_REQUEST",
+                            "Idempotency key was already used for a different request",
+                            status=400,
+                        )
+                    existing_projection = self._projections.get(existing_key["run_id"])
+                    if existing_projection is None:
+                        raise RuntimeError(
+                            "Idempotency key references a Run without a projection"
+                        )
+                    return existing_projection
+                self._db.execute(
+                    """
+                    DELETE FROM run_idempotency_keys
+                    WHERE project_id = ? AND idempotency_key = ?
+                    """,
+                    (project_id, idempotency_key),
+                )
         run_id = _stable_id("run", f"{workflow_version_id}:{title}:{now}")
-        actor = Actor(id="runtime", type="system", source="runtime", trusted=True)
         context = {
-            "taskGoal": (task_goal or "").strip(),
-            "parameters": dict(parameters or {}),
-            "executionWorkspace": str(workspace) if execution_workspace else "",
+            "taskGoal": normalized_task_goal,
+            "parameters": normalized_parameters,
+            "executionWorkspace": workspace,
         }
         created_event = RunEvent(
             id=f"{run_id}:event:1",
@@ -255,6 +337,7 @@ class WorkflowRuntimeService:
                 "workflowVersionId": workflow_version_id,
                 "title": title,
                 "context": context,
+                "workspaceMode": resolved_workspace_mode,
             },
             createdAt=now,
             revision="1",
@@ -271,9 +354,43 @@ class WorkflowRuntimeService:
             status=projection.status,
             context=context,
             now=now,
+            workflow_snapshot=workflow,
+            execution_workspace=workspace,
+            workspace_mode=resolved_workspace_mode,
         )
+        try:
+            self._workspace_leases.acquire(
+                id=f"{run_id}:workspace-lease",
+                project_id=project_id,
+                run_id=run_id,
+                workspace_path=workspace,
+                mode=resolved_workspace_mode,
+                acquired_at=now,
+            )
+        except ValueError as error:
+            if str(error) != "WORKSPACE_LEASE_CONFLICT":
+                raise
+            occupants = self._workspace_leases.active_for_path(project_id, workspace)
+            raise RuntimeContractError(
+                "WORKSPACE_LEASE_CONFLICT",
+                "Workspace is already leased",
+                status=409,
+                details={
+                    "workspacePath": workspace,
+                    "occupyingRunId": occupants[0]["runId"] if occupants else None,
+                },
+            ) from error
         self._events.append(created_event, 1)
         self._projections.save(projection)
+        if idempotency_key:
+            self._db.execute(
+                """
+                INSERT INTO run_idempotency_keys (
+                    project_id, idempotency_key, run_id, request_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (project_id, idempotency_key, run_id, request_hash, now),
+            )
 
         return projection
 
@@ -3451,6 +3568,42 @@ def _deployment_configuration(node, project_root: Path) -> tuple[list[str], Path
     ):
         raise ValueError("DEPLOY_OUTPUT_LIMIT_INVALID: maxOutputBytes 必须在 1024 到 2000000 之间。")
     return command, cwd, float(timeout_seconds), max_output_bytes
+
+
+def _run_request_hash(
+    *,
+    project_id: str,
+    workflow_version_id: str,
+    title: str,
+    task_goal: str,
+    parameters: dict[str, Any],
+    execution_workspace: str,
+    workspace_mode: str,
+    actor: Actor,
+) -> str:
+    payload = {
+        "projectId": project_id,
+        "workflowVersionId": workflow_version_id,
+        "title": title,
+        "taskGoal": task_goal,
+        "parameters": parameters,
+        "executionWorkspace": execution_workspace,
+        "workspaceMode": workspace_mode,
+        "actor": actor.model_dump(by_alias=True),
+    }
+    serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _within_idempotency_window(created_at: str, now: str) -> bool:
+    return _parse_utc(now) < _parse_utc(created_at) + timedelta(hours=24)
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _stable_id(prefix: str, value: str) -> str:

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 from shutil import copytree, rmtree
 import sys
@@ -11,6 +12,7 @@ from workflow_platform.execution.providers import CliCommand, CodexCliProvider
 from workflow_platform.models import Actor, Role, RunProjection, WorkflowDefinition, WorkflowNode
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
+from workflow_platform.runtime_errors import RuntimeContractError
 from workflow_platform.runtime_service import (
     WorkflowRuntimeService,
     _build_effective_agent_prompt,
@@ -302,6 +304,153 @@ def test_runs_use_the_requested_project_binding_and_reject_versions_from_another
             title="cross-project",
             now="2026-08-04T00:02:00Z",
         )
+
+
+def test_atomic_run_creation_allows_only_one_write_lease(tmp_path: Path) -> None:
+    db_path = tmp_path / "workflow.db"
+    setup_db = connect(db_path)
+    migrate(setup_db)
+    setup_service = WorkflowRuntimeService(setup_db)
+    project_path = copy_harness_project(tmp_path / "project")
+    imported = setup_service.import_project(project_path, now=NOW)
+    setup_db.close()
+
+    services = [WorkflowRuntimeService(connect(db_path)) for _ in range(2)]
+
+    def create(index: int) -> RunProjection:
+        return services[index].create_run(
+            imported["projectId"],
+            imported["workflowVersionId"],
+            title=f"Concurrent run {index}",
+            execution_workspace=str(project_path),
+            workspace_mode="write",
+            actor=trusted_human(),
+            idempotency_key=f"concurrent-{index}",
+            now=f"2026-08-05T0{index + 1}:00:00Z",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(create, index) for index in range(2)]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except RuntimeContractError as error:
+                outcomes.append(error)
+
+    assert sum(isinstance(outcome, RunProjection) for outcome in outcomes) == 1
+    conflicts = [outcome for outcome in outcomes if isinstance(outcome, RuntimeContractError)]
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "WORKSPACE_LEASE_CONFLICT"
+    verification_db = connect(db_path)
+    assert verification_db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    assert verification_db.execute("SELECT COUNT(*) FROM run_workspace_leases").fetchone()[0] == 1
+    for service in services:
+        service._db.close()
+    verification_db.close()
+
+
+def test_atomic_run_creation_rolls_back_after_lease_failure_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path / "project")
+    imported = service.import_project(project_path, now=NOW)
+
+    def fail_event_append(*_args, **_kwargs) -> None:
+        raise RuntimeError("INJECTED_EVENT_FAILURE")
+
+    monkeypatch.setattr(service._events, "append", fail_event_append)
+    with pytest.raises(RuntimeError, match="INJECTED_EVENT_FAILURE"):
+        service.create_run(
+            imported["projectId"],
+            imported["workflowVersionId"],
+            title="Rollback run",
+            execution_workspace=str(project_path),
+            workspace_mode="write",
+            actor=trusted_human(),
+            idempotency_key="rollback-key",
+            now="2026-08-05T01:00:00Z",
+        )
+
+    assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM run_workspace_leases").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM run_idempotency_keys").fetchone()[0] == 0
+
+
+def test_idempotent_run_creation_reuses_rejects_and_expires_keys(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path / "project")
+    imported = service.import_project(project_path, now=NOW)
+    request = {
+        "project_id": imported["projectId"],
+        "workflow_version_id": imported["workflowVersionId"],
+        "title": "Idempotent run",
+        "execution_workspace": str(project_path),
+        "workspace_mode": "write",
+        "actor": trusted_human(),
+        "idempotency_key": "idempotent-key",
+    }
+
+    first = service.create_run(**request, now="2026-08-05T01:00:00Z")
+    retried = service.create_run(**request, now="2026-08-05T02:00:00Z")
+
+    assert retried.runId == first.runId
+    assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    with pytest.raises(RuntimeContractError) as mismatch:
+        service.create_run(
+            **{**request, "title": "Different request"},
+            now="2026-08-05T03:00:00Z",
+        )
+    assert mismatch.value.code == "INVALID_REQUEST"
+
+    service._workspace_leases.transition(
+        first.runId,
+        status="released",
+        reason="test completed",
+        transitioned_at="2026-08-05T03:30:00Z",
+    )
+    db.commit()
+    replacement = service.create_run(**request, now="2026-08-06T02:00:01Z")
+
+    assert replacement.runId != first.runId
+    assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 2
+    key_row = db.execute(
+        "SELECT run_id FROM run_idempotency_keys WHERE project_id = ? AND idempotency_key = ?",
+        (imported["projectId"], "idempotent-key"),
+    ).fetchone()
+    assert key_row["run_id"] == replacement.runId
+
+
+@pytest.mark.parametrize("title", ["", "x" * 121])
+def test_atomic_run_creation_rejects_invalid_title_before_writes(
+    tmp_path: Path, title: str
+) -> None:
+    db = connect(tmp_path / f"workflow-{len(title)}.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path / f"project-{len(title)}")
+    imported = service.import_project(project_path, now=NOW)
+
+    with pytest.raises(RuntimeContractError) as invalid:
+        service.create_run(
+            imported["projectId"],
+            imported["workflowVersionId"],
+            title=title,
+            execution_workspace=str(project_path),
+            workspace_mode="write",
+            actor=trusted_human(),
+            idempotency_key=f"title-{len(title)}",
+            now="2026-08-05T01:00:00Z",
+        )
+
+    assert invalid.value.code == "INVALID_REQUEST"
+    assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM run_workspace_leases").fetchone()[0] == 0
 
 
 def test_migration_backfills_project_scoped_assets_and_bindings(tmp_path: Path) -> None:
@@ -1708,8 +1857,9 @@ def test_run_execution_workspace_is_reused_by_default_agent_jobs(tmp_path) -> No
         now=NOW,
     )
 
-    assert service.list_runs_for_workflow_version(project["workflowVersionId"])[0]["context"]["executionWorkspace"] == str(worktree)
-    assert job["cwd"] == str(worktree)
+    normalized_worktree = os.path.normcase(str(worktree.resolve()))
+    assert service.list_runs_for_workflow_version(project["workflowVersionId"])[0]["context"]["executionWorkspace"] == normalized_worktree
+    assert os.path.normcase(job["cwd"]) == normalized_worktree
 
 
 def _create_interactive_agent_job(
