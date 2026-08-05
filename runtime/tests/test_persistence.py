@@ -27,6 +27,8 @@ CORE_TABLES = {
     "runs",
     "run_events",
     "run_projections",
+    "run_workspace_leases",
+    "run_idempotency_keys",
     "artifacts",
     "approvals",
     "gate_results",
@@ -62,11 +64,33 @@ EXPECTED_COLUMNS = {
         ("id", "TEXT", False, True),
         ("project_id", "TEXT", True, False),
         ("workflow_version_id", "TEXT", True, False),
+        ("workflow_snapshot_json", "TEXT", True, False),
         ("title", "TEXT", True, False),
-        ("status", "TEXT", True, False),
         ("context_json", "TEXT", True, False),
+        ("execution_workspace", "TEXT", True, False),
+        ("workspace_mode", "TEXT", True, False),
+        ("status", "TEXT", True, False),
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
+    ],
+    "run_workspace_leases": [
+        ("id", "TEXT", False, True),
+        ("project_id", "TEXT", True, False),
+        ("run_id", "TEXT", True, False),
+        ("workspace_path", "TEXT", True, False),
+        ("mode", "TEXT", True, False),
+        ("status", "TEXT", True, False),
+        ("acquired_at", "TEXT", True, False),
+        ("last_verified_at", "TEXT", True, False),
+        ("released_at", "TEXT", False, False),
+        ("release_reason", "TEXT", False, False),
+    ],
+    "run_idempotency_keys": [
+        ("project_id", "TEXT", True, True),
+        ("idempotency_key", "TEXT", True, True),
+        ("run_id", "TEXT", True, False),
+        ("request_hash", "TEXT", True, False),
+        ("created_at", "TEXT", True, False),
     ],
     "run_events": [
         ("id", "TEXT", False, True),
@@ -206,6 +230,14 @@ EXPECTED_FOREIGN_KEYS = {
     ],
     "run_events": [("run_id", "runs", "id")],
     "run_projections": [("run_id", "runs", "id")],
+    "run_workspace_leases": [
+        ("project_id", "projects", "id"),
+        ("run_id", "runs", "id"),
+    ],
+    "run_idempotency_keys": [
+        ("project_id", "projects", "id"),
+        ("run_id", "runs", "id"),
+    ],
     "artifacts": [("run_id", "runs", "id")],
     "approvals": [("run_id", "runs", "id")],
     "gate_results": [("run_id", "runs", "id")],
@@ -399,6 +431,63 @@ def test_migrate_creates_plan_columns_for_core_tables() -> None:
         assert table_columns(db, table_name) == expected_columns
 
 
+def test_run_rearchitecture_migration_preserves_static_data_and_clears_run_state() -> None:
+    db = connect(fresh_db_path("run_rearchitecture"))
+    migrate(db)
+    downgrade_runs_to_legacy_schema(db)
+    insert_project(db)
+    db.execute(
+        """
+        INSERT INTO workflow_assets (
+            id, name, is_builtin, archived_at, created_by_json,
+            created_at, updated_at, current_workflow_version_id
+        ) VALUES ('workflow-asset-1', 'Demo workflow', 0, NULL, '{}',
+                  '2026-07-27T13:00:00Z', '2026-07-27T13:00:00Z', NULL)
+        """
+    )
+    db.commit()
+    insert_legacy_run_state(db)
+
+    migrate(db)
+
+    assert table_columns(db, "runs") == EXPECTED_COLUMNS["runs"]
+    assert db.execute("SELECT id FROM projects").fetchall()[0]["id"] == "project-1"
+    assert db.execute("SELECT id FROM workflow_assets").fetchall()[0]["id"] == "workflow-asset-1"
+    assert db.execute("SELECT id FROM workflow_versions").fetchall()[0]["id"] == "workflow-version-1"
+    assert db.execute("SELECT project_id FROM project_workflow_bindings").fetchall()[0]["project_id"] == "project-1"
+    assert db.execute("SELECT id FROM role_assets").fetchall()[0]["id"] == "role-1"
+    assert db.execute("SELECT id FROM role_versions").fetchall()[0]["id"] == "role-version-1"
+
+    run_state_tables = {
+        "runs",
+        "run_events",
+        "run_projections",
+        "run_workspace_leases",
+        "run_idempotency_keys",
+        "artifacts",
+        "artifact_consumers",
+        "approvals",
+        "gate_results",
+        "terminal_sessions",
+        "terminal_output_events",
+        "agent_jobs",
+        "agent_sessions",
+        "agent_input_events",
+        "agent_output_events",
+        "agent_checkpoints",
+        "deployments",
+        "deployment_output_events",
+    }
+    assert all(
+        db.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0] == 0
+        for table_name in run_state_tables
+    )
+    assert [
+        row["id"] for row in db.execute("SELECT id FROM audit_records ORDER BY id")
+    ] == ["audit-project-1"]
+    assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_migrate_adds_project_archive_column_to_existing_database() -> None:
     db = connect(fresh_db_path("project_archive_migration"))
     db.execute(
@@ -413,6 +502,224 @@ def test_migrate_adds_project_archive_column_to_existing_database() -> None:
         )
         """
     )
+    db.commit()
+
+
+def downgrade_runs_to_legacy_schema(db: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
+    if "workflow_snapshot_json" not in columns:
+        return
+
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.executescript(
+        """
+        CREATE TABLE legacy_runs (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            workflow_version_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            context_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (workflow_version_id) REFERENCES workflow_versions(id) ON DELETE CASCADE
+        );
+        DROP TABLE runs;
+        ALTER TABLE legacy_runs RENAME TO runs;
+        """
+    )
+    db.execute("PRAGMA foreign_keys = ON")
+
+
+def insert_legacy_run_state(db: sqlite3.Connection) -> None:
+    timestamp = "2026-07-27T13:00:00Z"
+    db.execute(
+        """
+        INSERT INTO workflow_versions (
+            id, project_id, adapter_id, name, version, definition_json,
+            content_hash, workflow_asset_id, created_at
+        ) VALUES ('workflow-version-1', 'project-1', 'fixture', 'Demo workflow',
+                  '1', '{}', 'sha256:workflow-1', 'workflow-asset-1', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO project_workflow_bindings (
+            project_id, workflow_id, workflow_version_id, actor_json, bound_at
+        ) VALUES ('project-1', 'workflow-asset-1', 'workflow-version-1', '{}', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO role_assets (
+            id, name, is_builtin, created_by_json, created_at, updated_at,
+            current_role_version_id
+        ) VALUES ('role-1', 'Developer', 0, '{}', ?, ?, 'role-version-1')
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO role_versions (id, role_id, version, definition_json, created_at)
+        VALUES ('role-version-1', 'role-1', 1, '{}', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO runs (
+            id, project_id, workflow_version_id, title, status, context_json,
+            created_at, updated_at
+        ) VALUES ('run-1', 'project-1', 'workflow-version-1', 'Legacy run',
+                  'RUNNING', '{}', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO run_events (
+            id, run_id, sequence, type, actor_json, payload_json, revision, created_at
+        ) VALUES ('event-1', 'run-1', 1, 'RUN_CREATED', '{}', '{}', 'rev-1', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO run_projections (
+            run_id, status, current_node_ids_json, node_states_json,
+            allowed_actions_json, blocking_reasons_json, revision, updated_at
+        ) VALUES ('run-1', 'RUNNING', '[]', '{}', '[]', '[]', 'rev-1', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO artifacts (
+            id, run_id, node_id, type, uri, content_hash, producer_json, created_at
+        ) VALUES ('artifact-1', 'run-1', 'task-1', 'report', 'file:///report.md',
+                  'sha256:artifact-1', '{}', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO artifact_consumers (
+            id, artifact_id, consumer_run_id, consumer_node_id, context_created_at
+        ) VALUES ('consumer-1', 'artifact-1', 'run-1', 'task-2', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO approvals (
+            id, run_id, node_id, status, requested_by_json, created_at
+        ) VALUES ('approval-1', 'run-1', 'task-1', 'PENDING', '{}', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO gate_results (
+            id, run_id, node_id, gate_id, status, evidence_json, actor_json, created_at
+        ) VALUES ('gate-result-1', 'run-1', 'task-1', 'gate-1', 'PASSED', '[]', '{}', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO terminal_sessions (
+            id, project_id, run_id, kind, status, cwd, created_at, updated_at
+        ) VALUES ('terminal-1', 'project-1', 'run-1', 'shell', 'running',
+                  'G:/Project/demo', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO terminal_output_events (
+            id, session_id, sequence, stream, data, created_at
+        ) VALUES ('terminal-output-1', 'terminal-1', 1, 'stdout', 'running', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO agent_jobs (
+            id, run_id, node_id, provider, status, command_json, cwd,
+            created_at, updated_at
+        ) VALUES ('agent-job-1', 'run-1', 'task-1', 'fixture', 'RUNNING', '[]',
+                  'G:/Project/demo', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO agent_output_events (
+            id, job_id, sequence, kind, payload_json, created_at
+        ) VALUES ('agent-output-1', 'agent-job-1', 1, 'message', '{}', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO agent_checkpoints (
+            id, run_id, job_id, node_id, provider, prompt, allowed_tools_json,
+            timeout_seconds, max_output_bytes, status, created_at, updated_at
+        ) VALUES ('checkpoint-1', 'run-1', 'agent-job-1', 'task-1', 'fixture',
+                  'continue', '[]', 30, 1000, 'RUNNING', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO agent_sessions (
+            id, run_id, job_id, provider, status, cwd, created_at, updated_at
+        ) VALUES ('agent-session-1', 'run-1', 'agent-job-1', 'fixture', 'RUNNING',
+                  'G:/Project/demo', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO agent_input_events (id, session_id, sequence, kind, content, created_at)
+        VALUES ('agent-input-1', 'agent-session-1', 1, 'stdin', 'continue', ?)
+        """,
+        (timestamp,),
+    )
+    db.execute(
+        """
+        INSERT INTO deployments (
+            id, run_id, node_id, command_json, cwd, status, created_at, updated_at
+        ) VALUES ('deployment-1', 'run-1', 'task-1', '[]', 'G:/Project/demo',
+                  'RUNNING', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    db.execute(
+        """
+        INSERT INTO deployment_output_events (
+            id, deployment_id, sequence, data, created_at
+        ) VALUES ('deployment-output-1', 'deployment-1', 1, 'deploying', ?)
+        """,
+        (timestamp,),
+    )
+    for record_id, resource in (
+        ("audit-run-1", "run:run-1"),
+        ("audit-project-1", "project:project-1"),
+    ):
+        db.execute(
+            """
+            INSERT INTO audit_records (
+                id, actor_id, actor_json, action, resource, detail_json,
+                record_hash, created_at
+            ) VALUES (?, 'actor-1', '{}', 'test', ?, '{}', ?, ?)
+            """,
+            (record_id, resource, f"hash:{record_id}", timestamp),
+        )
     db.commit()
 
 
@@ -517,6 +824,28 @@ def test_run_events_has_unique_run_sequence_index() -> None:
     migrate(db)
 
     assert ("run_id", "sequence") in unique_index_columns(db, "run_events")
+
+
+def test_multi_run_schema_has_required_indexes_and_restricted_version_delete() -> None:
+    db = connect(fresh_db_path("multi_run_schema"))
+
+    migrate(db)
+
+    assert {
+        "runs_project_updated_idx",
+        "runs_project_status_updated_idx",
+        "runs_project_workflow_updated_idx",
+    } <= index_names(db, "runs")
+    assert {
+        "run_workspace_active_write_unique",
+        "run_workspace_lease_project_status_idx",
+    } <= index_names(db, "run_workspace_leases")
+    version_fk = next(
+        row
+        for row in db.execute("PRAGMA foreign_key_list(runs)").fetchall()
+        if row["from"] == "workflow_version_id"
+    )
+    assert version_fk["on_delete"] == "RESTRICT"
 
 
 def test_agent_output_events_has_unique_job_sequence_index() -> None:

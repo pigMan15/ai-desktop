@@ -1,7 +1,77 @@
 import sqlite3
 
 
+RUN_STATE_TABLES_CHILD_FIRST = (
+    "deployment_output_events",
+    "deployments",
+    "agent_output_events",
+    "agent_input_events",
+    "agent_sessions",
+    "agent_checkpoints",
+    "agent_jobs",
+    "terminal_output_events",
+    "terminal_sessions",
+    "gate_results",
+    "approvals",
+    "artifact_consumers",
+    "artifacts",
+    "run_projections",
+    "run_events",
+    "run_idempotency_keys",
+    "run_workspace_leases",
+    "runs",
+)
+
+
+def _table_exists(db: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _legacy_run_schema(db: sqlite3.Connection) -> bool:
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
+    return bool(columns) and "workflow_snapshot_json" not in columns
+
+
+def _clear_legacy_run_state(db: sqlite3.Connection) -> None:
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        if _table_exists(db, "audit_records"):
+            db.execute("DROP TRIGGER IF EXISTS audit_records_no_delete")
+            db.execute("DELETE FROM audit_records WHERE resource LIKE 'run:%'")
+        for table_name in RUN_STATE_TABLES_CHILD_FIRST:
+            db.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+        db.commit()
+    except Exception:
+        db.rollback()
+        db.execute("PRAGMA foreign_keys = ON")
+        raise
+
+
 def migrate(db: sqlite3.Connection) -> None:
+    rebuilding_run_state = _legacy_run_schema(db)
+    if rebuilding_run_state:
+        _clear_legacy_run_state(db)
+    try:
+        _migrate_schema(db)
+        if rebuilding_run_state:
+            violations = db.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError(
+                    f"foreign key violations after run-state rebuild: {violations!r}"
+                )
+    finally:
+        if rebuilding_run_state:
+            db.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_schema(db: sqlite3.Connection) -> None:
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS projects (
@@ -31,13 +101,39 @@ def migrate(db: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
             workflow_version_id TEXT NOT NULL,
+            workflow_snapshot_json TEXT NOT NULL DEFAULT '{}',
             title TEXT NOT NULL,
-            status TEXT NOT NULL,
             context_json TEXT NOT NULL,
+            execution_workspace TEXT NOT NULL DEFAULT '',
+            workspace_mode TEXT NOT NULL DEFAULT 'write'
+                CHECK (workspace_mode IN ('write', 'read')),
+            status TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-            FOREIGN KEY (workflow_version_id) REFERENCES workflow_versions(id) ON DELETE CASCADE
+            FOREIGN KEY (workflow_version_id) REFERENCES workflow_versions(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS run_workspace_leases (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+            workspace_path TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('write', 'read')),
+            status TEXT NOT NULL CHECK (status IN ('active', 'released', 'expired')),
+            acquired_at TEXT NOT NULL,
+            last_verified_at TEXT NOT NULL,
+            released_at TEXT,
+            release_reason TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS run_idempotency_keys (
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            idempotency_key TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+            request_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, idempotency_key)
         );
 
         CREATE TABLE IF NOT EXISTS run_events (
@@ -286,6 +382,22 @@ def migrate(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_agent_jobs_run_id
             ON agent_jobs(run_id);
+
+        CREATE INDEX IF NOT EXISTS runs_project_updated_idx
+            ON runs(project_id, updated_at DESC);
+
+        CREATE INDEX IF NOT EXISTS runs_project_status_updated_idx
+            ON runs(project_id, status, updated_at DESC);
+
+        CREATE INDEX IF NOT EXISTS runs_project_workflow_updated_idx
+            ON runs(project_id, workflow_version_id, updated_at DESC);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS run_workspace_active_write_unique
+            ON run_workspace_leases(project_id, workspace_path)
+            WHERE mode = 'write' AND status = 'active';
+
+        CREATE INDEX IF NOT EXISTS run_workspace_lease_project_status_idx
+            ON run_workspace_leases(project_id, status, workspace_path);
 
         CREATE INDEX IF NOT EXISTS idx_terminal_output_events_session_sequence
             ON terminal_output_events(session_id, sequence);
