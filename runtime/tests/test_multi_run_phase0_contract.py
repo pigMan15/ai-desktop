@@ -83,10 +83,6 @@ def two_projects_client(tmp_path):
     db.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="phase 1 project-scoped Runtime API and workspace leases are not implemented",
-)
 def test_project_scoped_run_lookup_hides_run_owned_by_another_project(two_projects_client) -> None:
     client, _project_a, project_b, run_a = two_projects_client
 
@@ -96,10 +92,6 @@ def test_project_scoped_run_lookup_hides_run_owned_by_another_project(two_projec
     assert response.json()["code"] == "RUN_NOT_FOUND_IN_PROJECT"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="phase 1 project-scoped Runtime API and workspace leases are not implemented",
-)
 def test_second_write_run_for_same_normalized_workspace_is_rejected(project_client) -> None:
     client, project_id, workflow_version_id, workspace = project_client
 
@@ -111,10 +103,6 @@ def test_second_write_run_for_same_normalized_workspace_is_rejected(project_clie
     assert second.json()["code"] == "WORKSPACE_LEASE_CONFLICT"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="phase 1 project-scoped Runtime API and workspace leases are not implemented",
-)
 def test_cleaned_run_link_returns_controlled_not_found(project_client) -> None:
     client, project_id, _workflow_version_id, _workspace = project_client
 

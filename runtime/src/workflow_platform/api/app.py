@@ -9,8 +9,9 @@ import sqlite3
 from typing import Any, Callable
 from secrets import compare_digest
 from threading import Lock
+from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ from workflow_platform.execution.diagnostics import diagnose_cli_provider
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
 from workflow_platform.runtime_service import WorkflowRuntimeService
+from workflow_platform.runtime_errors import RuntimeContractError
 from workflow_platform.terminals.redaction import redact_terminal_output
 
 
@@ -47,6 +49,29 @@ class CreateRunRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     executionWorkspace: str | None = None
     now: str
+
+
+class ScopedCreateRunRequest(BaseModel):
+    workflowVersionId: str
+    title: str = Field(min_length=1, max_length=120)
+    taskGoal: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    executionWorkspace: dict[str, str]
+    actor: dict[str, Any]
+    now: str | None = None
+
+
+class ScopedRunActionRequest(BaseModel):
+    actionId: str
+    expectedRevision: str
+    actor: dict[str, Any]
+    payload: dict[str, Any] | None = None
+    now: str | None = None
+
+
+class ReleaseWorkspaceRequest(BaseModel):
+    reason: str = Field(min_length=1)
+    now: str | None = None
 
 
 class SaveWorkflowVersionRequest(BaseModel):
@@ -317,6 +342,20 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.exception_handler(RuntimeContractError)
+    async def runtime_contract_error_handler(
+        request: Request, error: RuntimeContractError
+    ) -> JSONResponse:
+        correlation_id = request.headers.get("X-Correlation-Id") or str(uuid4())
+        content: dict[str, Any] = {
+            "code": error.code,
+            "message": error.message,
+            "correlationId": correlation_id,
+        }
+        if error.details is not None:
+            content["details"] = error.details
+        return JSONResponse(status_code=error.status, content=content)
 
     @application.middleware("http")
     async def require_local_runtime_token(request: Request, call_next: Callable):
@@ -805,6 +844,105 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise _http_error_from_value_error(error) from error
+
+    @application.post("/projects/{project_id}/runs", status_code=201)
+    def create_project_run(
+        project_id: str,
+        request: ScopedCreateRunRequest,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        service = _require_service(runtime_service)
+        workspace_path = request.executionWorkspace.get("path")
+        workspace_mode = request.executionWorkspace.get("mode")
+        if not workspace_path or workspace_mode not in {"write", "read"}:
+            raise RuntimeContractError(
+                "INVALID_REQUEST",
+                "executionWorkspace requires a path and valid mode",
+                status=400,
+            )
+        now = request.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        projection = service.create_run(
+            project_id,
+            request.workflowVersionId,
+            title=request.title,
+            task_goal=request.taskGoal,
+            parameters=request.parameters,
+            execution_workspace=workspace_path,
+            workspace_mode=workspace_mode,
+            actor=request.actor,
+            idempotency_key=idempotency_key,
+            now=now,
+        )
+        overview = service.get_scoped_overview(project_id, projection.runId)
+        return JSONResponse(
+            status_code=201,
+            content=overview,
+            headers={"Location": f"/projects/{project_id}/runs/{projection.runId}"},
+        )
+
+    @application.get("/projects/{project_id}/runs")
+    def list_project_runs(
+        project_id: str,
+        status: list[str] | None = Query(default=None),
+        workflowVersionId: str | None = None,
+        workspacePath: str | None = None,
+        q: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        try:
+            return service.list_project_runs(
+                project_id,
+                statuses=status or [],
+                workflow_version_id=workflowVersionId,
+                workspace_path=workspacePath,
+                query=q,
+                cursor=cursor,
+                limit=limit,
+            )
+        except ValueError as error:
+            raise RuntimeContractError(
+                "INVALID_REQUEST", str(error), status=400
+            ) from error
+
+    @application.get("/projects/{project_id}/runs/{run_id}")
+    def get_project_run(project_id: str, run_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_run(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/projection")
+    def get_project_run_projection(project_id: str, run_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_projection(
+            project_id, run_id
+        ).model_dump()
+
+    @application.get("/projects/{project_id}/runs/{run_id}/overview")
+    def get_project_run_overview(project_id: str, run_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_overview(project_id, run_id)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/actions")
+    def execute_project_run_action(
+        project_id: str, run_id: str, request: ScopedRunActionRequest
+    ) -> dict[str, Any]:
+        now = request.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return _require_service(runtime_service).execute_scoped_action(
+            project_id,
+            run_id,
+            action_id=request.actionId,
+            expected_revision=request.expectedRevision,
+            actor=request.actor,
+            payload=request.payload,
+            now=now,
+        ).model_dump()
+
+    @application.post("/projects/{project_id}/runs/{run_id}/workspace/release")
+    def release_project_run_workspace(
+        project_id: str, run_id: str, request: ReleaseWorkspaceRequest
+    ) -> dict[str, Any]:
+        now = request.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return _require_service(runtime_service).release_scoped_workspace(
+            project_id, run_id, reason=request.reason, now=now
+        )
 
     @application.post("/runs")
     def create_run(request: CreateRunRequest) -> dict[str, Any]:

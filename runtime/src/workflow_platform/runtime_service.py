@@ -55,6 +55,7 @@ class WorkflowRuntimeService:
         db: sqlite3.Connection,
         *,
         agent_provider_factory: Callable[[str], CliProvider] | None = None,
+        maintenance_mode: bool = False,
     ) -> None:
         self._db = db
         self._projects = ProjectRepository(db)
@@ -81,6 +82,7 @@ class WorkflowRuntimeService:
         self._knowledge = LocalKnowledgeService(db, self._audit, lock=self._lock)
         self._adapter_registry = default_registry()
         self._agent_provider_factory = agent_provider_factory or _default_agent_provider
+        self._maintenance_mode = maintenance_mode
         self._agent_executors: dict[str, CliAgentExecutor] = {}
         self._interactive_desktop_sessions: dict[str, str] = {}
         self._deploy_executors: dict[str, DeployExecutor] = {}
@@ -178,6 +180,12 @@ class WorkflowRuntimeService:
         idempotency_key: str | None = None,
         now: str,
     ) -> RunProjection:
+        if self._maintenance_mode:
+            raise RuntimeContractError(
+                "RUN_REARCHITECTURE_MAINTENANCE",
+                "Runtime is temporarily unavailable during Run migration",
+                status=503,
+            )
         if not 1 <= len(title) <= 120:
             raise RuntimeContractError(
                 "INVALID_REQUEST",
@@ -325,8 +333,9 @@ class WorkflowRuntimeService:
         context = {
             "taskGoal": normalized_task_goal,
             "parameters": normalized_parameters,
-            "executionWorkspace": workspace,
         }
+        if execution_workspace:
+            context["executionWorkspace"] = workspace
         created_event = RunEvent(
             id=f"{run_id}:event:1",
             runId=run_id,
@@ -393,6 +402,142 @@ class WorkflowRuntimeService:
             )
 
         return projection
+
+    def get_scoped_run(self, project_id: str, run_id: str) -> dict:
+        run = self._runs.get(project_id, run_id)
+        if run is None:
+            raise RuntimeContractError(
+                "RUN_NOT_FOUND_IN_PROJECT",
+                "Run was not found in this project",
+                status=404,
+            )
+        return run
+
+    def list_project_runs(
+        self,
+        project_id: str,
+        *,
+        statuses: list[str],
+        workflow_version_id: str | None,
+        workspace_path: str | None,
+        query: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict:
+        if not self._projects.exists(project_id):
+            raise RuntimeContractError(
+                "RUN_NOT_FOUND_IN_PROJECT",
+                "Project was not found",
+                status=404,
+            )
+        return self._runs.list_summaries(
+            project_id,
+            statuses=statuses,
+            workflow_version_id=workflow_version_id,
+            workspace_path=workspace_path,
+            query=query,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def get_scoped_projection(self, project_id: str, run_id: str) -> RunProjection:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_projection(run_id)
+
+    def get_scoped_overview(self, project_id: str, run_id: str) -> dict:
+        run = self.get_scoped_run(project_id, run_id)
+        projection = self.get_projection(run_id)
+        lease = self._workspace_leases.get_for_run(run_id)
+        return {"run": run, "projection": projection.model_dump(), "workspace": lease}
+
+    def execute_scoped_action(
+        self,
+        project_id: str,
+        run_id: str,
+        *,
+        action_id: str,
+        expected_revision: str,
+        actor: dict,
+        payload: dict | None,
+        now: str,
+    ) -> RunProjection:
+        projection = self.get_scoped_projection(project_id, run_id)
+        if projection.revision != expected_revision:
+            raise RuntimeContractError(
+                "REVISION_CONFLICT",
+                "Run revision does not match the current projection",
+                status=409,
+                details={"currentRevision": projection.revision},
+            )
+        action = next(
+            (candidate for candidate in projection.allowedActions if candidate.id == action_id),
+            None,
+        )
+        if action is None:
+            raise RuntimeContractError(
+                "INVALID_REQUEST", "Action is not currently allowed", status=409
+            )
+        return self.transition_run(
+            run_id,
+            action.eventType,
+            node_id=action.nodeId,
+            actor=actor,
+            payload=payload,
+            expected_revision=expected_revision,
+            now=now,
+        )
+
+    def release_scoped_workspace(
+        self, project_id: str, run_id: str, *, reason: str, now: str
+    ) -> dict:
+        projection = self.get_scoped_projection(project_id, run_id)
+        if projection.status not in {"DONE", "ARCHIVED"}:
+            raise RuntimeContractError(
+                "WORKSPACE_LEASE_RELEASE_REJECTED",
+                "Run is not in a terminal state",
+                status=409,
+            )
+        active_agents = [
+            job for job in self._agent_jobs.list_for_run(run_id)
+            if job["status"] in {"QUEUED", "RUNNING"}
+        ]
+        active_terminals = [
+            session for session in self._terminals.list_for_run(run_id)
+            if session["status"].lower() in {"queued", "running"}
+        ]
+        active_deployments = [
+            deployment for deployment in self._deployments.list_for_run(run_id)
+            if deployment["status"] in {"QUEUED", "RUNNING"}
+        ]
+        if active_agents or active_terminals or active_deployments:
+            raise RuntimeContractError(
+                "WORKSPACE_LEASE_RELEASE_REJECTED",
+                "Run still has active execution resources",
+                status=409,
+                details={
+                    "activeAgentCount": len(active_agents),
+                    "activeTerminalCount": len(active_terminals),
+                    "activeDeploymentCount": len(active_deployments),
+                },
+            )
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._workspace_leases.transition(
+                    run_id,
+                    status="released",
+                    reason=reason,
+                    transitioned_at=now,
+                )
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+        lease = self._workspace_leases.get_for_run(run_id)
+        if lease is None:
+            raise RuntimeError("Workspace lease disappeared after release")
+        return lease
 
     def list_workflows(self) -> list[dict]:
         return [
