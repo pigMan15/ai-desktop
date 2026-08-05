@@ -76,12 +76,109 @@ def two_projects_client(tmp_path):
 
 
 def test_project_scoped_run_lookup_hides_run_owned_by_another_project(two_projects_client) -> None:
-    client, _project_a, project_b, run_a = two_projects_client
+    client, project_a, project_b, run_a = two_projects_client
+    projection_before = client.get(
+        f"/projects/{project_a}/runs/{run_a}/projection"
+    ).json()
 
     response = client.get(f"/projects/{project_b}/runs/{run_a}/overview")
+    action = client.post(
+        f"/projects/{project_b}/runs/{run_a}/actions",
+        json={
+            "actionId": projection_before["allowedActions"][0]["id"],
+            "expectedRevision": projection_before["revision"],
+            "actor": ACTOR,
+            "now": NOW,
+        },
+    )
+    projection_after = client.get(
+        f"/projects/{project_a}/runs/{run_a}/projection"
+    ).json()
 
     assert response.status_code == 404
     assert response.json()["code"] == "RUN_NOT_FOUND_IN_PROJECT"
+    assert action.status_code == 404
+    assert action.json()["code"] == "RUN_NOT_FOUND_IN_PROJECT"
+    assert projection_after == projection_before
+
+
+def test_scoped_action_revision_conflict_does_not_write(project_client) -> None:
+    client, project_id, workflow_version_id, workspace = project_client
+    created = create_scoped_run(
+        client, project_id, workflow_version_id, workspace, "revision-conflict"
+    )
+    projection_before = created.json()["projection"]
+
+    response = client.post(
+        f"/projects/{project_id}/runs/{projection_before['runId']}/actions",
+        json={
+            "actionId": projection_before["allowedActions"][0]["id"],
+            "expectedRevision": "999",
+            "actor": ACTOR,
+            "now": NOW,
+        },
+    )
+    projection_after = client.get(
+        f"/projects/{project_id}/runs/{projection_before['runId']}/projection"
+    ).json()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "REVISION_CONFLICT"
+    assert projection_after == projection_before
+
+
+def test_scoped_action_rejects_an_archived_run_with_canonical_error(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    client = TestClient(create_app(service))
+    imported = import_project(client, tmp_path, "archived-run-project")
+    workspace = tmp_path / "archived-run-project"
+    created = create_scoped_run(
+        client,
+        imported["projectId"],
+        imported["workflowVersionId"],
+        workspace,
+        "archived-run",
+    ).json()["projection"]
+    started = service.transition_run(
+        created["runId"],
+        "NODE_STARTED",
+        node_id="plan",
+        actor=ACTOR,
+        expected_revision=created["revision"],
+        now=NOW,
+    )
+    blocked = service.transition_run(
+        created["runId"],
+        "NODE_FAILED",
+        node_id="plan",
+        actor=ACTOR,
+        expected_revision=started.revision,
+        now=NOW,
+    )
+    archived = service.execute_scoped_action(
+        imported["projectId"],
+        created["runId"],
+        action_id="run-archive",
+        expected_revision=blocked.revision,
+        actor=ACTOR,
+        payload=None,
+        now=NOW,
+    )
+
+    response = client.post(
+        f"/projects/{imported['projectId']}/runs/{created['runId']}/actions",
+        json={
+            "actionId": "run-archive",
+            "expectedRevision": archived["projection"]["revision"],
+            "actor": ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "RUN_ARCHIVED"
 
 
 def test_second_write_run_for_same_normalized_workspace_is_rejected(project_client) -> None:
@@ -169,7 +266,10 @@ def test_legacy_core_run_routes_are_absent_and_scoped_routes_work(project_client
     assert overview.status_code == 200
     assert overview.json()["projection"]["runId"] == run_id
     assert action.status_code == 200
-    assert action.json()["revision"] != projection["revision"]
+    assert action.json()["projection"]["revision"] != projection["revision"]
+    emitted_event = action.json()["emittedEvents"][0]
+    assert emitted_event["revision"] == action.json()["projection"]["revision"]
+    assert emitted_event["type"] == projection["allowedActions"][0]["eventType"]
 
     legacy_responses = [
         client.post("/runs", json={}),

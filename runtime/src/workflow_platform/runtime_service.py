@@ -22,7 +22,14 @@ from workflow_platform.governance.audit import AuditLog
 from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
 from workflow_platform.knowledge.service import LocalKnowledgeService
-from workflow_platform.models import Actor, Role, RunEvent, RunProjection, WorkflowDefinition
+from workflow_platform.models import (
+    Actor,
+    AllowedAction,
+    Role,
+    RunEvent,
+    RunProjection,
+    WorkflowDefinition,
+)
 from workflow_platform.terminals.redaction import normalize_terminal_output, redact_terminal_output
 from workflow_platform.persistence.repositories import (
     AgentCheckpointRepository,
@@ -473,10 +480,29 @@ class WorkflowRuntimeService:
         return self.get_projection(run_id)
 
     def get_scoped_overview(self, project_id: str, run_id: str) -> dict:
-        run = self.get_scoped_run(project_id, run_id)
-        projection = self.get_projection(run_id)
-        lease = self._workspace_leases.get_for_run(run_id)
-        return {"run": run, "projection": projection.model_dump(), "workspace": lease}
+        with self._lock:
+            run = self.get_scoped_run(project_id, run_id)
+            projection = self.get_projection(run_id)
+            lease = self._workspace_leases.get_for_run(run_id)
+            events = self._events.list_for_run(run_id)
+            activity = {
+                "activeAgentCount": sum(
+                    job["status"] in {"QUEUED", "RUNNING"}
+                    for job in self._agent_jobs.list_for_run(run_id)
+                ),
+                "activeDeploymentCount": sum(
+                    deployment["status"] in {"QUEUED", "RUNNING"}
+                    for deployment in self._deployments.list_for_run(run_id)
+                ),
+                "lastEventAt": events[-1].createdAt if events else None,
+            }
+            return {
+                "run": run,
+                "projection": projection.model_dump(),
+                "workflow": run["workflowSnapshot"],
+                "workspace": lease,
+                "activity": activity,
+            }
 
     def execute_scoped_action(
         self,
@@ -488,22 +514,129 @@ class WorkflowRuntimeService:
         actor: dict,
         payload: dict | None,
         now: str,
-    ) -> RunProjection:
-        projection = self.get_scoped_projection(project_id, run_id)
-        if projection.revision != expected_revision:
-            raise RuntimeContractError(
-                "REVISION_CONFLICT",
-                "Run revision does not match the current projection",
-                status=409,
-                details={"currentRevision": projection.revision},
+    ) -> dict:
+        with self._lock:
+            projection = self.get_scoped_projection(project_id, run_id)
+            if self._projects.is_archived(project_id):
+                raise RuntimeContractError(
+                    "PROJECT_ARCHIVED", "Project is archived", status=409
+                )
+            if projection.status == "ARCHIVED":
+                raise RuntimeContractError("RUN_ARCHIVED", "Run is archived", status=409)
+            if projection.revision != expected_revision:
+                raise RuntimeContractError(
+                    "REVISION_CONFLICT",
+                    "Run revision does not match the current projection",
+                    status=409,
+                    details={"currentRevision": projection.revision},
+                )
+            action = next(
+                (
+                    candidate
+                    for candidate in projection.allowedActions
+                    if candidate.id == action_id
+                ),
+                None,
             )
-        action = next(
-            (candidate for candidate in projection.allowedActions if candidate.id == action_id),
-            None,
-        )
-        if action is None:
-            raise RuntimeContractError(
-                "INVALID_REQUEST", "Action is not currently allowed", status=409
+            if action is None:
+                raise RuntimeContractError(
+                    "INVALID_REQUEST", "Action is not currently allowed", status=409
+                )
+
+            next_projection = self._execute_authorized_action(
+                run_id,
+                action=action,
+                actor=actor,
+                payload=payload or {},
+                expected_revision=expected_revision,
+                now=now,
+            )
+            emitted_events = [
+                event.model_dump()
+                for event in self._events.list_for_run(run_id)
+                if int(expected_revision)
+                < int(event.revision)
+                <= int(next_projection.revision)
+            ]
+            return {
+                "projection": next_projection.model_dump(),
+                "emittedEvents": emitted_events,
+            }
+
+    def _execute_authorized_action(
+        self,
+        run_id: str,
+        *,
+        action: AllowedAction,
+        actor: dict,
+        payload: dict,
+        expected_revision: str,
+        now: str,
+    ) -> RunProjection:
+        if action.eventType == "ARTIFACT_SUBMITTED":
+            return self.submit_artifact(
+                run_id,
+                node_id=self._required_action_node_id(action),
+                artifact_path=Path(
+                    self._required_action_payload_string(payload, "artifactPath")
+                ),
+                artifact_type=self._required_action_payload_string(
+                    payload, "artifactType"
+                ),
+                artifact_spec_id=self._optional_action_payload_string(
+                    payload, "artifactSpecId"
+                ),
+                actor=actor,
+                expected_revision=expected_revision,
+                now=now,
+            )
+        if action.eventType in {
+            "HUMAN_APPROVED",
+            "HUMAN_REJECTED",
+            "HUMAN_DEFERRED",
+        }:
+            decision = {
+                "HUMAN_APPROVED": "approved",
+                "HUMAN_REJECTED": "rejected",
+                "HUMAN_DEFERRED": "deferred",
+            }[action.eventType]
+            return self.decide_approval(
+                run_id,
+                node_id=self._required_action_node_id(action),
+                decision=decision,
+                actor=actor,
+                comment=self._optional_action_payload_string(payload, "comment"),
+                expected_revision=expected_revision,
+                now=now,
+            )
+        if action.eventType in {"GATE_PASSED", "GATE_FAILED", "GATE_WAIVED"}:
+            node_id = self._required_action_node_id(action)
+            if "gateId" in payload:
+                raise RuntimeContractError(
+                    "INVALID_REQUEST",
+                    "Gate identity is derived from the authorized workflow node",
+                    status=400,
+                )
+            status = {
+                "GATE_PASSED": "passed",
+                "GATE_FAILED": "failed",
+                "GATE_WAIVED": "waived",
+            }[action.eventType]
+            return self.submit_gate_result(
+                run_id,
+                node_id=node_id,
+                gate_id=self._single_gate_id_for_node(run_id, node_id),
+                status=status,
+                evidence=self._action_evidence(payload),
+                waiver_reason=self._optional_action_payload_string(
+                    payload, "waiverReason"
+                ),
+                failure_reason=self._optional_action_payload_string(
+                    payload, "failureReason"
+                ),
+                actor=actor,
+                expected_revision=expected_revision,
+                now=now,
             )
         return self.transition_run(
             run_id,
@@ -514,6 +647,61 @@ class WorkflowRuntimeService:
             expected_revision=expected_revision,
             now=now,
         )
+
+    @staticmethod
+    def _required_action_node_id(action: AllowedAction) -> str:
+        if action.nodeId is None:
+            raise RuntimeContractError(
+                "INVALID_REQUEST", "Action requires a node ID", status=400
+            )
+        return action.nodeId
+
+    @staticmethod
+    def _required_action_payload_string(payload: dict, name: str) -> str:
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeContractError(
+                "INVALID_REQUEST", f"Action payload requires {name}", status=400
+            )
+        return value.strip()
+
+    @staticmethod
+    def _optional_action_payload_string(payload: dict, name: str) -> str | None:
+        value = payload.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeContractError(
+                "INVALID_REQUEST", f"Action payload {name} must be a string", status=400
+            )
+        return value.strip()
+
+    def _single_gate_id_for_node(self, run_id: str, node_id: str) -> str:
+        workflow = self._runs.workflow_for_run(run_id)
+        node = next(
+            (candidate for candidate in workflow.nodes if candidate.id == node_id),
+            None,
+        )
+        if node is None or len(node.gates) != 1:
+            raise RuntimeContractError(
+                "INVALID_REQUEST",
+                "Gate action requires gateId when the node does not have exactly one gate",
+                status=400,
+            )
+        return node.gates[0]
+
+    def _action_evidence(self, payload: dict) -> list[str]:
+        evidence = payload.get("evidence")
+        if evidence is None:
+            evidence_uri = self._optional_action_payload_string(payload, "evidenceUri")
+            return [evidence_uri] if evidence_uri else []
+        if not isinstance(evidence, list) or not all(
+            isinstance(item, str) and item.strip() for item in evidence
+        ):
+            raise RuntimeContractError(
+                "INVALID_REQUEST", "Action payload evidence must be a string array", status=400
+            )
+        return [item.strip() for item in evidence]
 
     def release_scoped_workspace(
         self, project_id: str, run_id: str, *, reason: str, now: str

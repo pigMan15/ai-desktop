@@ -956,15 +956,21 @@ def create_app(
         project_id: str, run_id: str, request: ScopedRunActionRequest
     ) -> dict[str, Any]:
         now = request.now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        return _require_service(runtime_service).execute_scoped_action(
-            project_id,
-            run_id,
-            action_id=request.actionId,
-            expected_revision=request.expectedRevision,
-            actor=request.actor,
-            payload=request.payload,
-            now=now,
-        ).model_dump()
+        service = _require_service(runtime_service)
+        try:
+            return service.execute_scoped_action(
+                project_id,
+                run_id,
+                action_id=request.actionId,
+                expected_revision=request.expectedRevision,
+                actor=request.actor,
+                payload=request.payload,
+                now=now,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
 
     @application.post("/projects/{project_id}/runs/{run_id}/workspace/release")
     def release_project_run_workspace(

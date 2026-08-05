@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from shutil import copytree, rmtree
 import sys
-from threading import Lock
+from threading import Event, Lock, Thread, current_thread
 from time import monotonic, sleep
 
 import pytest
@@ -12,6 +12,10 @@ from workflow_platform.execution.providers import CliCommand, CodexCliProvider
 from workflow_platform.models import Actor, Role, RunProjection, WorkflowDefinition, WorkflowNode
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
+from workflow_platform.persistence.repositories import (
+    AgentJobRepository,
+    DeploymentRepository,
+)
 from workflow_platform.runtime_errors import RuntimeContractError
 from workflow_platform.runtime_service import (
     WorkflowRuntimeService,
@@ -304,6 +308,116 @@ def test_runs_use_the_requested_project_binding_and_reject_versions_from_another
             title="cross-project",
             now="2026-08-04T00:02:00Z",
         )
+
+
+def test_scoped_overview_includes_snapshot_workspace_and_active_run_activity(
+    tmp_path: Path,
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path / "project")
+    imported = service.import_project(project_path, now=NOW)
+    projection = service.create_run(
+        imported["projectId"],
+        imported["workflowVersionId"],
+        title="Overview run",
+        execution_workspace=str(project_path),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="overview-run",
+        now=NOW,
+    )
+    AgentJobRepository(db).create(
+        id="job-running",
+        run_id=projection.runId,
+        node_id="plan",
+        provider="fake",
+        status="RUNNING",
+        command=["fake"],
+        cwd=str(project_path),
+        created_at=NOW,
+    )
+    DeploymentRepository(db).create(
+        id="deployment-queued",
+        run_id=projection.runId,
+        node_id="deploy",
+        command=["fake"],
+        cwd=str(project_path),
+        created_at=NOW,
+    )
+
+    overview = service.get_scoped_overview(imported["projectId"], projection.runId)
+
+    assert overview["run"]["id"] == projection.runId
+    assert overview["workflow"] == overview["run"]["workflowSnapshot"]
+    assert overview["workspace"]["runId"] == projection.runId
+    assert overview["activity"] == {
+        "activeAgentCount": 1,
+        "activeDeploymentCount": 1,
+        "lastEventAt": NOW,
+    }
+
+
+def test_scoped_overview_is_a_consistent_snapshot_during_a_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    project_path = copy_harness_project(tmp_path / "project")
+    imported = service.import_project(project_path, now=NOW)
+    projection = service.create_run(
+        imported["projectId"],
+        imported["workflowVersionId"],
+        title="Concurrent overview",
+        execution_workspace=str(project_path),
+        workspace_mode="write",
+        actor=trusted_human(),
+        idempotency_key="concurrent-overview",
+        now=NOW,
+    )
+    action = next(
+        candidate
+        for candidate in projection.allowedActions
+        if candidate.eventType == "NODE_STARTED"
+    )
+    original_list_for_run = service._events.list_for_run
+    caller = current_thread()
+    transition_finished = Event()
+    transition_thread: list[Thread] = []
+    triggered = False
+
+    def start_interleaving_transition(run_id: str):
+        nonlocal triggered
+        if current_thread() is caller and not triggered:
+            triggered = True
+
+            def execute() -> None:
+                service.execute_scoped_action(
+                    imported["projectId"],
+                    run_id,
+                    action_id=action.id,
+                    expected_revision=projection.revision,
+                    actor=AGENT_ACTOR,
+                    payload=None,
+                    now="2026-07-27T13:01:00Z",
+                )
+                transition_finished.set()
+
+            worker = Thread(target=execute)
+            transition_thread.append(worker)
+            worker.start()
+            transition_finished.wait(timeout=2)
+        return original_list_for_run(run_id)
+
+    monkeypatch.setattr(service._events, "list_for_run", start_interleaving_transition)
+
+    overview = service.get_scoped_overview(imported["projectId"], projection.runId)
+    transition_thread[0].join(timeout=2)
+
+    assert not transition_thread[0].is_alive()
+    assert overview["activity"]["lastEventAt"] == overview["projection"]["updatedAt"]
 
 
 def test_atomic_run_creation_allows_only_one_write_lease(tmp_path: Path) -> None:

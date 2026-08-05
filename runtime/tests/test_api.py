@@ -143,7 +143,178 @@ def execute_scoped_action(
         },
     )
     assert response.status_code == 200
-    return {**response.json(), "projectId": run["projectId"]}
+    return {**response.json()["projection"], "projectId": run["projectId"]}
+
+
+def test_runtime_api_scoped_action_returns_projection_and_emitted_events(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    action = next(
+        candidate
+        for candidate in run["allowedActions"]
+        if candidate["eventType"] == "NODE_STARTED" and candidate.get("nodeId") == "plan"
+    )
+
+    response = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
+        json={
+            "actionId": action["id"],
+            "expectedRevision": run["revision"],
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"projection", "emittedEvents"}
+    assert len(response.json()["emittedEvents"]) == 1
+    emitted_event = response.json()["emittedEvents"][0]
+    assert emitted_event["revision"] == response.json()["projection"]["revision"]
+    assert emitted_event["type"] == action["eventType"]
+
+
+def test_runtime_api_scoped_action_does_not_include_a_later_transition(
+    tmp_path, monkeypatch
+) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    client = TestClient(create_app(service))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    original_timeline = service.timeline
+
+    def timeline_after_pause(run_id: str) -> list[dict]:
+        current = service.get_projection(run_id)
+        pause = next(
+            action for action in current.allowedActions if action.eventType == "RUN_PAUSED"
+        )
+        service.execute_scoped_action(
+            run["projectId"],
+            run_id,
+            action_id=pause.id,
+            expected_revision=current.revision,
+            actor=HUMAN_ACTOR,
+            payload=None,
+            now="2026-07-27T13:01:00Z",
+        )
+        return original_timeline(run_id)
+
+    monkeypatch.setattr(service, "timeline", timeline_after_pause)
+    action = next(
+        candidate
+        for candidate in run["allowedActions"]
+        if candidate["eventType"] == "NODE_STARTED"
+    )
+
+    response = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
+        json={
+            "actionId": action["id"],
+            "expectedRevision": run["revision"],
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["emittedEvents"]) == 1
+    assert response.json()["emittedEvents"][0]["revision"] == response.json()["projection"]["revision"]
+
+
+def test_runtime_api_scoped_artifact_action_uses_typed_artifact_service(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    project_path, run = import_project_and_create_run(client, tmp_path)
+    started = execute_scoped_action(
+        client,
+        run,
+        event_type="NODE_STARTED",
+        node_id="plan",
+        actor=AGENT_ACTOR,
+        expected_revision=run["revision"],
+    )
+    artifact_path = project_path / "scoped-plan.md"
+    artifact_path.write_text("Scoped plan", encoding="utf-8")
+    action = next(
+        candidate
+        for candidate in started["allowedActions"]
+        if candidate["eventType"] == "ARTIFACT_SUBMITTED"
+    )
+
+    response = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
+        json={
+            "actionId": action["id"],
+            "expectedRevision": started["revision"],
+            "actor": AGENT_ACTOR,
+            "payload": {
+                "artifactPath": str(artifact_path),
+                "artifactType": "plan",
+            },
+            "now": NOW,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["emittedEvents"][0]["type"] == "ARTIFACT_SUBMITTED"
+    artifacts = client.get(f"/runs/{run['runId']}/artifacts").json()
+    assert artifacts[0]["uri"] == artifact_path.resolve().as_uri()
+    approval_action = next(
+        candidate
+        for candidate in response.json()["projection"]["allowedActions"]
+        if candidate["eventType"] == "HUMAN_APPROVED"
+    )
+    approved = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
+        json={
+            "actionId": approval_action["id"],
+            "expectedRevision": response.json()["projection"]["revision"],
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+
+    assert approved.status_code == 200
+    assert approved.json()["emittedEvents"][0]["type"] == "HUMAN_APPROVED"
+    assert client.get(f"/runs/{run['runId']}/approvals").json()[0]["status"] == "approved"
+    gate_action = next(
+        candidate
+        for candidate in approved.json()["projection"]["allowedActions"]
+        if candidate["eventType"] == "GATE_PASSED"
+    )
+    spoofed_gate = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
+        json={
+            "actionId": gate_action["id"],
+            "expectedRevision": approved.json()["projection"]["revision"],
+            "actor": VERIFIER_ACTOR,
+            "payload": {
+                "gateId": "spoofed-gate",
+                "evidenceUri": artifact_path.resolve().as_uri(),
+            },
+            "now": NOW,
+        },
+    )
+
+    assert spoofed_gate.status_code == 400
+    assert client.get(f"/runs/{run['runId']}/gates").json() == []
+    gated = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
+        json={
+            "actionId": gate_action["id"],
+            "expectedRevision": approved.json()["projection"]["revision"],
+            "actor": VERIFIER_ACTOR,
+            "payload": {"evidenceUri": artifact_path.resolve().as_uri()},
+            "now": NOW,
+        },
+    )
+
+    assert gated.status_code == 200
+    assert gated.json()["emittedEvents"][0]["type"] == "GATE_PASSED"
+    assert client.get(f"/runs/{run['runId']}/gates").json()[0]["status"] == "passed"
 
 
 def test_runtime_api_persists_run_objective_and_parameters(tmp_path) -> None:
