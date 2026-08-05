@@ -21,7 +21,7 @@ vi.mock("../features/terminal/TerminalViewport", () => ({
 
 import { App } from "./App";
 import { routes } from "./routes";
-import { saveWorkspaceSession } from "./workspaceSession";
+import { loadWorkspaceSession, saveWorkspaceSession } from "./workspaceSession";
 
 afterEach(() => {
   cleanup();
@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 beforeEach(() => {
-  window.location.hash = "#/runs";
+  window.location.hash = "#/runs/run-demo";
 });
 
 const navLabels = [
@@ -53,6 +53,230 @@ const navLabels = [
 ];
 
 describe("App", () => {
+  it("loads only project-scoped summaries on the Run list route", async () => {
+    window.location.hash = "#/runs";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "saved-run",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      calls.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") {
+        return jsonResponse({
+          projectId: "project-1",
+          workflowId: "workflow-1",
+          workflowVersionId: "workflow-version-1",
+          actor: { id: "renderer-human" },
+          boundAt: "2026-08-06T00:00:00Z",
+          workflowBindingStatus: "bound",
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs") {
+        return jsonResponse({ items: [runSummary()], nextCursor: null });
+      }
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText("Project scoped Run")).toBeInTheDocument();
+    expect(calls).toContain("/projects/project-1/runs?limit=20");
+    const detailCalls = calls.filter((path) =>
+      path.startsWith("/runs/") || /^\/projects\/project-1\/runs\/[^?]/.test(path));
+    expect(detailCalls).toEqual([]);
+    expect(calls.some((path) => path.includes("/workflow-versions/workflow-version-1/runs"))).toBe(false);
+  });
+
+  it("creates a project-scoped Run and navigates to its stable detail route", async () => {
+    window.location.hash = "#/runs";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: null,
+    });
+    (window as typeof window & { workflowGit?: unknown }).workflowGit = {
+      status: vi.fn().mockResolvedValue({
+        rootPath: "G:\\Project\\demo",
+        branch: "main",
+        detachedHead: false,
+        dirty: false,
+        changes: [],
+      }),
+      listWorktrees: vi.fn().mockResolvedValue([
+        { path: "G:\\Project\\demo", branch: "main", head: "abc", bare: false },
+      ]),
+      createWorktree: vi.fn(),
+      removeWorktree: vi.fn(),
+      mergeBack: vi.fn(),
+      push: vi.fn(),
+      previewKnowledgeDocument: vi.fn(),
+      publishKnowledgeDocument: vi.fn(),
+    };
+    let createRequest: { method?: string; headers?: HeadersInit; body?: BodyInit | null } | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") {
+        return jsonResponse({
+          projectId: "project-1",
+          workflowId: "workflow-1",
+          workflowVersionId: "workflow-version-1",
+          actor: { id: "renderer-human" },
+          boundAt: "2026-08-06T00:00:00Z",
+          workflowBindingStatus: "bound",
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs" && init?.method === "POST") {
+        createRequest = init;
+        return jsonResponse({ run: { id: "run created" }, projection: {}, workspace: {} });
+      }
+      if (url.pathname === "/projects/project-1/runs") return jsonResponse({ items: [], nextCursor: null });
+      if (url.pathname === "/runs/run%20created/projection") return jsonResponse(projection("run created", "1", "CREATED"));
+      if (url.pathname.startsWith("/runs/run%20created/")) return jsonResponse([]);
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "新建 Run" }))[0]);
+    fireEvent.change(await screen.findByLabelText("Run 名称"), { target: { value: "Scoped creation" } });
+    const createButton = screen.getByRole("button", { name: "创建 Run" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    fireEvent.click(createButton);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/runs/run%20created"));
+    expect(createRequest?.method).toBe("POST");
+    expect(new Headers(createRequest?.headers).get("Idempotency-Key")).toBeTruthy();
+    expect(JSON.parse(String(createRequest?.body))).toMatchObject({
+      workflowVersionId: "workflow-version-1",
+      title: "Scoped creation",
+      executionWorkspace: { path: "G:\\Project\\demo", mode: "write" },
+    });
+    expect(loadWorkspaceSession().runId).toBe("run created");
+  });
+
+  it("uses the detail route Run ID instead of the previously saved Run", async () => {
+    window.location.hash = "#/runs/url-run";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "saved-run",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      calls.push(url.pathname);
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname.endsWith("/projection")) {
+        const runId = url.pathname.includes("url-run") ? "url-run" : "saved-run";
+        return jsonResponse(projection(runId, "1", "CREATED"));
+      }
+      if (url.pathname.endsWith("/timeline") || url.pathname.endsWith("/artifacts") || url.pathname.endsWith("/approvals") || url.pathname.endsWith("/gates") || url.pathname.endsWith("/agents")) return jsonResponse([]);
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+
+    await waitFor(() => expect(calls).toContain("/runs/url-run/projection"));
+    expect(calls).not.toContain("/runs/saved-run/projection");
+    await waitFor(() => expect(loadWorkspaceSession().runId).toBe("url-run"));
+  });
+
+  it("reloads the scoped Run list after leaving and returning to the route", async () => {
+    window.location.hash = "#/runs";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: null,
+    });
+    let listCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/projects/project-1/runs") {
+        listCount += 1;
+        return jsonResponse({ items: [], nextCursor: null });
+      }
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(listCount).toBe(1));
+    window.location.hash = "#/projects";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await screen.findByRole("heading", { name: "项目工作区" });
+    window.location.hash = "#/runs";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+    await waitFor(() => expect(listCount).toBe(2));
+  });
+
+  it("retains scoped Run rows and refresh time after a refresh failure", async () => {
+    window.location.hash = "#/runs";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: null,
+    });
+    let listCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/projects/project-1/runs") {
+        listCount += 1;
+        if (listCount > 1) {
+          return new Response(JSON.stringify({
+            code: "RUN_REARCHITECTURE_MAINTENANCE",
+            message: "Maintenance",
+            correlationId: "correlation-refresh",
+          }), { status: 503 });
+        }
+        return jsonResponse({ items: [runSummary()], nextCursor: null });
+      }
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    expect(await screen.findByText("Project scoped Run")).toBeInTheDocument();
+    expect(screen.getByText(/上次刷新/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Run 列表" }));
+
+    expect(await screen.findByText("correlation-refresh")).toBeInTheDocument();
+    expect(screen.getByText("Project scoped Run")).toBeInTheDocument();
+    expect(screen.getByText(/上次刷新/)).toBeInTheDocument();
+  });
+
   it("shows only the selected hash route and responds to browser history", async () => {
     window.location.hash = "#/projects";
     render(<App />);
@@ -101,6 +325,7 @@ describe("App", () => {
   });
 
   it("loads the project workflow binding when restoring directly into runs", async () => {
+    window.location.hash = "#/runs/run-restored";
     const calls: string[] = [];
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
@@ -166,6 +391,7 @@ describe("App", () => {
           return jsonResponse({ projectId: "project-unbound", workflowVersionId: null, workflowBindingStatus: "unbound" });
         }
         if (url.pathname === "/projects/project-unbound/workflow-binding") return jsonResponse(null);
+        if (url.pathname === "/projects/project-unbound/runs") return jsonResponse({ items: [], nextCursor: null });
         if (url.pathname === "/workflows" || url.pathname === "/agents/providers") return jsonResponse([]);
         return jsonResponse([]);
       }),
@@ -179,8 +405,9 @@ describe("App", () => {
 
     window.location.hash = "#/runs";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
-    expect(await screen.findByText("请先为项目选择并绑定工作流，再创建 Run。")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "创建 Run" })).not.toBeInTheDocument();
+    fireEvent.click((await screen.findAllByRole("button", { name: "新建 Run" }))[0]);
+    expect(await screen.findByText("当前项目尚未绑定工作流")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "前往工作流库" })).toBeInTheDocument();
   });
 
   it("isolates a new workflow draft from the previously selected workflow version", async () => {
@@ -448,6 +675,7 @@ describe("App", () => {
   });
 
   it("keeps the Runtime connected when restoring a stale saved Run fails", async () => {
+    window.location.hash = "#/runs/run-missing";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
@@ -784,7 +1012,7 @@ describe("App", () => {
   });
 
   it("switches between persisted Runs by reloading the selected Runtime projection", async () => {
-    window.location.hash = "#/runs";
+    window.location.hash = "#/runs/run-2";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
@@ -839,7 +1067,7 @@ describe("App", () => {
   });
 
   it("clears the previous Run's Agent terminal while an empty Run is loading", async () => {
-    window.location.hash = "#/runs";
+    window.location.hash = "#/runs/run-with-agent";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
@@ -1235,18 +1463,9 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "导入项目" }));
     expect(await screen.findByText("Demo Workflow")).toBeInTheDocument();
 
-    window.location.hash = "#/runs";
+    window.location.hash = "#/runs/run-demo";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
-    fireEvent.change(await screen.findByLabelText("Run 名称"), {
-      target: { value: "中文交互 Run" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "创建 Run" }));
-    expect(await screen.findByText("Run 已创建：run-demo")).toBeInTheDocument();
-    expect(calls.find((call) => call.path === "/runs")?.body).toMatchObject({
-      projectId: "project-demo",
-      workflowVersionId: "workflow-version-bound",
-    });
-    fireEvent.click(screen.getByRole("button", { name: "启动节点" }));
+    fireEvent.click(await screen.findByRole("button", { name: "启动节点" }));
     expect(await screen.findByText("节点已启动：plan")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Artifact 路径"), {
       target: { value: "G:\\Project\\demo\\plan.md" },
@@ -1537,6 +1756,33 @@ function projection(runId: string, revision: string, status: "CREATED" | "IN_PRO
     blockingReasons: [actionByRevision.blockingReason],
     revision,
     updatedAt: "2026-07-28T00:00:00Z",
+  };
+}
+
+function runSummary() {
+  return {
+    id: "run-project-1",
+    projectId: "project-1",
+    workflowVersionId: "workflow-version-1",
+    workflowName: "Demo workflow",
+    workflowVersion: "1",
+    title: "Project scoped Run",
+    status: "CREATED",
+    taskGoal: "Verify scoped loading",
+    currentNodes: [],
+    nextNodes: [],
+    progress: { total: 1, passed: 0, running: 0, blocked: 0, pending: 1 },
+    blocker: null,
+    workspace: {
+      path: "G:\\Project\\demo",
+      label: "main",
+      leaseMode: "write",
+      leaseStatus: "active",
+    },
+    activeAgentCount: 0,
+    activeDeploymentCount: 0,
+    createdAt: "2026-08-06T00:00:00Z",
+    updatedAt: "2026-08-06T00:00:00Z",
   };
 }
 

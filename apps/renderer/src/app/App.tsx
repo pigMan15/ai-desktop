@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { RunListQuery } from "@workflow-platform/contracts";
 
 import { ApprovalInbox } from "../features/approvals/ApprovalInbox";
 import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
@@ -12,7 +13,9 @@ import {
   type GitWorktree,
 } from "../features/projects/GitWorkspacePanel";
 import { RecoveryPage } from "../features/recovery/RecoveryPage";
+import { NewRunPage } from "../features/runs/NewRunPage";
 import { RunDashboard } from "../features/runs/RunDashboard";
+import { RunListPage } from "../features/runs/RunListPage";
 import { AuditPage } from "../features/audit/AuditPage";
 import {
   SettingsPage,
@@ -25,7 +28,7 @@ import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
 import { WorkflowLibraryPage } from "../features/workflow/WorkflowLibraryPage";
 import { RoleAssetsPage } from "../features/workflow/RoleAssetsPage";
 import { Navigation } from "./navigation";
-import { isKnownRouteHash, normalizeRoute, parseWorkflowRoute, routeHash } from "./routes";
+import { isKnownRouteHash, normalizeRoute, parseRunRoute, parseWorkflowRoute, routeHash } from "./routes";
 import {
   isInteractiveAgentSessionClosedError,
   isInteractiveAgentOutputLimitError,
@@ -76,6 +79,12 @@ export function App() {
   const [savedSession] = useState(loadWorkspaceSession);
   const [state, setState] = useState<RuntimeWorkbenchState | null>(null);
   const [routeLocation, setRouteLocation] = useState(() => window.location.hash);
+  const [initialRunId] = useState(() => {
+    const initialRunRoute = parseRunRoute(window.location.hash);
+    if (initialRunRoute.mode === "detail") return initialRunRoute.runId;
+    if (initialRunRoute.mode === "list" || initialRunRoute.mode === "new") return null;
+    return savedSession.runId;
+  });
   const currentRoute = normalizeRoute(routeLocation);
   const [apiBaseUrl, setApiBaseUrl] = useState(savedSession.apiBaseUrl);
   const [projectPath, setProjectPath] = useState(savedSession.projectPath);
@@ -141,6 +150,8 @@ export function App() {
   const liveAgentOutputFrameRef = useRef<number | null>(null);
   const runSwitchInProgressRef = useRef(false);
   const workflowRoute = parseWorkflowRoute(routeLocation);
+  const runRoute = parseRunRoute(routeLocation);
+  const routeRunId = runRoute.mode === "detail" ? runRoute.runId : null;
   const workflowAssetId = workflowRoute.mode === "edit" ? workflowRoute.workflowId : "";
   const isWorkflowEditor = currentRoute === "workflow" && workflowRoute.mode !== "library";
   const editorWorkflowVersionId = workflowRoute.mode === "edit" && resolvedWorkflowAssetId === workflowAssetId
@@ -200,8 +211,11 @@ export function App() {
   useEffect(() => {
     let isMounted = true;
 
-    const initialLoad = savedSession.runId && apiBaseUrl === savedSession.apiBaseUrl
-      ? restoreWorkbenchState({ ...savedSession, runId: savedSession.runId })
+    const initialRunSession = initialRunId && apiBaseUrl === savedSession.apiBaseUrl
+      ? { ...savedSession, runId: initialRunId }
+      : null;
+    const initialLoad = initialRunSession
+      ? restoreWorkbenchState(initialRunSession)
         .catch(() => loadWorkbenchState(apiBaseUrl))
       : loadWorkbenchState(apiBaseUrl);
 
@@ -209,6 +223,9 @@ export function App() {
       .then((workbenchState) => {
         if (isMounted) {
           setState(workbenchState);
+          if (initialRunSession && workbenchState.projection?.runId === initialRunSession.runId) {
+            saveWorkspaceSession(initialRunSession);
+          }
         }
       })
       .catch(() => {
@@ -220,7 +237,7 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [apiBaseUrl, savedSession]);
+  }, [apiBaseUrl, initialRunId, savedSession]);
 
   useEffect(() => {
     void refreshManagedRuntimeDiagnostics();
@@ -320,7 +337,7 @@ export function App() {
   }, [currentRoute, workflowRoute.mode]);
 
   useEffect(() => {
-    if (currentRoute !== "runs" || state?.connection !== "connected" || !workflowVersionId) {
+    if (runRoute.mode !== "detail" || state?.connection !== "connected" || !workflowVersionId) {
       return;
     }
     let isMounted = true;
@@ -337,7 +354,7 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [apiBaseUrl, currentRoute, state?.connection, workflowVersionId]);
+  }, [apiBaseUrl, runRoute.mode, state?.connection, workflowVersionId]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "library") {
@@ -369,6 +386,11 @@ export function App() {
       });
     return () => { isMounted = false; };
   }, [apiBaseUrl, projectId, state?.connection]);
+
+  useEffect(() => {
+    if (currentRoute !== "runs" || !projectPath.trim() || !desktopGitApi()) return;
+    void refreshGitWorkspace();
+  }, [currentRoute, projectPath, runRoute.mode]);
 
   useEffect(() => {
     if (currentRoute !== "projects" || !projectId) return;
@@ -435,7 +457,11 @@ export function App() {
   }, [apiBaseUrl, currentRoute, runs, state?.connection]);
 
   useEffect(() => {
-    if (!workflowVersionId || state?.connection !== "connected") {
+    if (
+      (currentRoute === "runs" && runRoute.mode !== "detail") ||
+      !workflowVersionId ||
+      state?.connection !== "connected"
+    ) {
       setRuns([]);
       return;
     }
@@ -455,9 +481,29 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [apiBaseUrl, state?.connection, workflowVersionId]);
+  }, [apiBaseUrl, currentRoute, runRoute.mode, state?.connection, workflowVersionId]);
 
-  const activeRunId = state?.projection?.runId ?? null;
+  const activeRunId = currentRoute === "runs"
+    ? state?.projection?.runId === routeRunId ? routeRunId : null
+    : state?.projection?.runId ?? null;
+  const loadProjectRuns = useCallback(
+    (query: RunListQuery, signal: AbortSignal) =>
+      createRuntimeClient(apiBaseUrl).listProjectRuns(projectId, query, signal),
+    [apiBaseUrl, projectId],
+  );
+
+  useEffect(() => {
+    if (
+      !routeRunId ||
+      state?.connection !== "connected" ||
+      state.projection?.runId === routeRunId ||
+      runSwitchInProgressRef.current
+    ) {
+      return;
+    }
+    void handleSelectRun(routeRunId);
+  }, [routeRunId, state?.connection, state?.projection?.runId]);
+
   const agentJobSignature = (state?.agentJobs ?? [])
     .map((job) => `${job.id}:${job.status}`)
     .join("|");
@@ -1217,6 +1263,19 @@ export function App() {
       runSwitchInProgressRef.current = false;
       setOperationMessage(`切换 Run 失败：${errorMessage(error)}`);
     }
+  }
+
+  function openRunRoute(runId: string) {
+    saveWorkspaceSession({
+      apiBaseUrl,
+      projectPath,
+      projectId,
+      workflowVersionId,
+      projectName: state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "Unnamed project",
+      workflowName: state?.workflowName ?? workflowVersionId,
+      runId,
+    });
+    window.location.hash = `#/runs/${encodeURIComponent(runId)}`;
   }
 
   async function updateProjection(
@@ -2001,12 +2060,58 @@ export function App() {
               }
             />
           ) : null}
-          {currentRoute === "runs" ? (
+          {currentRoute === "runs" && runRoute.mode === "list" && projectId ? (
+            <RunListPage
+              key={projectId}
+              projectId={projectId}
+              projectName={state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectId}
+              workflowName={projectWorkflowBinding ? state?.workflowName ?? workflowVersionId : undefined}
+              workspaces={gitWorktrees
+                .filter((worktree) => !worktree.bare)
+                .map((worktree) => ({ path: worktree.path, label: worktree.branch ?? "detached HEAD" }))}
+              loadRuns={loadProjectRuns}
+              onOpenRun={openRunRoute}
+              onNewRun={() => { window.location.hash = "#/runs/new"; }}
+            />
+          ) : null}
+          {currentRoute === "runs" && runRoute.mode === "new" && projectId ? (
+            <NewRunPage
+              project={{
+                id: projectId,
+                name: state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectId,
+              }}
+              binding={projectWorkflowBinding ? {
+                workflowVersionId: projectWorkflowBinding.workflowVersionId,
+                workflowName: state?.workflowName ?? projectWorkflowBinding.workflowId,
+              } : null}
+              workspaces={gitWorktrees
+                .filter((worktree) => !worktree.bare)
+                .map((worktree) => ({
+                  path: worktree.path,
+                  branch: worktree.branch ?? "detached HEAD",
+                  isMain: worktree.path === (gitWorkspaceStatus?.rootPath ?? projectPath),
+                }))}
+              actor={{ id: "renderer-human", type: "human", source: "renderer", trusted: true }}
+              onCreate={({ idempotencyKey, request }) =>
+                createRuntimeClient(apiBaseUrl).createProjectRun(projectId, idempotencyKey, request)}
+              onCreated={openRunRoute}
+              onCancel={() => { window.location.hash = "#/runs"; }}
+              onOpenWorkflowLibrary={() => { window.location.hash = "#/workflow"; }}
+            />
+          ) : null}
+          {currentRoute === "runs" && (runRoute.mode === "list" || runRoute.mode === "new") && !projectId ? (
+            <section className="panel page-workspace page-runs" aria-labelledby="runs-unavailable-title">
+              <h2 id="runs-unavailable-title">运行管理</h2>
+              <p className="body-copy">请先导入项目，再创建或查看 Run。</p>
+              <a className="quiet-button" href="#/projects">前往项目工作区</a>
+            </section>
+          ) : null}
+          {currentRoute === "runs" && runRoute.mode === "detail" ? (
             <RunDashboard
             state={state}
             workflow={workflowDefinition}
               runs={runs}
-              activeRunId={activeRunId}
+              activeRunId={routeRunId}
               onSelectRun={handleSelectRun}
               onCreateRun={handleCreateRun}
             onStartNode={(selectedNodeId) =>
