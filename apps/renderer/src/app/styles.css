@@ -692,6 +692,31 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .run-list-row td > code { color: var(--ink-muted); font-size: 0.7rem; }
 .run-list-row .status-pill { display: inline-block; max-width: 100%; width: fit-content; margin: 0; }
 .run-list-pagination { display: flex; justify-content: center; }
+.new-run-page { max-width: 900px; }
+.new-run-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.new-run-heading h2 { margin-top: 4px; font-size: 1.18rem; }
+.new-run-context { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border-block: 1px solid var(--line); background: var(--surface-subtle); }
+.new-run-context div { min-width: 0; padding: 11px 12px; }
+.new-run-context div + div { border-left: 1px solid var(--line); }
+.new-run-context dt { color: var(--ink-muted); font-size: 0.72rem; font-weight: 700; }
+.new-run-context dd { overflow-wrap: anywhere; margin: 4px 0 0; color: var(--ink); font-size: 0.84rem; }
+.new-run-form { display: grid; gap: 14px; max-width: 760px; }
+.new-run-form > label { gap: 6px; }
+.new-run-form textarea { min-height: 96px; }
+.new-run-form .new-run-parameters { min-height: 120px; font-family: "Cascadia Code", Consolas, monospace; font-size: 0.8rem; }
+.new-run-mode { display: flex; align-items: center; gap: 4px; margin: 0; border: 0; padding: 0; }
+.new-run-mode legend { width: 100%; margin-bottom: 6px; color: #42526a; font-size: 0.78rem; font-weight: 700; }
+.new-run-mode label { display: inline-flex; grid-template-columns: auto auto; align-items: center; gap: 6px; min-height: 34px; border: 1px solid var(--line-strong); background: var(--surface); padding: 6px 10px; color: var(--ink-muted); cursor: pointer; }
+.new-run-mode label:first-of-type { border-radius: 5px 0 0 5px; }
+.new-run-mode label:last-of-type { margin-left: -5px; border-radius: 0 5px 5px 0; }
+.new-run-mode label:has(input:checked) { position: relative; z-index: 1; border-color: var(--accent); background: #edf7f5; color: var(--accent-strong); }
+.new-run-mode input { margin: 0; }
+.new-run-error { display: grid; gap: 4px; border-left: 3px solid var(--danger); background: var(--danger-bg); color: var(--danger); padding: 10px 12px; font-size: 0.82rem; }
+.new-run-error code { color: var(--ink-muted); font-size: 0.72rem; }
+.new-run-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 2px; }
+.new-run-actions button { min-width: 116px; }
+.new-run-recovery, .new-run-workspace-warning { display: grid; gap: 8px; margin: 0; border-left: 3px solid var(--warning); background: var(--warning-bg); color: var(--warning); padding: 12px 14px; font-size: 0.84rem; }
+.new-run-recovery .button-row { margin: 4px 0 0; }
 .run-workbench { display: grid; gap: 16px; min-width: 0; }
 .run-workbench-selector { width: min(360px, 100%); }
 .run-current-node { min-width: 0; border-top: 1px solid var(--line); padding-top: 16px; }
@@ -739,6 +764,10 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   .run-list-row td:first-child { border-top: 0; }
   .run-list-row td::before { content: attr(data-label); color: var(--ink-muted); font-size: 0.7rem; font-weight: 700; }
   .run-list-row td > * { grid-column: 2; }
+  .new-run-context { grid-template-columns: 1fr; }
+  .new-run-context div + div { border-top: 1px solid var(--line); border-left: 0; }
+  .new-run-actions { display: grid; grid-template-columns: 1fr; }
+  .new-run-actions button { width: 100%; }
 }
 
 /* The workflow is an application-like canvas. Keep page scrolling available without
