@@ -1,4 +1,12 @@
-import type { NodeKind, RequirementSpec, RunEventType, TransitionResult } from "./index.js";
+import type {
+  CreateRunRequest,
+  NodeKind,
+  RequirementSpec,
+  RunEventType,
+  RunSummaryProjection,
+  TransitionResult,
+  WorkspaceLease,
+} from "./index.js";
 
 const plannedNodeKind: NodeKind = "agent";
 const plannedRunEventType: RunEventType = "HUMAN_APPROVED";
@@ -41,3 +49,49 @@ void invalidRunEventType;
 void invalidRequirementFieldMix;
 void invalidRequirementKind;
 void incompleteTransition;
+
+const invalidWorkspaceLeaseMode: WorkspaceLease = {
+  id: "lease-1",
+  projectId: "project-1",
+  runId: "run-1",
+  workspacePath: "G:/work/release",
+  // @ts-expect-error WorkspaceLease mode is limited to read or write.
+  mode: "exclusive",
+  status: "active",
+  acquiredAt: "2026-08-05T00:00:00.000Z",
+  lastVerifiedAt: "2026-08-05T00:00:00.000Z",
+  releasedAt: null,
+  releaseReason: null,
+};
+
+// @ts-expect-error CreateRunRequest requires an execution workspace.
+const createRunWithoutWorkspace: CreateRunRequest = {
+  workflowVersionId: "workflow-version-1",
+  title: "Ship release",
+  actor: { id: "user-1", type: "human", source: "renderer", trusted: true },
+};
+
+const invalidRunSummaryStatus: RunSummaryProjection = {
+  id: "run-1",
+  projectId: "project-1",
+  workflowVersionId: "workflow-version-1",
+  workflowName: "Release workflow",
+  workflowVersion: "1.0.0",
+  title: "Ship release",
+  // @ts-expect-error RunSummaryProjection status is limited to RunStatus.
+  status: "RUNNING",
+  taskGoal: null,
+  currentNodes: [],
+  nextNodes: [],
+  progress: { total: 0, passed: 0, running: 0, blocked: 0, pending: 0 },
+  blocker: null,
+  workspace: null,
+  activeAgentCount: 0,
+  activeDeploymentCount: 0,
+  createdAt: "2026-08-05T00:00:00.000Z",
+  updatedAt: "2026-08-05T00:00:00.000Z",
+};
+
+void invalidWorkspaceLeaseMode;
+void createRunWithoutWorkspace;
+void invalidRunSummaryStatus;

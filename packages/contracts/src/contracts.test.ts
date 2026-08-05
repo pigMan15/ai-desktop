@@ -3,9 +3,15 @@ import {
   NODE_KINDS,
   NODE_STATES,
   RUN_EVENT_TYPES,
+  type CreateRunRequest,
+  type ExecuteRunActionRequest,
   type NodeState,
+  type RunListResponse,
   type RunProjection,
+  type RunSummaryProjection,
+  type RuntimeError,
   type TransitionResult,
+  type WorkspaceLease,
   type WorkflowDefinition,
   type WorkflowMetadata,
   type WorkflowRole,
@@ -99,7 +105,96 @@ it("exports stable error constants in plan order", () => {
     "APPROVAL_REJECTED",
     "RUNTIME_UNAVAILABLE",
     "TERMINAL_UNAVAILABLE",
+    "INVALID_REQUEST",
+    "RUN_NOT_FOUND_IN_PROJECT",
+    "WORKSPACE_LEASE_CONFLICT",
+    "PROJECT_ARCHIVED",
+    "RUN_ARCHIVED",
+    "WORKSPACE_RECOVERY_REQUIRED",
+    "RUN_REARCHITECTURE_MAINTENANCE",
   ]);
+});
+
+it("accepts multi-run RPC contract shapes", () => {
+  const actor = {
+    id: "user-1",
+    type: "human" as const,
+    source: "renderer" as const,
+    trusted: true,
+  };
+  const summary: RunSummaryProjection = {
+    id: "run-1",
+    projectId: "project-1",
+    workflowVersionId: "workflow-version-1",
+    workflowName: "Release workflow",
+    workflowVersion: "1.0.0",
+    title: "Ship release",
+    status: "IN_PROGRESS",
+    taskGoal: "Publish the verified release.",
+    currentNodes: [{ id: "build", name: "Build", kind: "agent", state: "RUNNING" }],
+    nextNodes: [{ id: "approve", name: "Approve", kind: "approval", condition: "build passed" }],
+    progress: { total: 3, passed: 1, running: 1, blocked: 0, pending: 1 },
+    blocker: null,
+    workspace: {
+      path: "G:/work/release",
+      label: "release",
+      leaseMode: "write",
+      leaseStatus: "active",
+    },
+    activeAgentCount: 1,
+    activeDeploymentCount: 0,
+    createdAt: "2026-08-05T00:00:00.000Z",
+    updatedAt: "2026-08-05T00:01:00.000Z",
+  };
+  const lease: WorkspaceLease = {
+    id: "lease-1",
+    projectId: "project-1",
+    runId: "run-1",
+    workspacePath: "G:/work/release",
+    mode: "write",
+    status: "active",
+    acquiredAt: "2026-08-05T00:00:00.000Z",
+    lastVerifiedAt: "2026-08-05T00:01:00.000Z",
+    releasedAt: null,
+    releaseReason: null,
+  };
+  const createRequest: CreateRunRequest = {
+    workflowVersionId: "workflow-version-1",
+    title: "Ship release",
+    taskGoal: "Publish the verified release.",
+    parameters: { channel: "stable" },
+    executionWorkspace: { path: "G:/work/release", mode: "write" },
+    actor,
+  };
+  const actionRequest: ExecuteRunActionRequest = {
+    actionId: "approve-build",
+    expectedRevision: "rev-1",
+    actor,
+    payload: { comment: "Approved" },
+  };
+  const listResponse: RunListResponse = { items: [summary], nextCursor: "cursor-2" };
+  const runtimeError: RuntimeError = {
+    code: "WORKSPACE_LEASE_CONFLICT",
+    message: "Workspace is already leased.",
+    details: { leaseId: lease.id },
+    correlationId: "correlation-1",
+  };
+
+  expect({
+    status: listResponse.items[0]?.status,
+    leaseMode: lease.mode,
+    workspaceMode: createRequest.executionWorkspace.mode,
+    actionId: actionRequest.actionId,
+    errorCode: runtimeError.code,
+    cursor: listResponse.nextCursor,
+  }).toEqual({
+    status: "IN_PROGRESS",
+    leaseMode: "write",
+    workspaceMode: "write",
+    actionId: "approve-build",
+    errorCode: "WORKSPACE_LEASE_CONFLICT",
+    cursor: "cursor-2",
+  });
 });
 
 it("accepts planned workflow, projection, and transition shapes", () => {

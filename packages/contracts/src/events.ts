@@ -37,6 +37,8 @@ export const NODE_STATES = [
 
 export type NodeState = (typeof NODE_STATES)[number];
 
+export type RunStatus = "CREATED" | "IN_PROGRESS" | "REVIEWING" | "BLOCKED" | "PAUSED" | "DONE" | "ARCHIVED";
+
 export type ActorType = "human" | "agent" | "system" | "verifier" | "executor" | "adapter";
 export type ActorSource = "renderer" | "runtime" | "terminal" | "agent" | "adapter";
 
@@ -68,7 +70,7 @@ export type AllowedAction = {
 
 export type RunProjection = {
   runId: string;
-  status: "CREATED" | "IN_PROGRESS" | "REVIEWING" | "BLOCKED" | "PAUSED" | "DONE" | "ARCHIVED";
+  status: RunStatus;
   currentNodeIds: string[];
   nodeStates: Record<string, NodeState>;
   allowedActions: AllowedAction[];
