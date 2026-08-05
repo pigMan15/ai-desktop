@@ -1210,6 +1210,8 @@ type RuntimeRequestOptions = {
   signal?: AbortSignal;
 };
 
+const RUNTIME_IPC_PROTOCOL = "workflow-platform.runtime-ipc.v1#7f8c2a61";
+
 async function request<T>(
   apiBaseUrl: string,
   path: string,
@@ -1225,7 +1227,11 @@ async function request<T>(
       ...(options.headers === undefined ? {} : { headers: options.headers }),
     };
     try {
-      return await desktopRuntime.request(desktopOptions) as T;
+      const result = await desktopRuntime.request(desktopOptions);
+      const runtimeError = readDesktopRuntimeError(result);
+      if (runtimeError) throw runtimeError;
+      if (isDesktopRuntimeSuccess(result)) return result.value as T;
+      return result as T;
     } catch (error) {
       throw normalizeTransportError(error, "DESKTOP_ERROR");
     }
@@ -1292,6 +1298,40 @@ function normalizeTransportError(error: unknown, code: string): unknown {
   if (isAbortError(error) || error instanceof RuntimeClientError) return error;
   const message = error instanceof Error && error.message ? error.message : "Runtime request failed";
   return new RuntimeClientError(null, code, message, undefined, null);
+}
+
+function readDesktopRuntimeError(value: unknown): RuntimeClientError | null {
+  if (!isRecord(value) || value.__workflowPlatformRuntimeIpc !== RUNTIME_IPC_PROTOCOL) return null;
+  if (value.kind !== "runtime-error" || !isRecord(value.error)) return null;
+  const error = value.error;
+  if (
+    !Number.isInteger(error.status)
+    || (error.status as number) < 100
+    || (error.status as number) > 599
+    || typeof error.code !== "string"
+    || !error.code
+    || typeof error.message !== "string"
+    || (error.details !== undefined && !isRecord(error.details))
+    || (error.correlationId !== null && typeof error.correlationId !== "string")
+  ) {
+    return null;
+  }
+  return new RuntimeClientError(
+    error.status as number,
+    error.code,
+    error.message,
+    error.details as Record<string, unknown> | undefined,
+    error.correlationId as string | null,
+  );
+}
+
+function isDesktopRuntimeSuccess(
+  value: unknown,
+): value is Record<string, unknown> & { kind: "success"; value: unknown } {
+  return isRecord(value)
+    && value.__workflowPlatformRuntimeIpc === RUNTIME_IPC_PROTOCOL
+    && value.kind === "success"
+    && Object.prototype.hasOwnProperty.call(value, "value");
 }
 
 function isAbortError(error: unknown): boolean {

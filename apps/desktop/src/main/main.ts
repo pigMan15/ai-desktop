@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ManagedRuntime,
+  runtimeIpcFailure,
+  runtimeIpcSuccess,
   runtimeHealth,
   validateRuntimeRequestPath,
   type RuntimeLogEntry,
@@ -97,9 +99,17 @@ export function registerRuntimeHandlers(
   ipcMainLike.handle("runtime:status", () => runtimeManager.status());
   ipcMainLike.handle("runtime:restart", () => runtimeManager.restart());
   ipcMainLike.handle("runtime:logs", () => runtimeManager.logs());
-  ipcMainLike.handle("runtime:request", (_event, options: unknown) =>
-    runtimeManager.request(parseRuntimeRequestOptions(options)),
-  );
+  ipcMainLike.handle("runtime:request", (_event, options: unknown) => {
+    const parsedOptions = parseRuntimeRequestOptions(options);
+    return runtimeManager.request(parsedOptions).then(
+      (value) => runtimeIpcSuccess(value),
+      (error: unknown) => {
+        const runtimeError = readRuntimeProxyError(error);
+        if (runtimeError) return runtimeIpcFailure(runtimeError);
+        throw error;
+      },
+    );
+  });
   registeredRuntimeHandlers.add(ipcMainLike);
 }
 
@@ -477,6 +487,45 @@ function parseRuntimeRequestHeaders(value: unknown): Record<string, string> | un
     headers["Idempotency-Key"] = headerValue;
   }
   return headers;
+}
+
+function readRuntimeProxyError(error: unknown): {
+  status: number;
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+  correlationId: string | null;
+} | null {
+  if (!(error instanceof Error)) return null;
+  const candidate = error as Error & Record<string, unknown>;
+  if (
+    !Number.isInteger(candidate.status)
+    || (candidate.status as number) < 100
+    || (candidate.status as number) > 599
+    || typeof candidate.code !== "string"
+    || !candidate.code
+    || typeof candidate.message !== "string"
+    || (candidate.correlationId !== null && typeof candidate.correlationId !== "string")
+    || (candidate.details !== undefined && !isPlainRecord(candidate.details))
+  ) {
+    return null;
+  }
+  return {
+    status: candidate.status as number,
+    code: candidate.code,
+    message: candidate.message,
+    ...(candidate.details === undefined ? {} : { details: candidate.details as Record<string, unknown> }),
+    correlationId: candidate.correlationId as string | null,
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null),
+  );
 }
 
 function requirePositiveInteger(value: unknown, label: string): number {

@@ -87,11 +87,54 @@ const validRuntimeRequest = {
   body: { workflowVersionId: "version-1" },
   headers: { "idempotency-key": "create-run-1" },
 };
-assert.deepEqual(await runtimeRequestHandler?.(undefined, validRuntimeRequest), { accepted: true });
+assert.deepEqual(await runtimeRequestHandler?.(undefined, validRuntimeRequest), {
+  __workflowPlatformRuntimeIpc: "workflow-platform.runtime-ipc.v1#7f8c2a61",
+  kind: "success",
+  value: { accepted: true },
+});
 assert.deepEqual(recordingRuntime.requests, [{
   ...validRuntimeRequest,
   headers: { "Idempotency-Key": "create-run-1" },
 }]);
+
+class StructuredErrorRuntime extends ManagedRuntime {
+  override async request<T>(): Promise<T> {
+    throw Object.assign(new Error("Project is archived"), {
+      status: 409,
+      code: "PROJECT_ARCHIVED",
+      details: { projectId: "project-1" },
+      correlationId: "corr-ipc-1",
+    });
+  }
+}
+
+const structuredErrorHandlers = new Map<string, (...args: unknown[]) => unknown>();
+registerRuntimeHandlers(
+  {
+    handle(channel: string, handler: (...args: unknown[]) => unknown) {
+      structuredErrorHandlers.set(channel, handler);
+    },
+  },
+  new StructuredErrorRuntime({ externalUrl: "http://127.0.0.1:9999" }),
+);
+const serializedStructuredError = await Promise.resolve(
+  structuredErrorHandlers.get("runtime:request")?.(
+    undefined,
+    { path: "/projects/project-1/runs" },
+  ),
+)
+  .catch((error: unknown) => error);
+assert.deepEqual(serializedStructuredError, {
+  __workflowPlatformRuntimeIpc: "workflow-platform.runtime-ipc.v1#7f8c2a61",
+  kind: "runtime-error",
+  error: {
+    status: 409,
+    code: "PROJECT_ARCHIVED",
+    message: "Project is archived",
+    details: { projectId: "project-1" },
+    correlationId: "corr-ipc-1",
+  },
+});
 
 const invalidRuntimeRequests: Array<{ value: unknown; error: RegExp }> = [
   { value: null, error: /options must be an object/i },
@@ -353,6 +396,48 @@ await assert.rejects(
   () => proxiedRuntime.request({ path: "/workflow-versions/example/save", body: {} }),
   /400: WORKFLOW_DIAGNOSTICS_ERROR: AGENT_CONFIGURATION_UNSUPPORTED/,
 );
+
+for (const errorEnvelope of [
+  {
+    code: "PROJECT_ARCHIVED",
+    message: "Project is archived",
+    details: { projectId: "project-1" },
+    correlationId: "corr-proxy-1",
+  },
+  {
+    detail: {
+      code: "REVISION_CONFLICT",
+      message: "Revision changed",
+      correlationId: "corr-proxy-2",
+    },
+  },
+]) {
+  globalThis.fetch = (async () => ({
+    ok: false,
+    status: 409,
+    json: async () => errorEnvelope,
+  }) as Response) as typeof fetch;
+  const structuredError = await proxiedRuntime
+    .request({ path: "/projects/project-1/runs" })
+    .catch((error: unknown) => error);
+  const expected = ("detail" in errorEnvelope ? errorEnvelope.detail : errorEnvelope)!;
+  assert.deepEqual(
+    {
+      status: (structuredError as Record<string, unknown>).status,
+      code: (structuredError as Record<string, unknown>).code,
+      message: (structuredError as Record<string, unknown>).message,
+      details: (structuredError as Record<string, unknown>).details,
+      correlationId: (structuredError as Record<string, unknown>).correlationId,
+    },
+    {
+      status: 409,
+      code: expected.code,
+      message: expected.message,
+      details: "details" in expected ? expected.details : undefined,
+      correlationId: expected.correlationId,
+    },
+  );
+}
 
 const emptyExternalRuntime = new ManagedRuntime({
   externalUrl: "",

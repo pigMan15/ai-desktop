@@ -58,6 +58,66 @@ export type RuntimeRequestOptions = {
   headers?: Record<string, string>;
 };
 
+export const RUNTIME_IPC_PROTOCOL = "workflow-platform.runtime-ipc.v1#7f8c2a61" as const;
+
+export type RuntimeProxyErrorData = {
+  status: number;
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+  correlationId: string | null;
+};
+
+export type RuntimeIpcResponse<T> =
+  | {
+      __workflowPlatformRuntimeIpc: typeof RUNTIME_IPC_PROTOCOL;
+      kind: "success";
+      value: T;
+    }
+  | {
+      __workflowPlatformRuntimeIpc: typeof RUNTIME_IPC_PROTOCOL;
+      kind: "runtime-error";
+      error: RuntimeProxyErrorData;
+    };
+
+export class RuntimeProxyError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details?: Record<string, unknown>;
+  readonly correlationId: string | null;
+
+  constructor(error: RuntimeProxyErrorData) {
+    super(error.message);
+    this.name = "RuntimeProxyError";
+    this.status = error.status;
+    this.code = error.code;
+    if (error.details !== undefined) this.details = error.details;
+    this.correlationId = error.correlationId;
+  }
+}
+
+export function runtimeIpcSuccess<T>(value: T): RuntimeIpcResponse<T> {
+  return {
+    __workflowPlatformRuntimeIpc: RUNTIME_IPC_PROTOCOL,
+    kind: "success",
+    value,
+  };
+}
+
+export function runtimeIpcFailure(error: RuntimeProxyErrorData): RuntimeIpcResponse<never> {
+  return {
+    __workflowPlatformRuntimeIpc: RUNTIME_IPC_PROTOCOL,
+    kind: "runtime-error",
+    error: {
+      status: error.status,
+      code: error.code,
+      message: error.message,
+      ...(error.details === undefined ? {} : { details: error.details }),
+      correlationId: error.correlationId,
+    },
+  };
+}
+
 export function runtimeHealth(): RuntimeHealth {
   return { status: "ok", service: "workflow-runtime" };
 }
@@ -188,10 +248,7 @@ export class ManagedRuntime {
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
     if (!response.ok) {
-      const detail = await runtimeErrorDetail(response);
-      throw new Error(
-        `Runtime API ${requestPath} failed with ${response.status}${detail ? `: ${detail}` : ""}`,
-      );
+      throw await runtimeProxyError(response, requestPath);
     }
     return (await response.json()) as T;
   }
@@ -297,13 +354,34 @@ async function fetchRuntimeHealth(url: string): Promise<RuntimeHealth> {
   return (await response.json()) as RuntimeHealth;
 }
 
-async function runtimeErrorDetail(response: Response): Promise<string | null> {
+async function runtimeProxyError(response: Response, requestPath: string): Promise<RuntimeProxyError> {
+  let payload: unknown = null;
   try {
-    const payload = (await response.json()) as { detail?: unknown };
-    return formatRuntimeErrorDetail(payload.detail);
+    payload = await response.json();
   } catch {
-    return null;
+    // The generic message below retains the request path and HTTP status.
   }
+  const envelope = isRecord(payload) && "detail" in payload ? payload.detail : payload;
+  if (
+    isRecord(envelope)
+    && typeof envelope.code === "string"
+    && typeof envelope.message === "string"
+  ) {
+    return new RuntimeProxyError({
+      status: response.status,
+      code: envelope.code,
+      message: envelope.message,
+      ...(isRecord(envelope.details) ? { details: envelope.details } : {}),
+      correlationId: typeof envelope.correlationId === "string" ? envelope.correlationId : null,
+    });
+  }
+  const detail = formatRuntimeErrorDetail(isRecord(payload) ? payload.detail : null);
+  return new RuntimeProxyError({
+    status: response.status,
+    code: "RUNTIME_API_ERROR",
+    message: `Runtime API ${requestPath} failed with ${response.status}${detail ? `: ${detail}` : ""}`,
+    correlationId: null,
+  });
 }
 
 function formatRuntimeErrorDetail(detail: unknown): string | null {
@@ -317,6 +395,10 @@ function formatRuntimeErrorDetail(detail: unknown): string | null {
     return messages.length > 0 ? messages.join("; ") : null;
   }
   return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function runtimePortFromEnvironment(env: NodeJS.ProcessEnv): number {

@@ -94,6 +94,53 @@ describe("runtimeClient", () => {
     });
   });
 
+  it("unwraps a structured Runtime failure from the Desktop bridge", async () => {
+    const request = vi.fn(async () => ({
+      __workflowPlatformRuntimeIpc: "workflow-platform.runtime-ipc.v1#7f8c2a61",
+      kind: "runtime-error",
+      error: {
+        status: 423,
+        code: "WORKSPACE_RECOVERY_REQUIRED",
+        message: "Workspace lease is not active",
+        details: { runId: "run-1" },
+        correlationId: "corr-desktop-1",
+      },
+    }));
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: { request },
+    });
+
+    const error = await createRuntimeClient("http://unused")
+      .listProjectRuns("project-1", {})
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RuntimeClientError);
+    expect(error).toMatchObject({
+      status: 423,
+      code: "WORKSPACE_RECOVERY_REQUIRED",
+      message: "Workspace lease is not active",
+      details: { runId: "run-1" },
+      correlationId: "corr-desktop-1",
+    });
+  });
+
+  it("keeps generic Desktop bridge rejections as DESKTOP_ERROR", async () => {
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: { request: vi.fn(async () => { throw new Error("IPC channel closed"); }) },
+    });
+
+    await expect(
+      createRuntimeClient("http://unused").listProjectRuns("project-1", {}),
+    ).rejects.toMatchObject({
+      status: null,
+      code: "DESKTOP_ERROR",
+      message: "IPC channel closed",
+      correlationId: null,
+    });
+  });
+
   it.each([
     ["canonical", { code: "PROJECT_ARCHIVED", message: "Project is archived", details: { projectId: "project-1" }, correlationId: "corr-1" }],
     ["FastAPI", { detail: { code: "REVISION_CONFLICT", message: "Revision changed", correlationId: "corr-2" } }],
