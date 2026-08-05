@@ -51,6 +51,34 @@ export type WorkspaceLease = {
   releaseReason: string | null;
 };
 
+export type RunRecord = {
+  id: string;
+  projectId: string;
+  workflowVersionId: string;
+  workflowSnapshot: WorkflowDefinition;
+  title: string;
+  context: { taskGoal?: string; parameters?: Record<string, unknown> };
+  executionWorkspace: string;
+  workspaceMode: WorkspaceMode;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RunActivitySummary = {
+  activeAgentCount: number;
+  activeDeploymentCount: number;
+  lastEventAt: string | null;
+};
+
+export type RunOverview = {
+  run: RunRecord;
+  projection: RunProjection;
+  workflow: WorkflowDefinition;
+  workspace: WorkspaceLease | null;
+  activity: RunActivitySummary;
+};
+
 export type RunSummaryProjection = {
   id: string;
   projectId: string;

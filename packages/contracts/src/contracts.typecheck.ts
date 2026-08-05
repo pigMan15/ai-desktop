@@ -1,12 +1,40 @@
 import type {
   CreateRunRequest,
+  ExecuteRunActionResponse,
   NodeKind,
   RequirementSpec,
   RunEventType,
+  RunOverview,
   RunSummaryProjection,
   TransitionResult,
   WorkspaceLease,
 } from "./index.js";
+
+declare const validRunOverview: RunOverview;
+
+const invalidOverviewWorkflow: RunOverview = {
+  ...validRunOverview,
+  // @ts-expect-error RunOverview requires a workflow snapshot object.
+  workflow: undefined,
+};
+
+const invalidOverviewActivity: RunOverview = {
+  ...validRunOverview,
+  activity: {
+    ...validRunOverview.activity,
+    // @ts-expect-error Run activity counts are numeric.
+    activeAgentCount: "one",
+  },
+};
+
+// @ts-expect-error ExecuteRunActionResponse requires emittedEvents.
+const actionResponseWithoutEvents: ExecuteRunActionResponse = {
+  projection: validRunOverview.projection,
+};
+
+void invalidOverviewWorkflow;
+void invalidOverviewActivity;
+void actionResponseWithoutEvents;
 
 const plannedNodeKind: NodeKind = "agent";
 const plannedRunEventType: RunEventType = "HUMAN_APPROVED";

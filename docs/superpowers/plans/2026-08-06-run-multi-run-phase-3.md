@@ -54,7 +54,7 @@ const overview: RunOverview = {
 expect(overview.workflow).toBe(overview.run.workflowSnapshot);
 ```
 
-Add `@ts-expect-error` cases for a missing `workflow`, invalid activity counts, and an action response without `emittedEvents`.
+Add `@ts-expect-error` cases for a missing `workflow`, non-numeric activity counts, and an action response without `emittedEvents`.
 
 - [ ] **Step 2: Verify RED**
 

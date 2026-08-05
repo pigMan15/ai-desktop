@@ -5,8 +5,10 @@ import {
   RUN_EVENT_TYPES,
   type CreateRunRequest,
   type ExecuteRunActionRequest,
+  type ExecuteRunActionResponse,
   type NodeState,
   type RunListResponse,
+  type RunOverview,
   type RunProjection,
   type RunSummaryProjection,
   type RuntimeError,
@@ -194,6 +196,86 @@ it("accepts multi-run RPC contract shapes", () => {
     actionId: "approve-build",
     errorCode: "WORKSPACE_LEASE_CONFLICT",
     cursor: "cursor-2",
+  });
+});
+
+it("accepts canonical project-scoped Run overview and action response shapes", () => {
+  const workflow: WorkflowDefinition = {
+    id: "workflow-1",
+    name: "Release workflow snapshot",
+    version: "4",
+    sourceAdapter: "harness",
+    nodes: [{ id: "plan", name: "Plan", kind: "task" }],
+    edges: [],
+    roles: [],
+    gates: [],
+    policies: {},
+    metadata: {},
+  };
+  const projection: RunProjection = {
+    runId: "run-1",
+    status: "IN_PROGRESS",
+    currentNodeIds: ["plan"],
+    nodeStates: { plan: "RUNNING" },
+    allowedActions: [],
+    blockingReasons: [],
+    revision: "2",
+    updatedAt: "2026-08-06T00:01:00.000Z",
+  };
+  const workspace: WorkspaceLease = {
+    id: "lease-1",
+    projectId: "project-1",
+    runId: "run-1",
+    workspacePath: "G:/work/release",
+    mode: "write",
+    status: "active",
+    acquiredAt: "2026-08-06T00:00:00.000Z",
+    lastVerifiedAt: "2026-08-06T00:01:00.000Z",
+    releasedAt: null,
+    releaseReason: null,
+  };
+  const overview: RunOverview = {
+    run: {
+      id: "run-1",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      workflowSnapshot: workflow,
+      title: "Release candidate",
+      context: { taskGoal: "Ship", parameters: { dryRun: true } },
+      executionWorkspace: "G:/work/release",
+      workspaceMode: "write",
+      status: "IN_PROGRESS",
+      createdAt: "2026-08-06T00:00:00.000Z",
+      updatedAt: "2026-08-06T00:01:00.000Z",
+    },
+    projection,
+    workflow,
+    workspace,
+    activity: {
+      activeAgentCount: 1,
+      activeDeploymentCount: 0,
+      lastEventAt: "2026-08-06T00:01:00.000Z",
+    },
+  };
+  const actionResponse: ExecuteRunActionResponse = {
+    projection,
+    emittedEvents: [],
+  };
+
+  expect({
+    snapshotName: overview.workflow.name,
+    sameSnapshot: overview.workflow === overview.run.workflowSnapshot,
+    workspaceRunId: overview.workspace?.runId,
+    activeAgents: overview.activity.activeAgentCount,
+    actionRevision: actionResponse.projection.revision,
+    emittedCount: actionResponse.emittedEvents.length,
+  }).toEqual({
+    snapshotName: "Release workflow snapshot",
+    sameSnapshot: true,
+    workspaceRunId: "run-1",
+    activeAgents: 1,
+    actionRevision: "2",
+    emittedCount: 0,
   });
 });
 
