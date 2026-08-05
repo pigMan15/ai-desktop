@@ -1,4 +1,53 @@
-import type { RunProjection } from "@workflow-platform/contracts";
+import type {
+  CreateRunRequest,
+  RunListQuery,
+  RunListResponse,
+  RunProjection,
+  RunStatus,
+  WorkspaceLease,
+  WorkspaceMode,
+  WorkflowDefinition,
+} from "@workflow-platform/contracts";
+
+export type ScopedCreateRunResponse = {
+  run: {
+    id: string;
+    projectId: string;
+    workflowVersionId: string;
+    workflowSnapshot: WorkflowDefinition;
+    title: string;
+    context: { taskGoal?: string; parameters?: Record<string, unknown> };
+    executionWorkspace: string;
+    workspaceMode: WorkspaceMode;
+    status: RunStatus;
+    createdAt: string;
+    updatedAt: string;
+  };
+  projection: RunProjection;
+  workspace: WorkspaceLease;
+};
+
+export class RuntimeClientError extends Error {
+  readonly status: number | null;
+  readonly code: string;
+  readonly details?: Record<string, unknown>;
+  readonly correlationId: string | null;
+
+  constructor(
+    status: number | null,
+    code: string,
+    message: string,
+    details: Record<string, unknown> | undefined,
+    correlationId: string | null,
+  ) {
+    super(message);
+    this.name = "RuntimeClientError";
+    this.status = status;
+    this.code = code;
+    if (details !== undefined) this.details = details;
+    this.correlationId = correlationId;
+  }
+}
 
 export type RuntimeWorkbenchState = {
   connection: "connected" | "unavailable";
@@ -585,6 +634,37 @@ export async function restoreWorkbenchState(
 export function createRuntimeClient(apiBaseUrl: string) {
   return {
     health: () => request(apiBaseUrl, "/health"),
+    listProjectRuns: (projectId: string, query: RunListQuery = {}, signal?: AbortSignal) => {
+      const params = new URLSearchParams();
+      for (const status of query.status ?? []) params.append("status", status);
+      if (query.workflowVersionId !== undefined) params.set("workflowVersionId", query.workflowVersionId);
+      if (query.workspacePath !== undefined) params.set("workspacePath", query.workspacePath);
+      if (query.q !== undefined) params.set("q", query.q);
+      if (query.cursor !== undefined) params.set("cursor", query.cursor);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      const suffix = params.size === 0 ? "" : `?${params.toString()}`;
+      return request<RunListResponse>(
+        apiBaseUrl,
+        `/projects/${encodeURIComponent(projectId)}/runs${suffix}`,
+        { method: "GET", signal },
+      );
+    },
+    createProjectRun: (
+      projectId: string,
+      idempotencyKey: string,
+      body: CreateRunRequest,
+      signal?: AbortSignal,
+    ) =>
+      request<ScopedCreateRunResponse>(
+        apiBaseUrl,
+        `/projects/${encodeURIComponent(projectId)}/runs`,
+        {
+          method: "POST",
+          body,
+          headers: { "Idempotency-Key": idempotencyKey },
+          signal,
+        },
+      ),
     listAgentProviders: () =>
       request<AgentProviderDiagnostic[]>(apiBaseUrl, "/agents/providers"),
     getWorkflowDefinition: (workflowVersionId: string) =>
@@ -1123,37 +1203,113 @@ function readRuntimeConfig() {
   };
 }
 
-async function request<T>(apiBaseUrl: string, path: string, body?: unknown): Promise<T> {
+type RuntimeRequestOptions = {
+  method?: "GET" | "POST";
+  body?: unknown;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+};
+
+async function request<T>(
+  apiBaseUrl: string,
+  path: string,
+  optionsOrLegacyBody: RuntimeRequestOptions | unknown = undefined,
+): Promise<T> {
+  const options = normalizeRequestOptions(optionsOrLegacyBody);
   const desktopRuntime = getDesktopRuntimeBridge();
   if (desktopRuntime) {
-    return desktopRuntime.request(path, body) as Promise<T>;
+    const desktopOptions = {
+      path,
+      ...(options.method === undefined ? {} : { method: options.method }),
+      ...(options.body === undefined ? {} : { body: options.body }),
+      ...(options.headers === undefined ? {} : { headers: options.headers }),
+    };
+    try {
+      return await desktopRuntime.request(desktopOptions) as T;
+    } catch (error) {
+      throw normalizeTransportError(error, "DESKTOP_ERROR");
+    }
   }
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      method: options.method ?? (options.body === undefined ? "GET" : "POST"),
+      headers: options.body === undefined
+        ? options.headers
+        : { "Content-Type": "application/json", ...options.headers },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: options.signal,
+    });
+  } catch (error) {
+    throw normalizeTransportError(error, "NETWORK_ERROR");
+  }
   if (!response.ok) {
     const errorBody: unknown = await response.json().catch(() => null);
-    const detail =
-      typeof errorBody === "object" &&
-      errorBody !== null &&
-      "detail" in errorBody &&
-      typeof errorBody.detail === "string"
-        ? errorBody.detail
-        : null;
-    throw new Error(
-      detail
-        ? `Runtime API ${path} failed with ${response.status}: ${detail}`
-        : `Runtime API ${path} failed with ${response.status}`,
-    );
+    throw parseRuntimeError(errorBody, response.status, path);
   }
   return (await response.json()) as T;
 }
 
+function normalizeRequestOptions(value: RuntimeRequestOptions | unknown): RuntimeRequestOptions {
+  if (
+    typeof value === "object"
+    && value !== null
+    && ("method" in value || "body" in value || "headers" in value || "signal" in value)
+  ) {
+    return value as RuntimeRequestOptions;
+  }
+  return value === undefined ? {} : { body: value };
+}
+
+function parseRuntimeError(errorBody: unknown, status: number, path: string): RuntimeClientError {
+  const envelope = isRecord(errorBody) && "detail" in errorBody ? errorBody.detail : errorBody;
+  if (
+    isRecord(envelope)
+    && typeof envelope.code === "string"
+    && typeof envelope.message === "string"
+  ) {
+    return new RuntimeClientError(
+      status,
+      envelope.code,
+      envelope.message,
+      isRecord(envelope.details) ? envelope.details : undefined,
+      typeof envelope.correlationId === "string" ? envelope.correlationId : null,
+    );
+  }
+  const detail = typeof envelope === "string" ? envelope : null;
+  return new RuntimeClientError(
+    status,
+    "RUNTIME_API_ERROR",
+    detail
+      ? `Runtime API ${path} failed with ${status}: ${detail}`
+      : `Runtime API ${path} failed with ${status}`,
+    undefined,
+    null,
+  );
+}
+
+function normalizeTransportError(error: unknown, code: string): unknown {
+  if (isAbortError(error) || error instanceof RuntimeClientError) return error;
+  const message = error instanceof Error && error.message ? error.message : "Runtime request failed";
+  return new RuntimeClientError(null, code, message, undefined, null);
+}
+
+function isAbortError(error: unknown): boolean {
+  return isRecord(error) && error.name === "AbortError";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function getDesktopRuntimeBridge():
   | {
-      request(path: string, body?: unknown): Promise<unknown>;
+      request(options: {
+        path: string;
+        method?: "GET" | "POST";
+        body?: unknown;
+        headers?: Record<string, string>;
+      }): Promise<unknown>;
     }
   | null {
   if (typeof window === "undefined") {
@@ -1161,7 +1317,12 @@ function getDesktopRuntimeBridge():
   }
   const candidate = (window as Window & {
     workflowRuntime?: {
-      request?: (path: string, body?: unknown) => Promise<unknown>;
+      request?: (options: {
+        path: string;
+        method?: "GET" | "POST";
+        body?: unknown;
+        headers?: Record<string, string>;
+      }) => Promise<unknown>;
     };
   }).workflowRuntime;
   return typeof candidate?.request === "function"

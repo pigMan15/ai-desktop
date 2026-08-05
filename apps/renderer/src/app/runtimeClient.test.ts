@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createRuntimeClient, loadWorkbenchState, restoreWorkbenchState } from "./runtimeClient";
+import {
+  RuntimeClientError,
+  createRuntimeClient,
+  loadWorkbenchState,
+  restoreWorkbenchState,
+} from "./runtimeClient";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -8,6 +13,127 @@ afterEach(() => {
 });
 
 describe("runtimeClient", () => {
+  it("serializes project run list filters with repeated statuses and an opaque cursor", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ items: [], nextCursor: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+
+    const result = await createRuntimeClient("http://127.0.0.1:8765").listProjectRuns(
+      "project/alpha",
+      {
+        status: ["IN_PROGRESS", "BLOCKED"],
+        workflowVersionId: "workflow/version 1",
+        workspacePath: "G:/Work/alpha & beta",
+        q: "release candidate",
+        cursor: "eyJvZmZzZXQiOjEwfQ==&opaque=yes",
+        limit: 25,
+      },
+      signal,
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(
+      "http://127.0.0.1:8765/projects/project%2Falpha/runs?status=IN_PROGRESS&status=BLOCKED&workflowVersionId=workflow%2Fversion+1&workspacePath=G%3A%2FWork%2Falpha+%26+beta&q=release+candidate&cursor=eyJvZmZzZXQiOjEwfQ%3D%3D%26opaque%3Dyes&limit=25",
+    );
+    expect(init).toMatchObject({ method: "GET", signal });
+    expect(result).toEqual({ items: [], nextCursor: null });
+  });
+
+  it("creates a project-scoped run with the exact body and idempotency header", async () => {
+    const response = scopedCreateRunResponse();
+    const fetchMock = vi.fn(async () => jsonResponse(response));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+    const body = {
+      workflowVersionId: "workflow-version-1",
+      title: "Release candidate",
+      taskGoal: "Ship safely",
+      parameters: { tier: "staging" },
+      executionWorkspace: { path: "G:/Work/release", mode: "write" as const },
+      actor: { id: "human-1", type: "human" as const, source: "renderer" as const, trusted: true },
+    };
+
+    const result = await createRuntimeClient("http://127.0.0.1:8765").createProjectRun(
+      "project/alpha",
+      "create-run-1",
+      body,
+      signal,
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8765/projects/project%2Falpha/runs");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "create-run-1",
+      },
+      signal,
+    });
+    expect(JSON.parse(String(init.body))).toEqual(body);
+    expect(result).toEqual(response);
+  });
+
+  it("sends serializable request options through the Desktop bridge", async () => {
+    const request = vi.fn(async () => ({ items: [], nextCursor: null }));
+    Object.defineProperty(window, "workflowRuntime", {
+      configurable: true,
+      value: { request },
+    });
+    const signal = new AbortController().signal;
+
+    await createRuntimeClient("http://unused").listProjectRuns(
+      "project-1",
+      { status: ["DONE"], cursor: "opaque+/=" },
+      signal,
+    );
+
+    expect(request).toHaveBeenCalledWith({
+      path: "/projects/project-1/runs?status=DONE&cursor=opaque%2B%2F%3D",
+      method: "GET",
+    });
+  });
+
+  it.each([
+    ["canonical", { code: "PROJECT_ARCHIVED", message: "Project is archived", details: { projectId: "project-1" }, correlationId: "corr-1" }],
+    ["FastAPI", { detail: { code: "REVISION_CONFLICT", message: "Revision changed", correlationId: "corr-2" } }],
+  ])("parses %s Runtime errors into RuntimeClientError", async (_label, payload) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(payload), { status: 409 })),
+    );
+
+    const error = await createRuntimeClient("http://127.0.0.1:8765")
+      .listProjectRuns("project-1", {})
+      .catch((caught: unknown) => caught);
+
+    const runtimeError = "detail" in payload ? payload.detail : payload;
+    expect(error).toBeInstanceOf(RuntimeClientError);
+    expect(error).toMatchObject({
+      status: 409,
+      code: runtimeError.code,
+      message: runtimeError.message,
+      details: "details" in runtimeError ? runtimeError.details : undefined,
+      correlationId: runtimeError.correlationId,
+    });
+  });
+
+  it("preserves generic network messages and AbortError identity", async () => {
+    const client = createRuntimeClient("http://127.0.0.1:8765");
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+
+    await expect(client.listProjectRuns("project-1", {})).rejects.toMatchObject({
+      status: null,
+      code: "NETWORK_ERROR",
+      message: "Failed to fetch",
+      correlationId: null,
+    });
+
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    vi.stubGlobal("fetch", vi.fn(async () => { throw abortError; }));
+    await expect(client.listProjectRuns("project-1", {})).rejects.toBe(abortError);
+  });
+
   it("binds a project workflow with POST", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ workflowBindingStatus: "bound" }));
     vi.stubGlobal("fetch", fetchMock);
@@ -38,7 +164,7 @@ describe("runtimeClient", () => {
     const result = await createRuntimeClient("http://127.0.0.1:8765").health();
 
     expect(result).toEqual({ status: "ok", service: "workflow-runtime" });
-    expect(request).toHaveBeenCalledWith("/health", undefined);
+    expect(request).toHaveBeenCalledWith({ path: "/health" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -693,6 +819,49 @@ describe("runtimeClient", () => {
   });
 
 });
+
+function scopedCreateRunResponse() {
+  const workflowSnapshot = {
+    id: "workflow-1",
+    name: "Release workflow",
+    version: "1.0.0",
+    sourceAdapter: "test",
+    nodes: [],
+    edges: [],
+    roles: [],
+    gates: [],
+    policies: {},
+    metadata: {},
+  };
+  return {
+    run: {
+      id: "run-1",
+      projectId: "project/alpha",
+      workflowVersionId: "workflow-version-1",
+      workflowSnapshot,
+      title: "Release candidate",
+      context: { taskGoal: "Ship safely", parameters: { tier: "staging" } },
+      executionWorkspace: "G:/Work/release",
+      workspaceMode: "write",
+      status: "CREATED",
+      createdAt: "2026-08-06T00:00:00Z",
+      updatedAt: "2026-08-06T00:00:00Z",
+    },
+    projection: projection("run-1", "1", "CREATED"),
+    workspace: {
+      id: "lease-1",
+      projectId: "project/alpha",
+      runId: "run-1",
+      workspacePath: "G:/Work/release",
+      mode: "write",
+      status: "active",
+      acquiredAt: "2026-08-06T00:00:00Z",
+      lastVerifiedAt: "2026-08-06T00:00:00Z",
+      releasedAt: null,
+      releaseReason: null,
+    },
+  };
+}
 
 function projection(runId: string, revision: string, status: "CREATED" | "IN_PROGRESS" | "REVIEWING") {
   return {
