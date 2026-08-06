@@ -120,6 +120,16 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .workflow-binding-step { display: grid; gap: 6px; margin: 0 0 16px; border-left: 3px solid var(--accent); background: #f2f9f7; padding: 12px 14px; }
 .workflow-binding-step .body-copy { margin-bottom: 0; }
 .project-operation-message { margin: 0 0 16px; border-left: 3px solid var(--accent); background: #edf7f5; padding: 9px 11px; }
+.project-run-overview { min-width: 0; margin: 0 0 18px; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+.project-run-overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.project-run-overview-heading h3 { margin-top: 3px; }
+.project-recent-runs { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.project-recent-runs li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; border-bottom: 1px solid var(--line); padding: 10px 0; }
+.project-recent-runs li > div { display: grid; gap: 3px; min-width: 0; }
+.project-recent-runs strong, .project-recent-runs span { overflow-wrap: anywhere; }
+.project-recent-runs span { color: var(--ink-muted); font-size: 0.78rem; }
+.project-recent-runs a { flex: 0 0 auto; color: var(--accent-strong); font-size: 0.8rem; font-weight: 700; }
+.project-readonly-note { margin: 10px 0 0; font-size: 0.8rem; }
 
 /* Knowledge records deliberately use cards: a knowledge unit is reviewed, published and replayed as one object. */
 #knowledge > .gate-stack { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }

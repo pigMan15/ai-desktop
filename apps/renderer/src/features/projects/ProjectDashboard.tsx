@@ -1,5 +1,6 @@
 import type { ProjectWorkflowBinding, RuntimeWorkbenchState } from "../../app/runtimeClient";
 import type { ReactNode } from "react";
+import type { RunSummaryProjection } from "@workflow-platform/contracts";
 
 type Props = {
   state: RuntimeWorkbenchState | null;
@@ -14,6 +15,9 @@ type Props = {
   gitPanel?: ReactNode;
   workflowBindingStep?: ReactNode;
   workflowBinding?: ProjectWorkflowBinding | null;
+  activeRunCount?: number;
+  recentRuns?: RunSummaryProjection[];
+  runsHref?: string;
 };
 
 export function ProjectDashboard({
@@ -29,6 +33,9 @@ export function ProjectDashboard({
   gitPanel,
   workflowBindingStep,
   workflowBinding = null,
+  activeRunCount = 0,
+  recentRuns = [],
+  runsHref = "#/runs",
 }: Props) {
   const connected = state?.connection === "connected";
   const initialized = state?.workspaceStatus === "ready";
@@ -49,6 +56,7 @@ export function ProjectDashboard({
       </div>
       {archived ? (
         <>
+          <RunOverview activeRunCount={activeRunCount} recentRuns={recentRuns} runsHref={runsHref} readOnly />
           <p className="body-copy">项目已归档。历史 Run、产物和知识记录会保留；重新导入目录后即可恢复为活动项目。</p>
           <label>
             项目路径
@@ -67,6 +75,7 @@ export function ProjectDashboard({
         </>
       ) : initialized ? (
         <>
+          <RunOverview activeRunCount={activeRunCount} recentRuns={recentRuns} runsHref={runsHref} readOnly={false} />
           {workflowBindingStep}
           {operationMessage ? <p className="body-copy project-operation-message" role="status">{operationMessage}</p> : null}
           <div className="table-like" role="table" aria-label="项目状态">
@@ -108,6 +117,44 @@ export function ProjectDashboard({
           {operationMessage ? <p className="body-copy" role="status">{operationMessage}</p> : null}
         </>
       )}
+    </section>
+  );
+}
+
+function RunOverview({
+  activeRunCount,
+  recentRuns,
+  runsHref,
+  readOnly,
+}: {
+  activeRunCount: number;
+  recentRuns: RunSummaryProjection[];
+  runsHref: string;
+  readOnly: boolean;
+}) {
+  return (
+    <section className="project-run-overview" aria-label="Run 概览">
+      <div className="project-run-overview-heading">
+        <div>
+          <p className="section-kicker">Run activity</p>
+          <h3>{activeRunCount} 个活动 Run</h3>
+        </div>
+        <a className="quiet-button" href={runsHref}>查看全部 Run</a>
+      </div>
+      {recentRuns.length > 0 ? (
+        <ul className="project-recent-runs">
+          {recentRuns.map((run) => (
+            <li key={run.id}>
+              <div>
+                <strong>{run.title}</strong>
+                <span>{run.status} · {run.workflowName}</span>
+              </div>
+              <a href={`#/runs/${encodeURIComponent(run.id)}`}>查看 Run</a>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="body-copy">暂无最近 Run</p>}
+      {readOnly ? <p className="body-copy project-readonly-note">项目已归档，Run 仅可查看。</p> : null}
     </section>
   );
 }

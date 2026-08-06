@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Actor, ExecuteRunActionRequest, RunListQuery } from "@workflow-platform/contracts";
+import type { Actor, ExecuteRunActionRequest, RunListQuery, RunSummaryProjection } from "@workflow-platform/contracts";
 
 import { ApprovalInbox } from "../features/approvals/ApprovalInbox";
 import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
@@ -107,6 +107,8 @@ export function App() {
   const [projectId, setProjectId] = useState(savedSession.projectId ?? "");
   const [projectArchived, setProjectArchived] = useState(false);
   const [projectWorkflowBinding, setProjectWorkflowBinding] = useState<ProjectWorkflowBinding | null | undefined>(undefined);
+  const [projectActiveRunCount, setProjectActiveRunCount] = useState(0);
+  const [projectRecentRuns, setProjectRecentRuns] = useState<RunSummaryProjection[]>([]);
   const [pendingWorkflowBindingId, setPendingWorkflowBindingId] = useState<string | null>(null);
   const [workflowVersionId, setWorkflowVersionId] = useState(savedSession.workflowVersionId);
   const [operationMessage, setOperationMessage] = useState("等待操作");
@@ -394,6 +396,48 @@ export function App() {
     const requestedWorkflowId = new URLSearchParams(routeLocation.split("?")[1] ?? "").get("bindWorkflow");
     if (requestedWorkflowId) setPendingWorkflowBindingId(requestedWorkflowId);
   }, [currentRoute, projectId, routeLocation]);
+
+  useEffect(() => {
+    if (currentRoute !== "projects" || !projectId || state?.connection !== "connected") {
+      setProjectActiveRunCount(0);
+      setProjectRecentRuns([]);
+      return;
+    }
+    const controller = new AbortController();
+    let mounted = true;
+    const client = createRuntimeClient(apiBaseUrl);
+    const activeStatuses = ["CREATED", "IN_PROGRESS", "REVIEWING", "BLOCKED", "PAUSED"] as const;
+    void Promise.all([
+      client.listProjectRuns(projectId, { limit: 10 }, controller.signal),
+      (async () => {
+        let cursor: string | undefined;
+        let count = 0;
+        do {
+          const response = await client.listProjectRuns(
+            projectId,
+            { status: [...activeStatuses], limit: 100, ...(cursor ? { cursor } : {}) },
+            controller.signal,
+          );
+          count += response.items.length;
+          cursor = response.nextCursor ?? undefined;
+        } while (cursor);
+        return count;
+      })(),
+    ]).then(([recentResponse, activeCount]) => {
+      if (!mounted || controller.signal.aborted) return;
+      setProjectRecentRuns(recentResponse.items);
+      setProjectActiveRunCount(activeCount);
+    }).catch(() => {
+      if (mounted && !controller.signal.aborted) {
+        setProjectRecentRuns([]);
+        setProjectActiveRunCount(0);
+      }
+    });
+    return () => {
+      mounted = false;
+      controller.abort();
+    };
+  }, [apiBaseUrl, currentRoute, projectId, state?.connection]);
 
   useEffect(() => {
     if (state?.connection !== "connected" || currentRoute !== "workflow" || workflowRoute.mode !== "edit") {
@@ -2025,6 +2069,9 @@ export function App() {
               archived={projectArchived}
               onReimport={projectArchived ? handleImportProject : undefined}
               operationMessage={operationMessage}
+              activeRunCount={projectActiveRunCount}
+              recentRuns={projectRecentRuns}
+              runsHref="#/runs"
               workflowBinding={projectWorkflowBinding}
               workflowBindingStep={
                 state?.workspaceStatus === "ready" && projectId && projectWorkflowBinding !== undefined ? (

@@ -340,7 +340,8 @@ describe("App", () => {
     window.location.hash = "#/runs";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
 
-    await waitFor(() => expect(listCount).toBe(2));
+    // Project overview loads one recent page and one active-count page before returning.
+    await waitFor(() => expect(listCount).toBe(4));
   });
 
   it("retains scoped Run rows and refresh time after a refresh failure", async () => {
