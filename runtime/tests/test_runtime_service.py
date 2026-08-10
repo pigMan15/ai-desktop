@@ -357,6 +357,7 @@ def test_scoped_overview_includes_snapshot_workspace_and_active_run_activity(
     )
     AgentJobRepository(db).create(
         id="job-running",
+        project_id=imported["projectId"],
         run_id=projection.runId,
         node_id="plan",
         provider="fake",
@@ -2119,6 +2120,7 @@ def test_runtime_service_discards_recoverable_agent_checkpoint_with_human_audit(
     run = service.create_run(project["workflowVersionId"], title="Discard Checkpoint Run", now=NOW)
     service._agent_jobs.create(
         id="agent-job-discard",
+        project_id=project["projectId"],
         run_id=run.runId,
         node_id="plan",
         provider="fake",

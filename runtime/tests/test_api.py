@@ -1159,6 +1159,7 @@ def test_runtime_api_cleans_orphan_agent_jobs_during_recovery(tmp_path) -> None:
     )
     service._agent_jobs.create(
         id="job-orphan",
+        project_id=imported["projectId"],
         run_id=run["runId"],
         node_id="plan",
         provider="fake",
@@ -2309,6 +2310,7 @@ def test_runtime_api_lists_and_resumes_recoverable_agent_checkpoints(tmp_path) -
     _project_path, run = import_project_and_create_run(client, tmp_path)
     service._agent_jobs.create(
         id="agent-job-interrupted",
+        project_id=run["projectId"],
         run_id=run["runId"],
         node_id="plan",
         provider="fake",

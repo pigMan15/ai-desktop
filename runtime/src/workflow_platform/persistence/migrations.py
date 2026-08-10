@@ -1,4 +1,8 @@
+import hashlib
+import json
 import sqlite3
+from datetime import datetime, timezone
+from uuid import uuid4
 
 
 RUN_STATE_TABLES_CHILD_FIRST = (
@@ -673,6 +677,9 @@ def _migrate_schema(db: sqlite3.Connection) -> None:
     if "parent_job_id" not in agent_job_columns:
         db.execute("ALTER TABLE agent_jobs ADD COLUMN parent_job_id TEXT")
 
+    _upgrade_agent_jobs_for_knowledge(db)
+    _migrate_knowledge_schema(db)
+
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -719,3 +726,363 @@ def _migrate_schema(db: sqlite3.Connection) -> None:
             "ALTER TABLE agent_sessions ADD COLUMN max_output_bytes INTEGER NOT NULL DEFAULT 1000000"
         )
     db.commit()
+
+
+def _record_migration_audit(
+    db: sqlite3.Connection, action: str, detail: dict
+) -> None:
+    """Append an audit record directly during migration recovery.
+
+    Uses the same record hash algorithm as AuditLog so the chain stays valid.
+    """
+    previous = db.execute(
+        "SELECT record_hash FROM audit_records ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    ).fetchone()
+    previous_hash = previous[0] if previous else None
+    actor = {
+        "id": "migration",
+        "type": "system",
+        "source": "runtime",
+        "trusted": True,
+    }
+    created_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    record = {
+        "id": str(uuid4()),
+        "actor": actor,
+        "action": action,
+        "resource": "knowledge:migration:agent_jobs",
+        "detail": dict(detail),
+        "previousHash": previous_hash,
+        "createdAt": created_at,
+    }
+    content = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    record_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    db.execute(
+        """
+        INSERT INTO audit_records (
+            id, actor_id, actor_json, action, resource, detail_json,
+            previous_hash, record_hash, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["id"],
+            actor["id"],
+            json.dumps(actor, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            action,
+            record["resource"],
+            json.dumps(dict(detail), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            previous_hash,
+            record_hash,
+            created_at,
+        ),
+    )
+
+
+def _upgrade_agent_jobs_for_knowledge(db: sqlite3.Connection) -> None:
+    """Rebuild agent_jobs as a multi-owner job table (document section 25).
+
+    The existing table declares run_id/node_id NOT NULL, so knowledge jobs cannot
+    be expressed with ALTER TABLE. The rebuild runs inside a controlled window
+    (foreign keys disabled) and restores the original table from a backup on any
+    failure, leaving no intermediate agent_jobs_v2-only state.
+    """
+    agent_job_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(agent_jobs)").fetchall()
+    }
+    if "purpose" in agent_job_columns:
+        return
+
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS agent_jobs_backup AS SELECT * FROM agent_jobs;
+            CREATE INDEX IF NOT EXISTS idx_agent_jobs_backup_run_id
+                ON agent_jobs_backup(run_id);
+            """
+        )
+        source_count = db.execute("SELECT COUNT(*) FROM agent_jobs").fetchone()[0]
+        backup_count = db.execute("SELECT COUNT(*) FROM agent_jobs_backup").fetchone()[0]
+        if source_count != backup_count:
+            raise sqlite3.IntegrityError("agent_jobs backup row count mismatch")
+
+        db.executescript(
+            """
+            CREATE TABLE agent_jobs_v2 (
+                id TEXT PRIMARY KEY,
+                project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+                run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+                node_id TEXT,
+                purpose TEXT NOT NULL CHECK (purpose IN (
+                    'workflow-node',
+                    'knowledge-rule-discovery',
+                    'knowledge-change-set-generation'
+                )),
+                owner_id TEXT,
+                provider TEXT NOT NULL,
+                status TEXT NOT NULL,
+                command_json TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'automatic',
+                session_id TEXT,
+                parent_job_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                pid INTEGER,
+                summary TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK (
+                    (purpose = 'workflow-node' AND project_id IS NOT NULL AND run_id IS NOT NULL AND node_id IS NOT NULL)
+                    OR
+                    (purpose = 'knowledge-rule-discovery' AND project_id IS NULL AND run_id IS NULL AND node_id IS NULL AND owner_id IS NOT NULL)
+                    OR
+                    (purpose = 'knowledge-change-set-generation' AND project_id IS NOT NULL AND run_id IS NOT NULL AND node_id IS NULL AND owner_id IS NOT NULL)
+                )
+            );
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO agent_jobs_v2 (
+                id, project_id, run_id, node_id, purpose, owner_id, provider, status,
+                command_json, cwd, mode, session_id, parent_job_id, metadata_json,
+                pid, summary, error, created_at, updated_at
+            )
+            SELECT
+                jobs.id, runs.project_id, jobs.run_id, jobs.node_id, 'workflow-node', NULL,
+                jobs.provider, jobs.status, jobs.command_json, jobs.cwd, jobs.mode,
+                jobs.session_id, jobs.parent_job_id, '{}', jobs.pid, jobs.summary, jobs.error,
+                jobs.created_at, jobs.updated_at
+            FROM agent_jobs AS jobs
+            JOIN runs ON runs.id = jobs.run_id
+            """
+        )
+        copied = db.execute("SELECT COUNT(*) FROM agent_jobs_v2").fetchone()[0]
+        if copied != source_count:
+            raise sqlite3.IntegrityError("agent_jobs copy row count mismatch")
+
+        db.executescript(
+            """
+            DROP TABLE agent_jobs;
+            ALTER TABLE agent_jobs_v2 RENAME TO agent_jobs;
+            CREATE INDEX IF NOT EXISTS idx_agent_jobs_run_id
+                ON agent_jobs(run_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_jobs_purpose_owner_updated
+                ON agent_jobs(purpose, owner_id, updated_at DESC, id DESC);
+            """
+        )
+        violations = db.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f"agent_jobs rebuild foreign key violations: {violations!r}"
+            )
+        db.commit()
+        db.execute("DROP TABLE IF EXISTS agent_jobs_backup")
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            db.executescript(
+                """
+                DROP TABLE IF EXISTS agent_jobs_v2;
+                DROP TABLE IF EXISTS agent_jobs;
+                ALTER TABLE agent_jobs_backup RENAME TO agent_jobs;
+                """
+            )
+            try:
+                _record_migration_audit(
+                    db,
+                    "knowledge.migration.agent_jobs_restored",
+                    {"reason": "agent_jobs rebuild failed; restored backup"},
+                )
+            except Exception:
+                pass
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.execute("PRAGMA foreign_keys = ON")
+        raise
+    else:
+        db.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_knowledge_schema(db: sqlite3.Connection) -> None:
+    """Create knowledge repository tables and indexes (document section 25).
+
+    Knowledge tables intentionally never join RUN_STATE_TABLES_CHILD_FIRST so a
+    legacy Run schema rebuild cannot delete user bindings, snapshots or history.
+    """
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_repositories (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            canonical_root_path TEXT NOT NULL UNIQUE,
+            repository_identity TEXT NOT NULL,
+            current_branch TEXT,
+            head_commit TEXT NOT NULL,
+            auto_apply_low_risk INTEGER NOT NULL DEFAULT 0 CHECK (auto_apply_low_risk IN (0, 1)),
+            status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'RULES_PENDING', 'BLOCKED', 'REMOVED')),
+            active_rule_snapshot_id TEXT,
+            revision TEXT NOT NULL DEFAULT '1',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            removed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_rule_snapshots (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id) ON DELETE CASCADE,
+            head_commit TEXT NOT NULL,
+            writable_paths_json TEXT NOT NULL,
+            protected_paths_json TEXT NOT NULL,
+            index_files_json TEXT NOT NULL,
+            routing_files_json TEXT NOT NULL,
+            template_files_json TEXT NOT NULL,
+            validation_commands_json TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            open_questions_json TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('manifest', 'agent-discovery', 'hybrid')),
+            content_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('PROPOSED', 'CONFIRMED', 'SUPERSEDED', 'STALE')),
+            revision TEXT NOT NULL DEFAULT '1',
+            confirmed_by_json TEXT,
+            confirmed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_rule_files (
+            id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL REFERENCES knowledge_rule_snapshots(id) ON DELETE CASCADE,
+            relative_path TEXT NOT NULL,
+            category TEXT NOT NULL CHECK (category IN ('RULE', 'INDEX', 'ROUTING', 'TEMPLATE', 'REFERENCE')),
+            content_hash TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+            purpose TEXT NOT NULL,
+            UNIQUE(snapshot_id, relative_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_change_sets (
+            id TEXT PRIMARY KEY,
+            supersedes_change_set_id TEXT REFERENCES knowledge_change_sets(id),
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id),
+            rule_snapshot_id TEXT NOT NULL REFERENCES knowledge_rule_snapshots(id),
+            provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'fake')),
+            mode TEXT NOT NULL CHECK (mode IN ('preview', 'risk-based')),
+            base_head_commit TEXT NOT NULL,
+            base_worktree_fingerprint TEXT NOT NULL,
+            plan_json TEXT,
+            unified_diff_uri TEXT,
+            unified_diff_hash TEXT,
+            risk_level TEXT CHECK (risk_level IN ('LOW', 'MEDIUM', 'HIGH', 'BLOCKED')),
+            risk_reasons_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            agent_job_id TEXT,
+            approval_id TEXT,
+            committed_hash TEXT,
+            revision TEXT NOT NULL DEFAULT '1',
+            applied_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_change_set_artifacts (
+            change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
+            artifact_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            workflow_version_id TEXT,
+            artifact_type TEXT NOT NULL,
+            uri TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            artifact_status TEXT NOT NULL CHECK (artifact_status = 'verified'),
+            PRIMARY KEY(change_set_id, artifact_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_file_changes (
+            id TEXT PRIMARY KEY,
+            change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
+            relative_path TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK (operation IN ('CREATE', 'UPDATE')),
+            category TEXT NOT NULL CHECK (category IN ('KNOWLEDGE', 'INDEX', 'ROUTING', 'RULE', 'TEMPLATE')),
+            reason TEXT NOT NULL,
+            source_artifact_ids_json TEXT NOT NULL,
+            before_hash TEXT,
+            proposed_content_uri TEXT NOT NULL,
+            proposed_hash TEXT NOT NULL,
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            UNIQUE(change_set_id, relative_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_change_set_validations (
+            id TEXT PRIMARY KEY,
+            change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
+            validator_id TEXT NOT NULL,
+            validator_type TEXT NOT NULL CHECK (validator_type IN ('builtin', 'repository-command')),
+            status TEXT NOT NULL CHECK (status IN ('PASSED', 'FAILED', 'SKIPPED')),
+            summary TEXT NOT NULL,
+            evidence_uri TEXT,
+            evidence_hash TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_change_set_approvals (
+            id TEXT PRIMARY KEY,
+            change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
+            decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+            actor_json TEXT NOT NULL,
+            comment TEXT NOT NULL,
+            artifact_hashes_json TEXT NOT NULL,
+            rule_snapshot_hash TEXT NOT NULL,
+            target_hashes_json TEXT NOT NULL,
+            base_head_commit TEXT NOT NULL,
+            unified_diff_hash TEXT NOT NULL,
+            invalidated_at TEXT,
+            invalidation_reason TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_git_operations (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id),
+            change_set_id TEXT REFERENCES knowledge_change_sets(id),
+            operation TEXT NOT NULL CHECK (operation IN ('stage', 'unstage', 'commit', 'external-commit-detected')),
+            paths_json TEXT NOT NULL,
+            commit_hash TEXT,
+            actor_json TEXT NOT NULL,
+            detail_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS knowledge_idempotency_keys (
+            scope_key TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            status_code INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(scope_key, idempotency_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_rule_snapshots_repository_updated
+            ON knowledge_rule_snapshots(repository_id, updated_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_change_sets_repository_updated
+            ON knowledge_change_sets(repository_id, updated_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_change_sets_project_run_updated
+            ON knowledge_change_sets(project_id, run_id, updated_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_file_changes_change_set
+            ON knowledge_file_changes(change_set_id, relative_path);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_git_operations_repository_created
+            ON knowledge_git_operations(repository_id, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_idempotency_created
+            ON knowledge_idempotency_keys(created_at, scope_key);
+        """
+    )

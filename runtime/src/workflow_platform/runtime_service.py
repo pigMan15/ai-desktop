@@ -2874,10 +2874,17 @@ class WorkflowRuntimeService:
                 self._db.commit()
 
         with self._lock, self._db:
+            job_project_id = project_id
+            if job_project_id is None and run_id is not None:
+                run_row = self._db.execute(
+                    "SELECT project_id FROM runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                job_project_id = run_row["project_id"] if run_row else None
             if project_id is not None:
                 self._assert_agent_concurrency(project_id, run_id)
             self._agent_jobs.create(
                 id=job_id,
+                project_id=job_project_id,
                 run_id=run_id,
                 node_id=node_id,
                 provider=provider,

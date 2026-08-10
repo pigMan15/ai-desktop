@@ -1562,8 +1562,8 @@ class AgentJobRepository:
         self,
         *,
         id: str,
-        run_id: str,
-        node_id: str,
+        run_id: str | None,
+        node_id: str | None,
         provider: str,
         status: str,
         command: list[str],
@@ -1572,13 +1572,20 @@ class AgentJobRepository:
         mode: str = "automatic",
         session_id: str | None = None,
         parent_job_id: str | None = None,
+        project_id: str | None = None,
+        purpose: str = "workflow-node",
+        owner_id: str | None = None,
+        metadata: dict | None = None,
     ) -> None:
         self._db.execute(
             """
             INSERT INTO agent_jobs (
                 id,
+                project_id,
                 run_id,
                 node_id,
+                purpose,
+                owner_id,
                 provider,
                 status,
                 command_json,
@@ -1586,15 +1593,19 @@ class AgentJobRepository:
                 mode,
                 session_id,
                 parent_job_id,
+                metadata_json,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 id,
+                project_id,
                 run_id,
                 node_id,
+                purpose,
+                owner_id,
                 provider,
                 status,
                 json.dumps(command, separators=(",", ":"), sort_keys=True),
@@ -1602,11 +1613,11 @@ class AgentJobRepository:
                 mode,
                 session_id,
                 parent_job_id,
+                json.dumps(metadata or {}, separators=(",", ":"), sort_keys=True),
                 created_at,
                 created_at,
             ),
         )
-
     def set_running(self, *, id: str, pid: int, updated_at: str) -> None:
         self._db.execute(
             """
@@ -1713,12 +1724,60 @@ class AgentJobRepository:
             output_ids,
         )
 
+    def get_owned(self, id: str, *, purpose: str, owner_id: str) -> dict | None:
+        row = self._db.execute(
+            "SELECT * FROM agent_jobs WHERE id = ? AND purpose = ? AND owner_id = ?",
+            (id, purpose, owner_id),
+        ).fetchone()
+        return self._job_row_to_dict(row) if row is not None else None
+
+    def list_by_purpose_owner(self, *, purpose: str, owner_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM agent_jobs
+            WHERE purpose = ? AND owner_id = ?
+            ORDER BY created_at, id
+            """,
+            (purpose, owner_id),
+        ).fetchall()
+        return [self._job_row_to_dict(row) for row in rows]
+
+    def list_active_by_purpose_owner(self, *, purpose: str, owner_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM agent_jobs
+            WHERE purpose = ? AND owner_id = ? AND status IN ('QUEUED', 'RUNNING')
+            ORDER BY created_at, id
+            """,
+            (purpose, owner_id),
+        ).fetchall()
+        return [self._job_row_to_dict(row) for row in rows]
+
+    def count_active_by_purpose(self, purpose: str) -> int:
+        row = self._db.execute(
+            """
+            SELECT COUNT(*) AS c FROM agent_jobs
+            WHERE purpose = ? AND status IN ('QUEUED', 'RUNNING')
+            """,
+            (purpose,),
+        ).fetchone()
+        return int(row["c"])
+
+    def set_metadata(self, id: str, *, metadata: dict, updated_at: str) -> None:
+        self._db.execute(
+            "UPDATE agent_jobs SET metadata_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(metadata, separators=(",", ":"), sort_keys=True), updated_at, id),
+        )
+
     @staticmethod
     def _job_row_to_dict(row: sqlite3.Row) -> dict:
         return {
             "id": row["id"],
+            "projectId": row["project_id"],
             "runId": row["run_id"],
             "nodeId": row["node_id"],
+            "purpose": row["purpose"],
+            "ownerId": row["owner_id"],
             "provider": row["provider"],
             "status": row["status"],
             "mode": row["mode"],
@@ -1727,6 +1786,7 @@ class AgentJobRepository:
             "pid": row["pid"],
             "sessionId": row["session_id"],
             "parentJobId": row["parent_job_id"],
+            "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else {},
             "summary": row["summary"],
             "error": row["error"],
             "createdAt": row["created_at"],

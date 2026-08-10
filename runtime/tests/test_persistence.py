@@ -177,20 +177,24 @@ EXPECTED_COLUMNS = {
     ],
     "agent_jobs": [
         ("id", "TEXT", False, True),
-        ("run_id", "TEXT", True, False),
-        ("node_id", "TEXT", True, False),
+        ("project_id", "TEXT", False, False),
+        ("run_id", "TEXT", False, False),
+        ("node_id", "TEXT", False, False),
+        ("purpose", "TEXT", True, False),
+        ("owner_id", "TEXT", False, False),
         ("provider", "TEXT", True, False),
         ("status", "TEXT", True, False),
         ("command_json", "TEXT", True, False),
         ("cwd", "TEXT", True, False),
+        ("mode", "TEXT", True, False),
+        ("session_id", "TEXT", False, False),
+        ("parent_job_id", "TEXT", False, False),
+        ("metadata_json", "TEXT", True, False),
         ("pid", "INTEGER", False, False),
         ("summary", "TEXT", False, False),
         ("error", "TEXT", False, False),
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
-        ("mode", "TEXT", True, False),
-        ("session_id", "TEXT", False, False),
-        ("parent_job_id", "TEXT", False, False),
     ],
     "agent_output_events": [
         ("id", "TEXT", False, True),
@@ -652,9 +656,9 @@ def insert_legacy_run_state(db: sqlite3.Connection) -> None:
     db.execute(
         """
         INSERT INTO agent_jobs (
-            id, run_id, node_id, provider, status, command_json, cwd,
+            id, project_id, run_id, node_id, purpose, provider, status, command_json, cwd,
             created_at, updated_at
-        ) VALUES ('agent-job-1', 'run-1', 'task-1', 'fixture', 'RUNNING', '[]',
+        ) VALUES ('agent-job-1', 'project-1', 'run-1', 'task-1', 'workflow-node', 'fixture', 'RUNNING', '[]',
                   'G:/Project/demo', ?, ?)
         """,
         (timestamp, timestamp),
@@ -1043,9 +1047,9 @@ def insert_scoped_run_repository_fixture(db: sqlite3.Connection) -> WorkflowDefi
         db.execute(
             """
             INSERT INTO agent_jobs (
-                id, run_id, node_id, provider, status, command_json, cwd,
+                id, project_id, run_id, node_id, purpose, provider, status, command_json, cwd,
                 created_at, updated_at
-            ) VALUES (?, 'run-a3', 'review', 'fake', ?, '[]', 'C:/Work/Alpha-3',
+            ) VALUES (?, 'project-a', 'run-a3', 'review', 'workflow-node', 'fake', ?, '[]', 'C:/Work/Alpha-3',
                       '2026-08-05T02:00:00Z', '2026-08-05T02:00:00Z')
             """,
             (job_id, status),
@@ -1398,6 +1402,7 @@ def test_agent_job_repository_round_trips_job_and_output() -> None:
 
     repository.create(
         id="agent-job-1",
+        project_id="project-1",
         run_id="run-1",
         node_id="implement",
         provider="codex",
@@ -1429,8 +1434,11 @@ def test_agent_job_repository_round_trips_job_and_output() -> None:
 
     assert repository.get("agent-job-1") == {
         "id": "agent-job-1",
+        "projectId": "project-1",
         "runId": "run-1",
         "nodeId": "implement",
+        "purpose": "workflow-node",
+        "ownerId": None,
         "provider": "codex",
         "status": "COMPLETED",
         "mode": "automatic",
@@ -1439,6 +1447,7 @@ def test_agent_job_repository_round_trips_job_and_output() -> None:
         "pid": 1234,
         "sessionId": None,
         "parentJobId": None,
+        "metadata": {},
         "summary": "done",
         "error": None,
         "createdAt": "2026-07-27T13:00:00Z",
@@ -1464,6 +1473,7 @@ def test_agent_job_repository_lists_run_jobs_in_creation_order() -> None:
 
     repository.create(
         id="agent-job-2",
+        project_id="project-1",
         run_id="run-1",
         node_id="test",
         provider="claude",
@@ -1474,6 +1484,7 @@ def test_agent_job_repository_lists_run_jobs_in_creation_order() -> None:
     )
     repository.create(
         id="agent-job-1",
+        project_id="project-1",
         run_id="run-1",
         node_id="implement",
         provider="fake",
@@ -1496,6 +1507,7 @@ def test_agent_job_repository_lists_output_after_sequence_cursor() -> None:
     repository = AgentJobRepository(db)
     repository.create(
         id="agent-job-1",
+        project_id="project-1",
         run_id="run-1",
         node_id="implement",
         provider="fake",
