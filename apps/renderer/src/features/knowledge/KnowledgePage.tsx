@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type {
   KnowledgeCandidate,
@@ -103,7 +103,10 @@ export function KnowledgePage({
   apiBaseUrl,
   ...legacyProps
 }: Props) {
-  const client: KnowledgeClient | null = apiBaseUrl ? createKnowledgeClient(apiBaseUrl) : null;
+  const client: KnowledgeClient | null = useMemo(
+    () => (apiBaseUrl ? createKnowledgeClient(apiBaseUrl) : null),
+    [apiBaseUrl],
+  );
   const [hash, setHash] = useState(() => window.location.hash);
 
   useEffect(() => {
@@ -147,6 +150,7 @@ export function KnowledgePage({
           projectId={effectiveRoute.projectId}
           runId={effectiveRoute.runId}
           artifacts={artifacts}
+          apiBaseUrl={apiBaseUrl}
           onNavigate={navigate}
         />
       ) : null}

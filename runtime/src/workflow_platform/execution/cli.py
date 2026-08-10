@@ -21,6 +21,7 @@ ALLOWED_ENVIRONMENT_KEYS = {
     "TMP",
     "CODEX_HOME",
     "ANTHROPIC_API_KEY",
+    "PYTHONPATH",
 }
 
 

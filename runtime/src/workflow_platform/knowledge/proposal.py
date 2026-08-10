@@ -309,8 +309,8 @@ def classify_risk(
         return "BLOCKED", ["unresolved questions or agent blockers"]
     if any(result.get("status") == "FAILED" for result in validation_results):
         return "BLOCKED", ["validation failed"]
-    if any(change["category"] in {"RULE", "ROUTING", "TEMPLATE"} for change in changes):
-        return "HIGH", ["rules, routing, or templates changed"]
+    if any(change["category"] in {"RULE", "ROUTING", "TEMPLATE", "INDEX"} for change in changes):
+        return "HIGH", ["rules, routing, index, or templates changed"]
     if any(change["operation"] == "UPDATE" for change in changes):
         return "MEDIUM", ["existing knowledge changed"]
     return "LOW", reasons

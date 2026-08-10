@@ -1,5 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 
+import { createRuntimeClient } from "../../app/runtimeClient";
 import { RuntimeClientError, type KnowledgeClient } from "./knowledgeClient";
 
 type ArtifactOption = { id: string; type: string };
@@ -8,11 +9,12 @@ type Props = {
   client: KnowledgeClient;
   projectId: string;
   runId: string;
-  artifacts: ArtifactOption[];
+  artifacts?: ArtifactOption[];
+  apiBaseUrl?: string;
   onNavigate: (hash: string) => void;
 };
 
-export function ChangeSetCreate({ client, projectId, runId, artifacts, onNavigate }: Props) {
+export function ChangeSetCreate({ client, projectId, runId, artifacts = [], apiBaseUrl, onNavigate }: Props) {
   const [repositories, setRepositories] = useState<Array<{ id: string; name: string; status: string }>>([]);
   const [repositoryId, setRepositoryId] = useState("");
   const [selectedArtifacts, setSelectedArtifacts] = useState<string[]>([]);
@@ -35,6 +37,28 @@ export function ChangeSetCreate({ client, projectId, runId, artifacts, onNavigat
       cancelled = true;
     };
   }, [client]);
+
+  const [loadedArtifacts, setLoadedArtifacts] = useState<ArtifactOption[] | null>(null);
+  useEffect(() => {
+    if (!apiBaseUrl) return;
+    let cancelled = false;
+    const runtimeClient = createRuntimeClient(apiBaseUrl);
+    runtimeClient
+      .listArtifacts(projectId, runId, new AbortController().signal)
+      .then((items) => {
+        if (!cancelled) {
+          setLoadedArtifacts(
+            items.map((artifact) => ({ id: artifact.id, type: artifact.type })),
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadedArtifacts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBaseUrl, projectId, runId]);
 
   const toggleArtifact = (artifactId: string) => {
     setSelectedArtifacts((current) =>
@@ -79,7 +103,7 @@ export function ChangeSetCreate({ client, projectId, runId, artifacts, onNavigat
       </label>
       <fieldset>
         <legend>选择 Artifact（只读来源）</legend>
-        {artifacts.map((artifact) => (
+        {(loadedArtifacts ?? artifacts).map((artifact) => (
           <label key={artifact.id} className="artifact-option">
             <input
               type="checkbox"
@@ -89,7 +113,7 @@ export function ChangeSetCreate({ client, projectId, runId, artifacts, onNavigat
             {artifact.id}（{artifact.type}）
           </label>
         ))}
-        {artifacts.length === 0 ? <p className="muted">该 Run 暂无 Artifact</p> : null}
+        {(loadedArtifacts ?? artifacts).length === 0 ? <p className="muted">该 Run 暂无 Artifact</p> : null}
       </fieldset>
       <label>
         Provider

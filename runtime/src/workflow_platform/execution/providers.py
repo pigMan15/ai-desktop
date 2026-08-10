@@ -181,3 +181,33 @@ def _text_from_claude_message(message: Any) -> str | None:
     ]
     text = "".join(text_parts)
     return text or None
+
+
+class FakeCliProvider:
+    """Fixed-scenario provider for knowledge E2E and tests (document section 34).
+
+    Scenarios are selected through the prompt contract (rule discovery vs
+    change-set generation), never guessed from natural language.
+    """
+
+    id = "fake"
+
+    def __init__(self, mode: str = "knowledge-valid-low") -> None:
+        self._mode = mode
+
+    def build_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        allowed_tools: list[str],
+    ) -> CliCommand:
+        mode = "knowledge-rule-discovery" if "rule-discovery.json" in prompt else self._mode
+        return CliCommand(
+            executable=sys.executable,
+            args=["-m", "workflow_platform.execution.fake_cli", mode],
+            cwd=cwd,
+        )
+
+    def parse_line(self, line: str) -> dict[str, Any]:
+        return CodexCliProvider().parse_line(line)

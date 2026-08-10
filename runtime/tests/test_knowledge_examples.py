@@ -92,6 +92,24 @@ def test_initialize_rejects_non_empty_target(tmp_path: Path) -> None:
     assert "KNOWLEDGE_EXAMPLE_TARGET_NOT_EMPTY" in str(exc.value)
 
 
+def test_pyinstaller_collect_data_includes_knowledge_example_assets() -> None:
+    from pathlib import Path as P
+
+    from PyInstaller.utils.hooks import collect_data_files
+
+    collected = collect_data_files("workflow_platform")
+    collected_paths = [entry[0].replace("\\", "/") for entry in collected]
+    example_assets = [
+        entry
+        for entry in collected_paths
+        if "/complex-business/" in entry or entry.endswith("/complex-business")
+    ]
+    assert example_assets, "PyInstaller data collection missing knowledge example assets"
+    names = {P(entry).name for entry in example_assets}
+    assert "README.md" in names
+    assert "knowledge-repo.yaml" in names
+
+
 def test_initialize_rejects_unknown_example_and_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         initialize(

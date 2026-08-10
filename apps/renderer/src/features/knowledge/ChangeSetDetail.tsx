@@ -37,6 +37,16 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
 
   const actions = changeSet?.allowedActions ?? [];
 
+  const refreshRepositoryRevision = async () => {
+    try {
+      const repository = await client.getRepository(changeSet.repositoryId);
+      setRepositoryRevision(repository.revision);
+      return repository.revision;
+    } catch {
+      return repositoryRevision;
+    }
+  };
+
   return (
     <div className="knowledge-change-set-detail">
       <button type="button" className="link-button" onClick={() => onNavigate("#/knowledge/repositories")}>
@@ -126,15 +136,18 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
                   <button
                     type="button"
                     onClick={() =>
-                      void runAction(
-                        (input) =>
-                          client.gitStage(projectId, runId, changeSetId, {
-                            ...input,
-                            paths: changeSet.fileChanges.map((file) => file.path),
-                            expectedRepositoryRevision: repositoryRevision,
-                          }),
-                        "暂存",
-                      )
+                      void (async () => {
+                        const revision = await refreshRepositoryRevision();
+                        await runAction(
+                          (input) =>
+                            client.gitStage(projectId, runId, changeSetId, {
+                              ...input,
+                              paths: changeSet.fileChanges.map((file) => file.path),
+                              expectedRepositoryRevision: revision,
+                            }),
+                          "暂存",
+                        );
+                      })()
                     }
                   >
                     暂存全部
@@ -144,15 +157,18 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
                   <button
                     type="button"
                     onClick={() =>
-                      void runAction(
-                        (input) =>
-                          client.gitUnstage(projectId, runId, changeSetId, {
-                            ...input,
-                            paths: changeSet.fileChanges.map((file) => file.path),
-                            expectedRepositoryRevision: repositoryRevision,
-                          }),
-                        "取消暂存",
-                      )
+                      void (async () => {
+                        const revision = await refreshRepositoryRevision();
+                        await runAction(
+                          (input) =>
+                            client.gitUnstage(projectId, runId, changeSetId, {
+                              ...input,
+                              paths: changeSet.fileChanges.map((file) => file.path),
+                              expectedRepositoryRevision: revision,
+                            }),
+                          "取消暂存",
+                        );
+                      })()
                     }
                   >
                     取消暂存全部
@@ -167,17 +183,20 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
                     type="button"
                     disabled={!commitTitle.trim()}
                     onClick={() =>
-                      void runAction(
-                        (input) =>
-                          client.gitCommit(projectId, runId, changeSetId, {
-                            ...input,
-                            title: commitTitle,
-                            body: commitBody,
-                            paths: changeSet.fileChanges.map((file) => file.path),
-                            expectedRepositoryRevision: repositoryRevision,
-                          }),
-                        "提交",
-                      )
+                      void (async () => {
+                        const revision = await refreshRepositoryRevision();
+                        await runAction(
+                          (input) =>
+                            client.gitCommit(projectId, runId, changeSetId, {
+                              ...input,
+                              title: commitTitle,
+                              body: commitBody,
+                              paths: changeSet.fileChanges.map((file) => file.path),
+                              expectedRepositoryRevision: revision,
+                            }),
+                          "提交",
+                        );
+                      })()
                     }
                   >
                     提交

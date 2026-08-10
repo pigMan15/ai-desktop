@@ -616,7 +616,21 @@ class KnowledgeRepositoryService:
 
     def _detail(self, repository_id: str) -> dict:
         repository = self._require_repository(repository_id)
-        inspection = self._gateway.inspect(Path(repository["rootPath"]))
+        try:
+            inspection = self._gateway.inspect(Path(repository["rootPath"]))
+            git_status = self._git_status_dict(inspection)
+        except Exception:
+            git_status = {
+                "rootPath": repository["rootPath"],
+                "commonDir": "",
+                "branch": None,
+                "headCommit": repository["headCommit"],
+                "dirty": True,
+                "conflict": False,
+                "worktreeFingerprint": "",
+                "stagedPaths": [],
+                "unstagedPaths": [],
+            }
         active_snapshot = None
         if repository["activeRuleSnapshotId"]:
             active_snapshot = self._snapshots.get(repository["activeRuleSnapshotId"])
@@ -636,7 +650,7 @@ class KnowledgeRepositoryService:
         ]
         return {
             **repository,
-            "gitStatus": self._git_status_dict(inspection),
+            "gitStatus": git_status,
             "activeRuleSnapshot": active_snapshot,
             "recentChangeSets": recent_change_sets[:5],
             "allowedActions": self._repository_allowed_actions(repository),

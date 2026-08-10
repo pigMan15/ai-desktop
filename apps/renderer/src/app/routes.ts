@@ -56,6 +56,9 @@ export function normalizeRoute(hash: string): RouteId {
   if (parseWorkflowRoute(hash).mode !== "library" || hash.split("?")[0] === "#/workflow") {
     return "workflow";
   }
+  if (hash === "#/knowledge" || hash.startsWith("#/knowledge/")) {
+    return "knowledge";
+  }
   return routes.find((route) => route.hash === hash)?.id ?? "projects";
 }
 
@@ -145,7 +148,9 @@ export function isKnownRouteHash(hash: string) {
     !["invalid", "none"].includes(parseScopedNavigationRoute(hash).mode) ||
     routes.some((route) => route.hash === pathname) ||
     pathname === "#/workflow/new" ||
-    /^#\/workflow\/[^/]+$/.test(pathname)
+    /^#\/workflow\/[^/]+$/.test(pathname) ||
+    pathname === "#/knowledge" ||
+    pathname.startsWith("#/knowledge/")
   );
 }
 

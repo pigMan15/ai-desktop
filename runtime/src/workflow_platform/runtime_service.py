@@ -18,7 +18,7 @@ from workflow_platform.compiler.compiler import compile_workflow
 from workflow_platform.execution.cli import CliAgentExecutor
 from workflow_platform.execution.agent_context import AgentContextBuilder
 from workflow_platform.execution.deploy import DeployExecutor
-from workflow_platform.execution.providers import ClaudeCliProvider, CliProvider, CodexCliProvider
+from workflow_platform.execution.providers import ClaudeCliProvider, CliProvider, CodexCliProvider, FakeCliProvider
 from workflow_platform.governance.actors import require_trusted_human
 from workflow_platform.governance.audit import AuditLog
 from workflow_platform.kernel.projection import rebuild_projection
@@ -4671,6 +4671,8 @@ def _default_agent_provider(provider: str) -> CliProvider:
         return CodexCliProvider()
     if provider == "claude":
         return ClaudeCliProvider()
+    if provider == "fake":
+        return FakeCliProvider()
     raise ValueError(f"AGENT_PROVIDER_UNAVAILABLE: Unsupported agent provider: {provider}")
 
 

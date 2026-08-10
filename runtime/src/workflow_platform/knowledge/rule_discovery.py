@@ -367,5 +367,5 @@ def write_analysis_output(analysis_root: Path, relative_path: str, content: str)
             status=403,
         ) from None
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(content, encoding="utf-8")
+    destination.write_text(content, encoding="utf-8", newline="\n")
     return destination

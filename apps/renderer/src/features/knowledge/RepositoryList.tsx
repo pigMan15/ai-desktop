@@ -53,7 +53,8 @@ export function RepositoryList({ client, onNavigate }: Props) {
       setMessage("知识库导入成功");
       setName("");
       setRootPath("");
-      reload();
+      const items = await client.listRepositories();
+      setRepositories(items);
     } catch (caught: unknown) {
       setError(caught instanceof RuntimeClientError ? caught.message : "导入失败");
     } finally {
@@ -70,7 +71,8 @@ export function RepositoryList({ client, onNavigate }: Props) {
         expectedRevision: repository.revision,
         now: new Date().toISOString(),
       });
-      reload();
+      const items = await client.listRepositories();
+      setRepositories(items);
     } catch (caught: unknown) {
       setError(caught instanceof RuntimeClientError ? caught.message : "移除失败");
     } finally {

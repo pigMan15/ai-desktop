@@ -57,6 +57,17 @@ export function useKnowledgeChangeSetPage(
     refresh();
   }, [refresh]);
 
+  const activeStatus = state.changeSet?.status;
+  useEffect(() => {
+    if (activeStatus !== "GENERATING" && activeStatus !== "APPLYING") {
+      return;
+    }
+    const timer = setInterval(() => {
+      refresh();
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeStatus, refresh]);
+
   const runAction = useCallback(
     async <T,>(
       action: (input: { actor: { id: string; type: "human"; source: "renderer"; trusted: boolean }; expectedRevision: string; now: string }) => Promise<T>,

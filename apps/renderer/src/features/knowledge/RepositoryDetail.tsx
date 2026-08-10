@@ -22,6 +22,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [provider, setProvider] = useState<"codex" | "claude" | "fake">("codex");
 
   const reload = useCallback(() => {
     let cancelled = false;
@@ -56,7 +57,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
     try {
       if (!repository) return;
       const queued = await client.discoverRules(repositoryId, {
-        provider: "codex",
+        provider,
         actor: { id: "renderer-user", type: "human", source: "renderer", trusted: true },
         expectedRevision: repository.revision,
         now: new Date().toISOString(),
@@ -161,6 +162,18 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
           <dd>{repository.revision}</dd>
         </dl>
         <div className="button-row">
+          <label>
+            Provider
+            <select
+              aria-label="Provider"
+              value={provider}
+              onChange={(event) => setProvider(event.target.value as "codex" | "claude" | "fake")}
+            >
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+              <option value="fake">Fake</option>
+            </select>
+          </label>
           <button type="button" disabled={busy} onClick={() => void handleDiscover()}>
             发现规则
           </button>
