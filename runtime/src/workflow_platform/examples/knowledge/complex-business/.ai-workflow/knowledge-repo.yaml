@@ -1,0 +1,22 @@
+version: 1
+rules:
+  - KNOWLEDGE-RULES.md
+  - README.md
+routing:
+  - ROUTING.md
+indexes:
+  - INDEX.md
+  - applications/*/INDEX.md
+templates:
+  - template/**/*.md
+writablePaths:
+  - main/**
+  - applications/**
+  - candidate/**
+  - personal/**
+protectedPaths:
+  - .git/**
+  - .github/**
+  - .ai-workflow/**
+validation:
+  commands: []
