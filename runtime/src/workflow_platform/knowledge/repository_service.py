@@ -775,6 +775,7 @@ class KnowledgeRepositoryService:
         recent_change_sets = [
             {
                 "id": item["id"],
+                "projectId": item["projectId"],
                 "repositoryId": item["repositoryId"],
                 "runId": item["runId"],
                 "status": item["status"],

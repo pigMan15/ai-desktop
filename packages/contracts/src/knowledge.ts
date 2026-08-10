@@ -268,6 +268,7 @@ export type AllowedKnowledgeAction =
 export type KnowledgeChangeSetSummary = Pick<
   KnowledgeChangeSet,
   | "id"
+  | "projectId"
   | "repositoryId"
   | "runId"
   | "status"

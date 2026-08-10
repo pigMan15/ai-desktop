@@ -402,7 +402,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
                 <button
                   type="button"
                   className="link-button"
-                  onClick={() => onNavigate(`#/knowledge/change-sets/${changeSet.id}?projectId=${changeSet.runId}`)}
+                  onClick={() => onNavigate(`#/knowledge/change-sets/${changeSet.id}?projectId=${changeSet.projectId}&runId=${changeSet.runId}`)}
                 >
                   查看
                 </button>
