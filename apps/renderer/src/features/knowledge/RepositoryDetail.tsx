@@ -27,11 +27,11 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
     id: string;
     status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
     error: string | null;
-    output: Array<{ sequence: number; text: string }>;
+    output: Array<{ sequence: number; kind: string; text: string }>;
   } | null>(null);
   const discoveryTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [discoveryElapsed, setDiscoveryElapsed] = useState(0);
-  const discoveryLogRef = useRef<HTMLPreElement | null>(null);
+  const discoveryLogRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -108,6 +108,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
             const payload = item.payload as { text?: unknown };
             return {
               sequence: item.sequence,
+              kind: item.kind,
               text:
                 typeof payload.text === "string" ? payload.text : JSON.stringify(item.payload),
             };
@@ -325,11 +326,25 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
           {discoveryJob.error ? (
             <p className="knowledge-toast knowledge-toast--error">{discoveryJob.error}</p>
           ) : null}
-          <pre ref={discoveryLogRef} className="knowledge-diff" style={{ minHeight: 90, maxHeight: 260 }}>
-            {discoveryJob.output.length === 0
-              ? "（暂无输出）"
-              : discoveryJob.output.map((entry) => entry.text).join("\n")}
-          </pre>
+          <div
+            ref={discoveryLogRef}
+            className="knowledge-diff knowledge-job-log"
+            role="log"
+            aria-label="规则发现输出"
+          >
+            {discoveryJob.output.length === 0 ? (
+              <span className="knowledge-log-line knowledge-log-line--muted">（暂无输出）</span>
+            ) : (
+              discoveryJob.output.map((entry) => (
+                <div
+                  key={entry.sequence}
+                  className={`knowledge-log-line knowledge-log-line--${entry.kind}`}
+                >
+                  {entry.text}
+                </div>
+              ))
+            )}
+          </div>
         </section>
       ) : null}
 

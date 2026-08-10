@@ -1523,6 +1523,22 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 
 .inline-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.86rem; color: var(--ink-muted); }
 
+/* 规则发现任务：可读日志行 */
+.knowledge-job-log {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.knowledge-log-line { line-height: 1.55; }
+.knowledge-log-line--progress { color: #7f97ad; }
+.knowledge-log-line--message { color: #dbe4f0; }
+.knowledge-log-line--final { color: #4ade80; font-weight: 600; }
+.knowledge-log-line--error { color: #f87171; }
+.knowledge-log-line--muted { color: #64748b; }
+
 /* 规则发现任务：进行中动画条 */
 .knowledge-job-progress {
   position: relative;

@@ -62,6 +62,9 @@ class CodexCliProvider:
     def parse_line(self, line: str) -> dict[str, Any]:
         payload = _parse_json_line(line)
         if payload is None:
+            stripped = line.strip()
+            if stripped.startswith("ERROR ") or " ERROR " in stripped[:80]:
+                return {"kind": "error", "payload": {"text": stripped[:500]}}
             return _raw_event(line)
 
         event_type = payload.get("type")
@@ -87,16 +90,47 @@ class CodexCliProvider:
                 return {"kind": "error", "payload": {"text": text}}
         if event_type == "item.completed":
             item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message":
-                text = _text_from_value(item.get("text"))
-                if text is not None:
-                    return {"kind": "message", "payload": {"text": text}}
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "agent_message":
+                    text = _text_from_value(item.get("text"))
+                    if text is not None:
+                        return {"kind": "message", "payload": {"text": text}}
+                if item_type == "command_execution":
+                    status = item.get("status")
+                    output = _text_from_value(item.get("aggregated_output")) or ""
+                    if status == "failed" or item.get("error"):
+                        return {
+                            "kind": "error",
+                            "payload": {"text": output[:500] or "命令执行失败"},
+                        }
+                    return {
+                        "kind": "message",
+                        "payload": {"text": output[:500] if output else "命令执行完成"},
+                    }
+                if item_type == "mcp_tool_call":
+                    tool = _text_from_value(item.get("tool")) or "MCP"
+                    result = item.get("result")
+                    result_text = ""
+                    if isinstance(result, dict):
+                        for content in result.get("content") or []:
+                            if isinstance(content, dict) and content.get("type") == "text":
+                                result_text += str(content.get("text", "")) + "\n"
+                    if result_text.strip():
+                        return {
+                            "kind": "message",
+                            "payload": {"text": f"MCP 工具 {tool} 返回：{result_text.strip()[:500]}"},
+                        }
+                    return {"kind": "progress", "payload": {"text": f"MCP 工具 {tool} 已完成。"}}
         if event_type == "item.started":
             item = payload.get("item")
             if isinstance(item, dict) and item.get("type") == "command_execution":
                 command = _text_from_value(item.get("command"))
                 if command is not None:
                     return {"kind": "progress", "payload": {"text": f"Codex 正在执行命令：{command}"}}
+            if isinstance(item, dict) and item.get("type") == "mcp_tool_call":
+                tool = _text_from_value(item.get("tool")) or "MCP"
+                return {"kind": "progress", "payload": {"text": f"Codex 正在调用 MCP 工具：{tool}"}}
 
         return _raw_event(line)
 
