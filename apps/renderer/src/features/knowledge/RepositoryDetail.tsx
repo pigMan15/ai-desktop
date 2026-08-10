@@ -128,8 +128,14 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
             }
             const items = await client.listRuleSnapshots(repositoryId);
             const proposed = items.find((item) => item.status === "PROPOSED");
-            if (proposed) setActiveSnapshot(proposed);
-            setMessage("规则发现完成，请确认报告");
+            if (proposed) {
+              setActiveSnapshot(proposed);
+              setMessage("规则发现完成，请确认报告");
+            } else {
+              setError(
+                "任务完成但未生成规则报告（Agent 输出文件缺失或无效）。请检查上方日志，或更换 Provider / 检查 Codex 沙箱环境后重试。",
+              );
+            }
           } else if (job.status === "FAILED" || job.status === "CANCELLED") {
             if (discoveryTimer.current) {
               clearInterval(discoveryTimer.current);

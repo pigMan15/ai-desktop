@@ -480,6 +480,15 @@ class KnowledgeRepositoryService:
                 )
                 normalized = validate_rule_discovery_output(payload)
             except (OSError, json.JSONDecodeError, KnowledgeProposalError) as error:
+                from workflow_platform.persistence.repositories import AgentJobRepository
+
+                AgentJobRepository(self._db).finish(
+                    id=job_id,
+                    status="FAILED",
+                    summary=None,
+                    error="KNOWLEDGE_AGENT_OUTPUT_MISSING: 规则发现未生成有效输出文件",
+                    updated_at=_now(),
+                )
                 self._audit.record(
                     actor=_system_actor(),
                     action="knowledge.repository.rule_discovery_blocked",
