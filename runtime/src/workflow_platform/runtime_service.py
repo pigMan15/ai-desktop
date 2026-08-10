@@ -124,6 +124,7 @@ class WorkflowRuntimeService:
             runs_repository=self._runs,
         )
         self._knowledge_agent_runner._on_completed = self._knowledge_job_completed
+        self._recover_knowledge_jobs_on_startup()
 
     def _resolve_knowledge_jobs_root(self, db: sqlite3.Connection) -> Path:
         try:
@@ -134,6 +135,15 @@ class WorkflowRuntimeService:
         if not db_path:
             db_path = ".workflow-platform/runtime.db"
         return Path(db_path).resolve().parent / "knowledge-jobs"
+
+    def _recover_knowledge_jobs_on_startup(self) -> None:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        try:
+            self._knowledge_agent_runner.recover_orphaned_jobs(now=now)
+        except Exception:
+            pass
 
     def _knowledge_job_completed(self, job_id: str, result, analysis_root: Path) -> None:
         with self._lock:
