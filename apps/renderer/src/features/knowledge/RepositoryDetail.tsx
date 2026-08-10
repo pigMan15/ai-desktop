@@ -229,16 +229,16 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
     }
   };
 
-  if (!repository) {
-    return <div className="knowledge-empty">加载知识库…</div>;
-  }
-
   const refreshRepository = useCallback(() => {
     client
       .getRepository(repositoryId)
       .then((value) => setRepository(value))
       .catch(() => undefined);
   }, [client, repositoryId]);
+
+  if (!repository) {
+    return <div className="knowledge-empty">加载知识库…</div>;
+  }
 
   return (
     <div className="knowledge-repository-detail">
