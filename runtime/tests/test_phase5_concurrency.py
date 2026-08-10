@@ -163,6 +163,7 @@ def test_runtime_rejects_a_fourth_active_run_at_the_default_limit() -> None:
     for index in range(2):
         jobs.create(
             id=f"job-{index}",
+            project_id="project-1",
             run_id=run_id,
             node_id="plan",
             provider="fake",

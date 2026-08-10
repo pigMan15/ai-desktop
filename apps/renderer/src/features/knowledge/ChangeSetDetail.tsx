@@ -20,11 +20,13 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
   const [repositoryRevision, setRepositoryRevision] = useState("1");
   const changeSet: KnowledgeChangeSetDetail | null = state.changeSet;
 
+  const loadedChangeSetId = changeSet?.id ?? null;
+  const repositoryId = changeSet?.repositoryId ?? null;
   useEffect(() => {
-    if (!changeSet) return;
+    if (!repositoryId) return;
     let cancelled = false;
     client
-      .getRepository(changeSet.repositoryId)
+      .getRepository(repositoryId)
       .then((repository) => {
         if (!cancelled) setRepositoryRevision(repository.revision);
       })
@@ -33,13 +35,14 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [changeSet?.id, client]);
+  }, [loadedChangeSetId, repositoryId, client]);
 
   const actions = changeSet?.allowedActions ?? [];
 
   const refreshRepositoryRevision = async () => {
     try {
-      const repository = await client.getRepository(changeSet.repositoryId);
+      if (!repositoryId) return repositoryRevision;
+      const repository = await client.getRepository(repositoryId);
       setRepositoryRevision(repository.revision);
       return repository.revision;
     } catch {
