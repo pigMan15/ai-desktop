@@ -4,6 +4,10 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $runtimeRoot = Join-Path $root "runtime"
 $entry = Join-Path $runtimeRoot "src\workflow_platform\packaged_runtime.py"
 
+# Make workflow_platform importable so `--collect-data` gathers package data
+# (example Markdown/YAML) in addition to bytecode.
+$env:PYTHONPATH = Join-Path $runtimeRoot "src"
+
 Push-Location $runtimeRoot
 try {
   python -m PyInstaller --version | Out-Null
