@@ -1,4 +1,4 @@
-.worktrees/
+﻿.worktrees/
 node_modules/
 dist/
 build/
@@ -25,3 +25,7 @@ pytest-cache-files-*/
 *.db
 *.db-shm
 *.db-wal
+.pytest-*/
+.review-*/
+runtime/pytest-tmp/
+runtime/tmp-run/

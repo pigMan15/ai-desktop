@@ -1,13 +1,67 @@
 # 本地 Git 知识库对接与产物回补设计规格
 
-**状态：最终开发基线，可直接编码实施**
+**状态：已按最新代码复核的最终开发基线，可直接编码实施**
 
 > 本文件同时承担产品规格、技术设计和实施计划职责，是本功能唯一开发文档。
 > 开发过程中不得再拆分新的子规格或二次方案；如发现契约缺陷，直接修订本文并记录变更。
 
-**日期：2026-08-05**
+**初版日期：2026-08-05**
+
+**代码复核日期：2026-08-10**
 
 **适用范围：Renderer、Desktop、Runtime、Contracts、本地 Git 工作区、内置知识库示例包**
+
+## 0. 最新代码基线与适配结论
+
+本文已按 `2026-08-10` 的仓库代码重新核对。仓库 HEAD 仍为提交 `40300ca feat: add project run overview`，
+但工作区已合入 2026-08-07 至 2026-08-10 的未提交功能改动：Run 控制台与内嵌 Agent 执行器、Agent roster、
+产物扫描反馈、终端项目 Run 发现、Agent 上下文交付（`AgentContextSpec.delivery`）和项目并发控制。
+编码时以实际合入后的最新代码为准；如果下列现有契约继续演进，必须先同步修订本文，
+不得在实现中静默保留第二套接口或状态模型。
+
+已确认的现状和本功能的适配决定如下：
+
+1. Run 已是 Project 下的一级聚合，所有 Run 子资源 API 使用
+   `/projects/{projectId}/runs/{runId}/...`，现已覆盖 projection/overview、agents（含 interactive-session 与
+   checkpoints）、terminals、deployments、recovery、timeline、artifacts、approvals、gates。知识变更集属于 Run，
+   详情、输出和所有 mutation 也必须完整带上该作用域，与现有 scoped 路由保持同一风格。
+2. `RunProjection.revision` 与 `expectedRevision` 已是字符串。新知识库公开契约统一使用不透明字符串 revision，
+   Renderer 不解析、不自增；Runtime 可在内部使用十进制字符串递增。
+3. Runtime 已使用 `RuntimeContractError` 和 `{ code, message, details?, correlationId }` 错误包络；
+   Renderer 已使用 `RuntimeClientError`，Desktop Runtime IPC 已能保留该包络并只转发白名单请求头。
+   工作区已新增 `RUN_CONCURRENCY_LIMIT`、`AGENT_CONCURRENCY_LIMIT`、`PROJECT_CONCURRENCY_INVALID` 错误码，
+   新增知识错误码不得与 `packages/contracts/src/errors.ts` 的 `ERROR_CODES` 重名。
+4. Artifact 已具有 `verified | provisional | invalidated` 状态。只有通过
+   `ArtifactRepository.get_for_run(runId, artifactId)` 读取且当前状态为 `verified` 的 Artifact 才能进入知识变更集。
+   产物扫描反馈（`RunArtifactScanFeedback`）已落地：变更集创建页的 Artifact 多选应复用扫描结果的四类展示
+   （本次新提交/已存在/缺失/无效），但节点完成授权仍完全由 Runtime 的 `allowedActions` 决定。
+5. Run 已持有不可变工作流快照、`executionWorkspace`、`workspaceMode` 和 workspace lease。
+   知识库是另一份独立本地 Git 仓库：读取 Run Artifact 不占用知识库写锁，知识库写入也不复用 Run workspace lease。
+6. Runtime 已有 `agent_jobs`、`agent_output_events`、`CliAgentExecutor`、取消、输出轮询、interactive session
+   和 checkpoint 基础设施，并新增 scoped 的 `cleanup_scoped_orphan_agent_jobs` 恢复入口。变更集生成必须扩展并
+   复用这些能力；知识任务的重启恢复沿用现有 orphan 检测模式，不再新建平行的知识 Agent 输出体系。
+   项目并发控制（`maxActiveRuns`/`maxActiveAgents`）已落地：知识库 Agent 作业是平台级/后台任务，复用 `agent_jobs`
+   时不得复用 Run Agent 启动路径的 `AGENT_CONCURRENCY_LIMIT` 检查，默认不计入项目配额；如产品后续要求纳入配额，
+   必须先修订本文。为避免完全不受限，知识任务单独设置并发上限：规则发现与变更集生成各最多 2 个同时活动作业，
+   超限按 409 拒绝并返回当前活动 job 信息（复用 `KNOWLEDGE_JOB_ALREADY_RUNNING` 语义），由 Task 6 落实并测试。
+7. Renderer 已有 `scopedPageModel.ts`、`RuntimeClientError`、带取消信号的 Runtime client，并新增
+   `runAgentExecutorModel.ts`、`RunAgentExecutor`、`terminalRunModel.ts` 等 Run 内执行器与轮询组件。
+   Run 范围的知识页面复用这些机制（generation 丢弃、轮询、取消、只读状态）；仓库管理与示例初始化仍是平台级页面。
+8. Runtime 路由目前集中在 `api/app.py`。本功能可以增加独立 `APIRouter`，但必须由 `create_app()` 显式注册，
+   并继续经过现有本地认证、中间件、请求锁和异常处理器。
+9. `runtime/workflow-runtime.spec` 已使用 `collect_data_files('workflow_platform')`，打包脚本也使用
+   `--collect-data workflow_platform`。示例 Markdown 放进 Python 包即可被收集，不预设额外 `--add-data` 修改。
+10. `runtime/src/workflow_platform/examples/` 已存在全功能工作流示例。知识库示例必须作为其子包共存，
+    不创建第二个相互竞争的 `knowledge/examples` 根。
+11. 旧 `/knowledge/candidates`、`/knowledge/syntheses`、`/knowledge/documents` API 以及旧知识 Git IPC 当前仍存在。
+    新链路上线前保持兼容；只有在新 UI 不再调用后，才在最终清理任务中删除旧写入/推送入口。
+12. `migrations.py` 具有旧 Run schema 重建逻辑。新增知识表绝不能加入 `RUN_STATE_TABLES_CHILD_FIRST`，
+    否则一次 Run 状态迁移会误删用户的知识库绑定、快照和变更历史。
+13. `AgentContextSpec.delivery`（`path | hybrid | summary`）已在 Contracts、Runtime 模型和
+    `execution/agent_context.py` 落地（对应 2026-08-10 agent-context-delivery 设计）。知识任务的 Artifact 输入
+    遵循同一语义：分析副本以路径为主，prompt 只携带按 delivery 模式生成的摘要；旧配置缺省按 `summary` 兼容。
+14. Audit 查询已支持 `runId` 过滤（`AuditRecordRepository.list(run_id=...)`）。知识审计动作
+    （`knowledge.change_set.*`、`knowledge.repository.*`）应写入 `runId`，沿用现有审计过滤，不新增第二套审计表。
 
 ## 1. 背景
 
@@ -35,7 +89,8 @@
 
 ## 2. 设计来源与原则
 
-内置示例包参考微信文章《复杂业务团队的 AI Coding 交付实践：知识库、RD 流程和质量门禁》中关于知识分层、索引路由、候选知识、人工审核和知识回补的方法。
+内置示例包参考[微信文章《复杂业务团队的 AI Coding 交付实践：知识库、RD 流程和质量门禁》](https://mp.weixin.qq.com/s/aopO-3KO9lenKF5WHhBD7w)
+中关于知识分层、索引路由、候选知识、人工审核和知识回补的方法。
 
 软件只提炼其方法，不复制文章原文或脱敏业务案例。示例包中的规则、模板和案例均为原创内容。
 
@@ -138,6 +193,7 @@ type KnowledgeRepositoryBinding = {
   autoApplyLowRisk: boolean;
   status: "ACTIVE" | "RULES_PENDING" | "BLOCKED" | "REMOVED";
   activeRuleSnapshotId: string | null;
+  revision: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -149,7 +205,8 @@ type KnowledgeRepositoryBinding = {
 - 目录必须位于一个有效 Git 工作树的根目录；
 - 同一规范化根目录只能存在一个活动绑定；
 - `repositoryIdentity` 由规范化路径和 Git 仓库标识生成，不依赖远程地址；
-- `autoApplyLowRisk` 默认值为 `true`，用户可对单个仓库关闭并进入全量预览模式；
+- `autoApplyLowRisk` 默认值为 `false`：LOW 变更集默认进入预览，由用户在仓库设置中显式开启自动写入；
+  开启时仍不自动暂存或提交；首次开启时界面必须显著提示“LOW 风险变更将自动写入目标仓库”；
 - 首期允许 detached HEAD，但禁止执行内置 commit；
 - 仓库存在未解决冲突时允许只读预览，禁止应用变更。
 
@@ -161,6 +218,7 @@ type KnowledgeRepositoryBinding = {
 type RepositoryRuleSnapshot = {
   id: string;
   repositoryId: string;
+  revision: string;
   headCommit: string;
   discoveredFiles: RuleFileReference[];
   writablePaths: string[];
@@ -215,7 +273,11 @@ validation:
 - 清单路径必须相对仓库根目录；
 - 解析后必须拒绝绝对路径、`..`、符号链接越界和未知字段；
 - `validation.commands` 只能来自用户确认的清单或确认后的规则快照；
-- 平台不得让 Agent 自行新增命令后立即执行。
+- 平台不得让 Agent 自行新增命令后立即执行；
+- 规则确认界面必须以独立、不可折叠且高亮的区块逐条展示 `validation.commands` 的精确 argv，
+  并标注来源（`manifest` 或 `agent-discovery`）；
+- 来源为 `agent-discovery` 的校验命令默认不启用，需用户逐条显式确认后才可执行；
+  `manifest` 来源的命令随快照确认自动启用，但确认界面同样完整展示。
 
 ### 5.4 `KnowledgeChangeSet`
 
@@ -224,6 +286,7 @@ validation:
 ```ts
 type KnowledgeChangeSet = {
   id: string;
+  projectId: string;
   repositoryId: string;
   ruleSnapshotId: string;
   runId: string;
@@ -242,12 +305,16 @@ type KnowledgeChangeSet = {
   approvalId: string | null;
   appliedAt: string | null;
   committedHash: string | null;
+  revision: string;
   createdAt: string;
   updatedAt: string;
 };
 ```
 
-`SourceArtifactSnapshot` 必须保存 `artifactId`、`runId`、`nodeId`、`type`、`uri`、`contentHash` 和登记时的状态。只有正式、未失效且属于指定 Run 的 Artifact 可以进入变更集。
+`SourceArtifactSnapshot` 必须保存 `artifactId`、`runId`、`nodeId`、`workflowVersionId`、`type`、`uri`、
+`contentHash` 和登记时的 `status: "verified"`。Runtime 必须先验证 `projectId -> runId`，再使用
+`ArtifactRepository.get_for_run(runId, artifactId)` 验证 `runId -> artifactId`；不得先按全局 Artifact ID 查询后再补归属判断。
+溯源使用 Run 创建时保存的不可变工作流快照，不重新读取工作流库中的当前版本。
 
 ### 5.5 `KnowledgeFileChange`
 
@@ -266,6 +333,87 @@ type KnowledgeFileChange = {
 ```
 
 首期契约中不存在 `DELETE` 和 `RENAME`。
+
+变更集使用的辅助类型固定如下（`Actor` 复用现有 Contracts 定义）：
+
+```ts
+type RuleFileReference = {
+  path: string;
+  category: "RULE" | "INDEX" | "ROUTING" | "TEMPLATE" | "REFERENCE";
+  hash: string;
+  sizeBytes: number;
+  purpose: string;
+};
+
+type SourceArtifactSnapshot = {
+  artifactId: string;
+  projectId: string;
+  runId: string;
+  nodeId: string;
+  workflowVersionId: string | null;
+  type: string;
+  uri: string;
+  contentHash: string;
+  status: "verified";
+};
+
+type KnowledgeUpdatePlan = {
+  summary: string;
+  facts: string[];
+  inferences: string[];
+  openQuestions: string[];
+  files: Array<Pick<KnowledgeFileChange, "path" | "operation" | "reason" | "sourceArtifactIds">>;
+};
+
+type ValidationResult = {
+  validatorId: string;
+  validatorType: "builtin" | "repository-command";
+  status: "PASSED" | "FAILED" | "SKIPPED";
+  summary: string;
+  evidenceUri: string | null;
+  evidenceHash: string | null;
+};
+
+type KnowledgeGitStatus = {
+  rootPath: string;
+  commonDir: string;
+  branch: string | null;
+  headCommit: string;
+  dirty: boolean;
+  conflict: boolean;
+  worktreeFingerprint: string;
+  stagedPaths: string[];
+  unstagedPaths: string[];
+};
+
+type KnowledgeApproval = {
+  id: string;
+  decision: "approved" | "rejected";
+  actor: Actor;
+  comment: string;
+  artifactHashes: string[];
+  ruleSnapshotHash: string;
+  targetHashes: string[];
+  baseHeadCommit: string;
+  unifiedDiffHash: string;
+  invalidatedAt: string | null;
+};
+
+type KnowledgeAgentOutputEvent = {
+  id: string;
+  jobId: string;
+  sequence: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+type KnowledgeChangeSetStatus =
+  | "DRAFT" | "GENERATING" | "VALIDATING" | "READY_TO_APPLY"
+  | "AWAITING_APPROVAL" | "APPROVED" | "APPLYING" | "APPLIED"
+  | "PARTIALLY_STAGED" | "STAGED" | "COMMITTED" | "STALE"
+  | "BLOCKED" | "FAILED" | "ABANDONED";
+```
 
 ## 6. 规则发现
 
@@ -316,23 +464,27 @@ Agent 无权把建议直接升级为规则。用户必须确认或编辑报告�
 
 用户从 Run 中勾选 Artifact、目标知识库和 Agent Provider。Runtime 校验：
 
-- Artifact 属于同一 Run；
-- Artifact 状态正式且未失效；
+- `projectId -> runId -> artifactId` 归属链完整；
+- Artifact 当前状态严格等于 `verified`，且内容哈希复核通过；
 - 目标知识库活动且存在已确认规则快照；
 - 仓库路径仍指向同一个 Git 工作树；
 - 当前 Git 基线可读取。
 
 创建后保存 Artifact 哈希、规则快照哈希、HEAD 和工作树指纹。
+复制 Artifact 内容时以 Run 保存的 `executionWorkspace` 为根，使用现有 Artifact preview/安全路径校验读取文件，
+重新计算 SHA-256 后才写入分析副本；拒绝绝对路径越界、非文件 URI、当前文件哈希变化和无法读取的 Artifact。
+知识任务只读访问 Run workspace，不申请或延长其 workspace lease。
 
 ### 7.2 Agent 输入合同
 
 Agent Prompt 按以下顺序组装：
 
 1. 平台安全协议和只允许返回结构化提案的约束；
-2. 目标知识库根目录和允许读取、允许写入、禁止写入范围；
+2. 分析副本中的逻辑仓库根 `input/target` 和允许读取、允许写入、禁止写入的相对路径范围；
 3. 已确认规则快照；
 4. 规则快照引用的原始规则、索引和模板文件；
-5. 选中 Artifact 的路径、类型、哈希、摘要及必要内容；
+5. 选中 Artifact 的路径、类型、哈希及必要内容；摘要按 `AgentContextSpec.delivery` 语义提供
+   （`path` 模式不内联摘要，指示 Agent 从分析副本按需读取；`hybrid`/`summary` 模式提供有界摘要）；
 6. 与目标主题相关的现有知识文件；
 7. 输出 Schema 和风险提示要求。
 
@@ -522,10 +674,14 @@ Source-Run: <runId>
 | --- | --- |
 | `#/knowledge/repositories` | 本地知识库列表、导入、状态和规则确认入口 |
 | `#/knowledge/repositories/:repositoryId` | 仓库概览、规则快照、边界、Git 状态和历史变更集 |
-| `#/knowledge/change-sets/new` | 从 Run 选择 Artifact、目标仓库和 Agent |
-| `#/knowledge/change-sets/:changeSetId` | 计划、来源、风险、未确定项、diff、校验、审核和写入 |
+| `#/knowledge/change-sets/new?projectId=...&runId=...` | 从指定 Run 选择 Artifact、目标仓库和 Agent |
+| `#/knowledge/change-sets/:changeSetId?projectId=...&runId=...` | 计划、来源、风险、未确定项、diff、校验、审核和写入 |
 | `#/knowledge/repositories/:repositoryId/git` | status、diff、stage、unstage 和 commit |
 | `#/knowledge/examples` | 内置示例包预览和初始化 |
+
+仓库列表、仓库详情、Git 面板和示例页是平台级资源，不要求 Run 查询参数。创建和查看变更集是 Run 范围页面，
+必须复用 `parseScopedRunRoute` 的规则：`projectId`、`runId` 各出现一次、编码合法、`projectId` 与当前项目一致。
+上下文变化时使用新的 generation 和 `AbortSignal` 丢弃旧请求结果，不得把上一个 Run 的变更集短暂显示到当前 Run。
 
 ### 12.2 核心交互
 
@@ -541,7 +697,7 @@ Source-Run: <runId>
 创建变更集：
 
 1. 从当前 Run 或知识库页面进入；
-2. 选择一个或多个正式 Artifact；
+2. 选择一个或多个 `verified` Artifact；
 3. 选择目标知识库和 Agent Provider；
 4. 展示即将提供给 Agent 的规则与来源范围；
 5. 生成计划和 diff；
@@ -560,8 +716,10 @@ Source-Run: <runId>
 
 ## 13. Runtime API 最终契约
 
-所有写操作携带可信 Actor、`expectedRevision` 和 `Idempotency-Key`。知识库绑定是平台级本地资源；
-从 Run 创建变更集使用项目和 Run 双重路径前缀，且 Runtime 必须验证二者归属一致。
+所有写操作携带可信 Actor、适用时的不透明字符串 `expectedRevision` 和 `Idempotency-Key`。
+知识库绑定是平台级本地资源；变更集是 Run 子资源，所有变更集路径必须使用项目和 Run 双重前缀。
+Runtime 对每次调用重新验证 `project -> run -> change set`，涉及来源时继续验证 `run -> artifact`，
+不得信任请求体里的 `projectId`、`runId` 或已有页面上下文。
 
 ### 13.1 知识库
 
@@ -575,49 +733,61 @@ GET    /knowledge-repositories/{repositoryId}/rule-snapshots
 POST   /knowledge-repositories/{repositoryId}/rule-snapshots/{snapshotId}/confirm
 GET    /knowledge-repositories/{repositoryId}/git/status
 GET    /knowledge-repositories/{repositoryId}/git/diff
-POST   /knowledge-repositories/{repositoryId}/git/stage
-POST   /knowledge-repositories/{repositoryId}/git/unstage
-POST   /knowledge-repositories/{repositoryId}/git/commit
+GET    /knowledge-repositories/{repositoryId}/rule-discovery-jobs/{jobId}
+GET    /knowledge-repositories/{repositoryId}/rule-discovery-jobs/{jobId}/output
+POST   /knowledge-repositories/{repositoryId}/rule-discovery-jobs/{jobId}/cancel
 ```
 
 ### 13.2 变更集
 
 ```text
 POST /projects/{projectId}/runs/{runId}/knowledge-change-sets
-GET  /knowledge-change-sets
-GET  /knowledge-change-sets/{changeSetId}
-POST /knowledge-change-sets/{changeSetId}/generate
-GET  /knowledge-change-sets/{changeSetId}/output
-POST /knowledge-change-sets/{changeSetId}/validate
-POST /knowledge-change-sets/{changeSetId}/approve
-POST /knowledge-change-sets/{changeSetId}/reject
-POST /knowledge-change-sets/{changeSetId}/apply
-POST /knowledge-change-sets/{changeSetId}/abandon
+GET  /projects/{projectId}/runs/{runId}/knowledge-change-sets
+GET  /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/generate
+GET  /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/output
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/approve
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/reject
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/apply
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/abandon
+GET  /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/diff
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/stage
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/unstage
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/commit
 ```
 
-变更集详情响应必须包含 `allowedActions`。Renderer 不根据风险级别自行拼装按钮。
+变更集详情响应必须包含 `allowedActions`。Renderer 不根据风险级别自行拼装按钮。`output` 接口验证变更集归属后，
+委托现有 `agent_output_events` 查询，不维护第二份输出流。
 
 ## 14. 最终持久化结构
 
 新增表：
 
 - `knowledge_repositories`
-- `knowledge_repository_rule_snapshots`
-- `knowledge_repository_rule_files`
+- `knowledge_rule_snapshots`
+- `knowledge_rule_files`
 - `knowledge_change_sets`
 - `knowledge_change_set_artifacts`
 - `knowledge_file_changes`
 - `knowledge_change_set_validations`
 - `knowledge_change_set_approvals`
 - `knowledge_git_operations`
+- `knowledge_idempotency_keys`
 
-现有 `knowledge_candidates`、`knowledge_syntheses` 和输出事件表可在首期复用：
+现有基础设施的复用边界：
 
 - 候选知识仍可作为单条知识输入；
-- Artifact 批量抽取改为创建变更集；
-- 合成执行器和实时输出复用于变更集 Agent 作业；
-- 旧的固定路径 Git 发布 API 保留只读兼容，不再作为新界面的主路径；
+- 旧 `/projects/{projectId}/runs/{runId}/artifacts/knowledge-syntheses` 保留兼容，新的 Artifact 批量回补入口创建变更集；
+- `CliAgentExecutor`、`agent_jobs`、`agent_output_events` 和取消能力复用于规则发现与变更集生成；
+- `agent_jobs` 增加任务用途与所有者元数据，不新增 `knowledge_agent_jobs` 或
+  `knowledge_agent_output_events`；分析副本、结构化结果和日志仍保存在受控文件中；
+- 旧的固定路径导出与 Git 发布记录 API 保留一个兼容周期，但新界面不再调用；
 - 数据迁移不自动把旧知识文档写入任何外部仓库。
+
+知识库目标目录与 Run `executionWorkspace` 是两个独立资源。知识任务可只读复制已验证 Artifact，
+但不得调用 `_require_execution_lease(..., write_required=True)`，也不得把 Run workspace lease 当作目标仓库写锁。
+Runtime 为每个 `repositoryIdentity` 维护独立互斥锁；规则扫描使用读路径，apply、stage、unstage 和 commit
+在同一仓库锁内串行，不同仓库可并行。
 
 ## 15. 内置示例包
 
@@ -629,6 +799,13 @@ POST /knowledge-change-sets/{changeSetId}/abandon
 2. **纯模板模式**：保留规则、目录、字段说明和模板，移除虚构业务内容，用作新团队起点。
 
 示例包是普通本地 Git 知识库，不拥有平台特权。初始化后必须通过与其他仓库相同的导入、规则发现、变更集和 Git 流程。
+
+源码资产固定存放在
+`runtime/src/workflow_platform/examples/knowledge/complex-business/`，与现有
+`runtime/src/workflow_platform/examples/full_feature_workflow.py` 同属 `workflow_platform.examples` 包。
+初始化器通过 `importlib.resources` 读取资产并复制到用户选择的空目录，禁止依赖源码绝对路径。
+完整示例中的业务文件由项目内置并具有原创非空内容；纯模板模式由初始化器根据资源清单省略示例案例，
+同时为保留的规则、说明和模板写入完整内容，不创建空文件。
 
 ### 15.2 目录
 
@@ -649,9 +826,13 @@ applications/
     INDEX.md
     domain/
       product/
+        README.md
       solution/
+        README.md
       base/
+        README.md
     tech/
+      README.md
   sample-order-service/
     application.md
     INDEX.md
@@ -761,6 +942,10 @@ invalidWhen: string[]
 | `main/global-constraints.md` | 幂等、事件可重放、状态单向、敏感字段不入知识库四条约束 |
 | `_template/application.md` | 职责、非职责、上下游、模块、入口、Owner、验证日期和失效条件字段 |
 | `_template/INDEX.md` | product/solution/base/tech 的导航说明和新增文档索引规则 |
+| `_template/domain/product/README.md` | 主干业务流程、状态和不变量的收录边界与命名规则 |
+| `_template/domain/solution/README.md` | 客户、渠道或区域差异的收录边界，以及禁止复制 product 主流程的规则 |
+| `_template/domain/base/README.md` | API、消息、模型、存储入口和“易变事实回代码核对”的规则 |
+| `_template/tech/README.md` | 架构约束、错误处理、性能与运维知识的收录边界 |
 | `sample-order-service/application.md` | 虚构应用的职责、非职责、上下游、模块、API 与事件入口 |
 | `sample-order-service/INDEX.md` | 链接所有示例业务、状态、兼容、基础和技术文档 |
 | `flow-create-order.md` | 接单、校验、创建、发事件、回告五步主干流程及失败分支 |
@@ -827,9 +1012,12 @@ invalidWhen: string[]
 | 409 | `KNOWLEDGE_APPROVAL_INVALIDATED` | 清除可写授权并要求重新审核 |
 | 500 | `KNOWLEDGE_APPLY_ROLLBACK_FAILED` | 标记失败并禁止后续 Git 操作 |
 | 409 | `KNOWLEDGE_GIT_IDENTITY_MISSING` | 保留暂存状态，引导用户配置 Git |
-| 409 | `KNOWLEDGE_CHANGE_SET_REQUIRED_FOR_COMMIT` | 拒绝内置 commit |
 | 409 | `KNOWLEDGE_CHANGE_SET_NOT_APPLIED` | 拒绝 stage 或 commit 未应用文件 |
 | 409 | `KNOWLEDGE_JOB_ALREADY_RUNNING` | 返回当前活动 job |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | 同一 key 对应了不同请求体，拒绝执行 |
+| 404 | `KNOWLEDGE_CHANGE_SET_NOT_FOUND_IN_RUN` | 作用域不匹配，按不存在处理 |
+| 409 | `KNOWLEDGE_AGENT_JOB_LOST` | 恢复时 job 已不存在，变更集转为失败 |
+| 409 | `KNOWLEDGE_PROVIDER_ISOLATION_UNAVAILABLE` | Provider 不能满足分析根隔离，禁止启动 |
 | 413 | `KNOWLEDGE_INPUT_LIMIT_EXCEEDED` | 阻断并显示超限文件 |
 | 423 | `KNOWLEDGE_REPOSITORY_BUSY` | 等待同仓库 apply 或 Git 操作结束 |
 
@@ -845,6 +1033,16 @@ invalidWhen: string[]
 ```
 
 `details` 只包含安全的相对路径、资源 ID 和期望/实际 revision，不返回文件全文、绝对敏感路径或命令环境。
+
+实现必须直接复用 `runtime_errors.py` 的 `RuntimeContractError` 和 `api/app.py` 的
+`runtime_contract_response()`；新 Router 不定义 `_knowledge_error()`、`HTTPException(detail=...)` 或第二个错误映射。
+Pydantic 请求校验也应由现有 `RequestValidationError` handler 转换为同一包络：
+`code=REQUEST_VALIDATION_FAILED`、安全的字段级 `details.errors` 和 HTTP 400。修改 handler 时保留现有客户端
+对旧 `{ detail: ... }` 的兼容解析测试。
+
+Renderer 经 `runtimeClient.ts` 和 Desktop Runtime IPC 接收错误，页面状态只保存 `RuntimeClientError`。
+Desktop bridge 继续只允许转发 `Idempotency-Key`，本地认证与 correlation ID 由 Desktop/Runtime 现有链路处理，
+知识功能不得把 Runtime Token 暴露给 Renderer。
 
 页面刷新和应用重启后必须恢复规则发现、Agent 生成、审核和 Git 操作的真实状态，不得把进行中任务显示为成功。
 
@@ -863,17 +1061,21 @@ invalidWhen: string[]
 - 清单解析、路径规范化和符号链接越界；
 - 规则扫描和规则快照失效；
 - Artifact 归属、状态和哈希校验；
+- `project -> run -> change set -> artifact` 跨项目、跨 Run 和猜测 ID 的拒绝行为；
 - 风险分类矩阵；
 - 审核绑定和失效；
 - 写入前基线复核；
 - 多文件原子写入与回滚；
 - Git stage、unstage 和 commit 授权。
+- 知识仓库锁与 Run workspace lease 相互独立，且同仓库写操作串行、不同仓库可并行。
+- `agent_jobs` 复用、purpose/owner 查询、知识任务不触发工作流 node 扫描和遗失 job 恢复。
 
 ### 18.3 Runtime API 测试
 
 - 导入、发现、确认、生成、审核、应用和提交完整链路；
 - 非可信 Actor 被拒绝；
 - revision 冲突和幂等请求；
+- 字符串 revision 原样往返，数字 revision 被请求校验拒绝；
 - Agent 失败、超时、取消和无效输出；
 - 目标仓库在预览后被外部修改；
 - 暂存区混入非变更集文件；
@@ -888,6 +1090,8 @@ invalidWhen: string[]
 - 按 `allowedActions` 显示写入、审核和 Git 操作；
 - 变更集失效时撤销旧操作入口；
 - 页面刷新后恢复实时 Agent 输出。
+- Run 查询作用域缺失、重复、编码错误、项目不一致和快速切换时旧响应被丢弃。
+- Runtime 错误经浏览器 fetch 与 Desktop IPC 后均恢复为相同 `RuntimeClientError`。
 
 ### 18.5 E2E
 
@@ -911,7 +1115,7 @@ invalidWhen: string[]
 1. 可导入至少两个结构不同的本地 Git 知识库，二者无需采用平台目录模板。
 2. 无清单仓库可以通过 Agent 发现和人工确认建立规则快照。
 3. 有清单仓库可以解析并验证清单，清单仍需形成可审计快照。
-4. 用户可从一个 Run 勾选多个正式 Artifact 创建变更集。
+4. 用户可从一个 Run 勾选多个当前状态为 `verified` 的 Artifact 创建变更集。
 5. Agent 只返回结构化提案，不直接修改文件或执行 Git。
 6. Runtime 能稳定区分低、中、高和阻断风险。
 7. 中高风险变更未经有效审核不能写入。
@@ -923,6 +1127,9 @@ invalidWhen: string[]
 13. 示例包通过普通导入链路完成规则发现和知识更新，不依赖硬编码适配器。
 14. 关键动作均可在审计中追溯到 Actor、Run、Artifact、规则快照、diff 和 commit。
 15. Runtime、Renderer、Desktop 和 E2E 自动化测试全部通过。
+16. 所有 Run 范围知识请求都使用完整 Project/Run 路径，跨作用域 ID 返回 404 且不泄露资源存在性。
+17. 新知识表在旧 Run schema 重建测试后仍存在，历史变更集的 Artifact 快照可读取。
+18. 开发态和 PyInstaller 打包态读取到相同的非空示例文件集合，无额外绝对路径打包配置。
 
 ## 20. 编码阶段
 
@@ -991,7 +1198,7 @@ invalidWhen: string[]
 2. Desktop 只复用现有目录选择器；不新增知识库 Git IPC，不调用旧的
    `git:preview-knowledge` 或 `git:publish-knowledge` 完成新流程。
 3. Agent 永远在 Runtime 管理的临时分析副本中运行，不能以目标知识库为 `cwd`。
-4. Agent 通过固定文件 `_output/rule-discovery.json` 或 `_output/proposal.json` 返回结果；
+4. Agent 通过固定文件 `output/rule-discovery.json` 或 `output/proposal.json` 返回结果；
    stdout 仅用于进度展示。
 5. Runtime 读取并验证 Agent 结果后自行生成 diff、风险和授权动作；不接受 Agent 给出的风险结论。
 6. 首期只允许 UTF-8 文本的 `CREATE` 和 `UPDATE`，不允许删除、重命名和二进制变更。
@@ -1002,6 +1209,15 @@ invalidWhen: string[]
 10. Git commit 只提交用户实际选择的已暂存文件，不执行 push。
 11. 旧候选知识、知识文档和合成 API 保留一个兼容周期，只在“历史知识”视图使用。
 12. 内置示例包与普通仓库走完全相同的导入和规则发现流程。
+13. 所有变更集 API 都是 Project/Run 作用域；任何服务入口都按
+    `projectId -> runId -> changeSetId -> artifactId` 的顺序验证所有权。
+14. 所有公开 revision 都是字符串。Renderer 只回传最近一次响应值，不能使用 `+ 1` 预测下一 revision。
+15. 知识 Agent 任务复用现有 Agent job、输出和取消设施，并按现有 orphan 模式实现重启恢复；工作流节点 Agent 与知识 Agent
+    通过 `purpose` 区分，知识任务完成后不触发节点 Artifact 自动扫描。
+16. 知识目标仓库锁与 Run workspace lease 完全独立；不得因为目标仓库可写而授予 Run 工作区写能力，反之亦然。
+17. 新 API 只抛出 `RuntimeContractError` 或可被现有 handler 规范化的领域错误，Renderer 只消费
+    `RuntimeClientError`，Desktop 不建立新的错误包络。
+18. 新知识持久化表不加入 `RUN_STATE_TABLES_CHILD_FIRST`；Run schema 重建后必须通过 `PRAGMA foreign_key_check`。
 
 不存在以下待决项：远程仓库、push、PR、自动提交、删除文件、自动冲突解决、向量检索。
 
@@ -1029,17 +1245,20 @@ Renderer 不再在 `runtimeClient.ts` 重复声明新知识库领域类型。
 | `runtime/src/workflow_platform/knowledge/proposal.py` | 新建 | Agent JSON 解析、路径校验、diff 和风险分类 |
 | `runtime/src/workflow_platform/knowledge/change_set_service.py` | 新建 | 变更集状态机、审核、失效和原子应用 |
 | `runtime/src/workflow_platform/knowledge/repository_service.py` | 新建 | 仓库导入、规则任务、Git 操作和领域编排 |
-| `runtime/src/workflow_platform/knowledge/examples.py` | 新建 | 两种示例包的初始化 |
-| `runtime/src/workflow_platform/knowledge/examples/complex-business/**` | 新建 | 完整示例包的实际 Markdown 与 YAML 文件 |
+| `runtime/src/workflow_platform/knowledge/agent_runner.py` | 新建 | 用知识任务配置复用 `CliAgentExecutor`，不复用工作流节点前置校验或完成回调 |
+| `runtime/src/workflow_platform/examples/knowledge/__init__.py` | 新建 | 使用 `importlib.resources` 列举、预览和初始化两种示例模式 |
+| `runtime/src/workflow_platform/examples/knowledge/complex-business/**` | 新建 | 完整示例包的实际非空 Markdown、YAML 与资源清单 |
 | `runtime/src/workflow_platform/persistence/knowledge_repositories.py` | 新建 | 新表的 Repository 类 |
-| `runtime/src/workflow_platform/persistence/migrations.py` | 修改 | 创建新表、索引和迁移兼容 |
+| `runtime/src/workflow_platform/persistence/migrations.py` | 修改 | 创建新表、索引，扩展 Agent job 所有权并保证 Run 重建不删除知识表 |
+| `runtime/src/workflow_platform/persistence/repositories.py` | 修改 | 扩展 `AgentJobRepository` 的 purpose/owner 查询和 nullable Run 所有权 |
 | `runtime/src/workflow_platform/api/knowledge_repositories.py` | 新建 | FastAPI Router 和请求模型 |
-| `runtime/src/workflow_platform/api/app.py` | 修改 | 注册知识库 Router |
+| `runtime/src/workflow_platform/api/app.py` | 修改 | 在 `create_app()` 注册 Router，复用现有中间件与错误 handler |
 | `runtime/src/workflow_platform/runtime_service.py` | 修改 | 构造并委托给新领域服务；不继续堆积实现细节 |
-| `runtime/workflow-runtime.spec` | 修改 | 将示例包文件包含进 Runtime EXE |
+| `runtime/src/workflow_platform/execution/cli.py` | 修改 | 仅提取可复用 job 执行/回调边界，不削弱现有 CLI 安全限制 |
 
-打包入口固定修改 `runtime/workflow-runtime.spec`，将示例包目录作为 PyInstaller data 收集；
-`scripts/package-runtime.ps1` 继续调用该 spec，不新增第二套打包路径。
+`runtime/workflow-runtime.spec` 已通过 `collect_data_files('workflow_platform')` 收集包数据，
+`scripts/package-runtime.ps1` 也已有 `--collect-data workflow_platform`。首选只新增包内示例文件和打包读取测试；
+只有打包测试证明资源缺失时才调整现有收集规则，禁止再增加手写绝对路径或第二套 `--add-data`。
 
 ### 24.3 Renderer
 
@@ -1055,19 +1274,23 @@ Renderer 不再在 `runtimeClient.ts` 重复声明新知识库领域类型。
 | `apps/renderer/src/features/knowledge/KnowledgeGitPanel.tsx` | 新建 | status、diff、stage、unstage 和 commit |
 | `apps/renderer/src/features/knowledge/KnowledgeExamples.tsx` | 新建 | 两种示例包预览和初始化 |
 | `apps/renderer/src/features/knowledge/knowledgeClient.ts` | 新建 | 新知识库 Runtime API 客户端 |
-| `apps/renderer/src/features/knowledge/useKnowledgeWorkspace.ts` | 新建 | 路由级加载、轮询和 mutation 后刷新 |
+| `apps/renderer/src/features/knowledge/useKnowledgeChangeSetPage.ts` | 新建 | 基于 `scopedPageModel.ts` 的 Run 作用域加载、轮询和 mutation 后刷新 |
+| `apps/renderer/src/features/runs/scopedPageModel.ts` | 复用 | generation、过期响应、刷新、只读和 `RuntimeClientError` 状态 |
 | `apps/renderer/src/app/routes.ts` | 修改 | 解析知识库子路由 |
 | `apps/renderer/src/app/App.tsx` | 修改 | 移除新知识链路的集中状态，只传运行上下文 |
-| `apps/renderer/src/app/runtimeClient.ts` | 修改 | 导出通用 Runtime request；保留旧 API 兼容 |
+| `apps/renderer/src/app/runtimeClient.ts` | 修改 | 在现有 hardened request 上增加知识方法；保留结构化错误、headers 与 `AbortSignal` |
 | `apps/renderer/src/app/styles.css` | 修改 | 知识库工作台、diff 和审核布局 |
 
-每个新增组件必须有同目录 `.test.tsx`；`knowledgeClient.ts` 和 Hook 分别有单元测试。
+每个新增组件必须有同目录 `.test.tsx`；`knowledgeClient.ts`、Hook 和知识子路由分别有单元测试。
+不得复制 `scopedPageModel.ts` 的 reducer，也不得绕过 `runtimeClient.ts` 直接实现第二个 fetch/IPC 错误解析器。
 
 ### 24.4 Desktop
 
-新链路复用 `window.workflowProject.selectDirectory()`。`gitWorkspace.ts` 的项目 worktree 能力保持不变。
-旧知识发布 IPC `git:preview-knowledge` 和 `git:publish-knowledge` 在本功能上线时从 Main handler、preload
-和 Renderer 类型中删除，防止继续执行“自动写入 + commit + push”。旧知识文档及其历史 Git 发布记录仍可读取；
+新链路复用 `window.workflowProject.selectDirectory()`，所有业务请求都经现有 `window.workflowRuntime.request()`。
+Desktop Runtime bridge 继续只转发 `Idempotency-Key` 白名单头并保留结构化 Runtime 错误，不新增知识专用 IPC。
+`gitWorkspace.ts` 的项目 worktree 能力保持不变。旧知识发布 IPC `git:preview-knowledge` 和
+`git:publish-knowledge` 当前仍由旧 UI 调用；在新链路通过 E2E 且旧 UI 不再调用后，从 Main handler、preload、
+Renderer 类型和旧页面按钮一次性删除，防止继续执行“自动写入 + commit + push”。旧知识文档及其历史 Git 发布记录仍可读取；
 旧候选、审核、合成和文档 API 保留，不再提供旧 Git 发布写入口。项目 worktree 的 `git:push` 不属于知识库链路，保持不变。
 
 ### 24.5 自动化测试
@@ -1080,11 +1303,15 @@ Renderer 不再在 `runtimeClient.ts` 重复声明新知识库领域类型。
 | `runtime/tests/test_knowledge_repository_git.py` | 新建 | status、diff、stage、unstage 和 commit |
 | `runtime/tests/test_knowledge_repository_api.py` | 新建 | 完整 API 和错误码 |
 | `runtime/tests/test_knowledge_examples.py` | 新建 | 示例包内容与导入 |
+| `runtime/tests/test_knowledge_agent_jobs.py` | 新建 | 现有 Agent job 复用、作用域、取消、orphan 恢复和不触发节点扫描 |
 | `tests/e2e/knowledge-repository.spec.ts` | 新建 | 完整桌面端流程 |
 
 ## 25. 数据库迁移最终定义
 
-在 `migrate(db)` 的同一事务中创建以下表。SQLite 开启外键后，旧数据库迁移不得删除或重建现有知识表。
+在 `migrate(db)` 的现有迁移流程中创建以下表。SQLite 开启外键后，旧数据库迁移不得删除或重建现有知识表。
+知识表不加入 `RUN_STATE_TABLES_CHILD_FIRST`。因为旧 Run schema 重建会删除 `runs`、`artifacts` 和
+`agent_jobs`，知识变更集对这些对象保存 ID、哈希和元数据快照，但不建立会悬空的数据库外键；
+创建和每次 mutation 时仍由服务层执行当前 `project -> run -> artifact/job` 归属校验。
 
 ```sql
 CREATE TABLE IF NOT EXISTS knowledge_repositories (
@@ -1095,10 +1322,10 @@ CREATE TABLE IF NOT EXISTS knowledge_repositories (
   repository_identity TEXT NOT NULL,
   current_branch TEXT,
   head_commit TEXT NOT NULL,
-  auto_apply_low_risk INTEGER NOT NULL DEFAULT 1 CHECK (auto_apply_low_risk IN (0, 1)),
+  auto_apply_low_risk INTEGER NOT NULL DEFAULT 0 CHECK (auto_apply_low_risk IN (0, 1)),
   status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'RULES_PENDING', 'BLOCKED', 'REMOVED')),
   active_rule_snapshot_id TEXT,
-  revision INTEGER NOT NULL DEFAULT 1,
+  revision TEXT NOT NULL DEFAULT '1',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   removed_at TEXT
@@ -1119,7 +1346,7 @@ CREATE TABLE IF NOT EXISTS knowledge_rule_snapshots (
   source TEXT NOT NULL CHECK (source IN ('manifest', 'agent-discovery', 'hybrid')),
   content_hash TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('PROPOSED', 'CONFIRMED', 'SUPERSEDED', 'STALE')),
-  revision INTEGER NOT NULL DEFAULT 1,
+  revision TEXT NOT NULL DEFAULT '1',
   confirmed_by_json TEXT,
   confirmed_at TEXT,
   created_at TEXT NOT NULL,
@@ -1141,7 +1368,7 @@ CREATE TABLE IF NOT EXISTS knowledge_change_sets (
   id TEXT PRIMARY KEY,
   supersedes_change_set_id TEXT REFERENCES knowledge_change_sets(id),
   project_id TEXT NOT NULL REFERENCES projects(id),
-  run_id TEXT NOT NULL REFERENCES runs(id),
+  run_id TEXT NOT NULL,
   repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id),
   rule_snapshot_id TEXT NOT NULL REFERENCES knowledge_rule_snapshots(id),
   provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'fake')),
@@ -1157,7 +1384,7 @@ CREATE TABLE IF NOT EXISTS knowledge_change_sets (
   agent_job_id TEXT,
   approval_id TEXT,
   committed_hash TEXT,
-  revision INTEGER NOT NULL DEFAULT 1,
+  revision TEXT NOT NULL DEFAULT '1',
   applied_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -1165,11 +1392,14 @@ CREATE TABLE IF NOT EXISTS knowledge_change_sets (
 
 CREATE TABLE IF NOT EXISTS knowledge_change_set_artifacts (
   change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
-  artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  artifact_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
   node_id TEXT NOT NULL,
+  workflow_version_id TEXT,
   artifact_type TEXT NOT NULL,
   uri TEXT NOT NULL,
   content_hash TEXT NOT NULL,
+  artifact_status TEXT NOT NULL CHECK (artifact_status = 'verified'),
   PRIMARY KEY(change_set_id, artifact_id)
 );
 
@@ -1188,7 +1418,7 @@ CREATE TABLE IF NOT EXISTS knowledge_file_changes (
   UNIQUE(change_set_id, relative_path)
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_validations (
+CREATE TABLE IF NOT EXISTS knowledge_change_set_validations (
   id TEXT PRIMARY KEY,
   change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
   validator_id TEXT NOT NULL,
@@ -1200,7 +1430,7 @@ CREATE TABLE IF NOT EXISTS knowledge_validations (
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_approvals (
+CREATE TABLE IF NOT EXISTS knowledge_change_set_approvals (
   id TEXT PRIMARY KEY,
   change_set_id TEXT NOT NULL REFERENCES knowledge_change_sets(id) ON DELETE CASCADE,
   decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
@@ -1216,34 +1446,6 @@ CREATE TABLE IF NOT EXISTS knowledge_approvals (
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_agent_jobs (
-  id TEXT PRIMARY KEY,
-  repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id),
-  change_set_id TEXT REFERENCES knowledge_change_sets(id),
-  snapshot_id TEXT REFERENCES knowledge_rule_snapshots(id),
-  kind TEXT NOT NULL CHECK (kind IN ('RULE_DISCOVERY', 'CHANGE_SET_GENERATION')),
-  provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'fake')),
-  status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')),
-  prompt_hash TEXT NOT NULL,
-  analysis_root TEXT NOT NULL,
-  pid INTEGER,
-  result_uri TEXT,
-  result_hash TEXT,
-  error TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS knowledge_agent_output_events (
-  id TEXT PRIMARY KEY,
-  job_id TEXT NOT NULL REFERENCES knowledge_agent_jobs(id) ON DELETE CASCADE,
-  sequence INTEGER NOT NULL,
-  kind TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE(job_id, sequence)
-);
-
 CREATE TABLE IF NOT EXISTS knowledge_git_operations (
   id TEXT PRIMARY KEY,
   repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id),
@@ -1255,27 +1457,121 @@ CREATE TABLE IF NOT EXISTS knowledge_git_operations (
   detail_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS knowledge_idempotency_keys (
+  scope_key TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  status_code INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(scope_key, idempotency_key)
+);
 ```
 
 必须同时创建以下索引：
 
 ```sql
 CREATE INDEX IF NOT EXISTS idx_knowledge_rule_snapshots_repository_updated
-  ON knowledge_rule_snapshots(repository_id, updated_at DESC);
+  ON knowledge_rule_snapshots(repository_id, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_knowledge_change_sets_repository_updated
-  ON knowledge_change_sets(repository_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_knowledge_change_sets_run_updated
-  ON knowledge_change_sets(run_id, updated_at DESC);
+  ON knowledge_change_sets(repository_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_change_sets_project_run_updated
+  ON knowledge_change_sets(project_id, run_id, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_knowledge_file_changes_change_set
   ON knowledge_file_changes(change_set_id, relative_path);
-CREATE INDEX IF NOT EXISTS idx_knowledge_agent_jobs_owner_updated
-  ON knowledge_agent_jobs(repository_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_knowledge_git_operations_repository_created
-  ON knowledge_git_operations(repository_id, created_at DESC);
+  ON knowledge_git_operations(repository_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_idempotency_created
+  ON knowledge_idempotency_keys(created_at, scope_key);
 ```
 
 `status` 的合法值由 Python 和 TypeScript 常量统一测试。由于 SQLite 旧表的 CHECK 约束难以无损扩展，
 `knowledge_change_sets.status` 不写数据库 CHECK，由领域层守卫，并在 Contracts 测试中保持完全一致。
+
+现有 `agent_jobs` 需要升级为可表达多种所有者的通用 Agent job。由于当前 `run_id`、`node_id` 是
+`NOT NULL`，不能只靠 `ALTER TABLE ADD COLUMN` 完成；迁移必须在关闭外键检查的受控窗口中创建新表、复制旧行、
+替换表、重建索引，并在重新开启外键后执行 `PRAGMA foreign_key_check`。该迁移放在当前
+`mode/session_id/parent_job_id` 补列逻辑之后，并且只在 `PRAGMA table_info(agent_jobs)` 不含 `purpose` 时执行：
+
+```sql
+CREATE TABLE agent_jobs_v2 (
+  id TEXT PRIMARY KEY,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+  node_id TEXT,
+  purpose TEXT NOT NULL CHECK (purpose IN (
+    'workflow-node',
+    'knowledge-rule-discovery',
+    'knowledge-change-set-generation'
+  )),
+  owner_id TEXT,
+  provider TEXT NOT NULL,
+  status TEXT NOT NULL,
+  command_json TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'automatic',
+  session_id TEXT,
+  parent_job_id TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  pid INTEGER,
+  summary TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    (purpose = 'workflow-node' AND project_id IS NOT NULL AND run_id IS NOT NULL AND node_id IS NOT NULL)
+    OR
+    (purpose = 'knowledge-rule-discovery' AND project_id IS NULL AND run_id IS NULL AND node_id IS NULL AND owner_id IS NOT NULL)
+    OR
+    (purpose = 'knowledge-change-set-generation' AND project_id IS NOT NULL AND run_id IS NOT NULL AND node_id IS NULL AND owner_id IS NOT NULL)
+  )
+);
+
+INSERT INTO agent_jobs_v2 (
+  id, project_id, run_id, node_id, purpose, owner_id, provider, status,
+  command_json, cwd, mode, session_id, parent_job_id, metadata_json,
+  pid, summary, error, created_at, updated_at
+)
+SELECT
+  jobs.id, runs.project_id, jobs.run_id, jobs.node_id, 'workflow-node', NULL,
+  jobs.provider, jobs.status, jobs.command_json, jobs.cwd, jobs.mode,
+  jobs.session_id, jobs.parent_job_id, '{}', jobs.pid, jobs.summary, jobs.error,
+  jobs.created_at, jobs.updated_at
+FROM agent_jobs AS jobs
+JOIN runs ON runs.id = jobs.run_id;
+
+DROP TABLE agent_jobs;
+ALTER TABLE agent_jobs_v2 RENAME TO agent_jobs;
+
+CREATE INDEX idx_agent_jobs_run_id ON agent_jobs(run_id);
+CREATE INDEX idx_agent_jobs_purpose_owner_updated
+  ON agent_jobs(purpose, owner_id, updated_at DESC, id DESC);
+```
+
+旧行迁移为 `purpose='workflow-node'`，并从 `runs.project_id` 回填 `project_id`。知识规则发现的 `owner_id`
+是 `repositoryId`；变更集生成的 `owner_id` 是 `changeSetId`。`metadata_json` 只保存
+`repositoryId`、`snapshotId`、`analysisRoot`、`promptHash`、`resultUri` 和 `resultHash` 等受控元数据，
+不保存完整 Prompt、Artifact 正文或 diff。`agent_output_events`、`agent_checkpoints`、`agent_sessions` 和
+`artifact_consumers` 保持原表并继续引用替换后的 `agent_jobs`。复制行数必须等于原表行数，否则回滚迁移。
+
+该迁移必须满足以下失败恢复细则：
+
+- 重建前先执行 `CREATE TABLE agent_jobs_backup AS SELECT * FROM agent_jobs;`，备份表与正式表同库保存；
+- 复制完成并校验行数一致后，`DROP TABLE agent_jobs` 前再次校验备份表行数等于原表行数；
+- `PRAGMA foreign_key_check` 返回非空、行数不一致或任何步骤抛出异常时：删除 `agent_jobs_v2`，
+  执行 `DROP TABLE agent_jobs` 后 `ALTER TABLE agent_jobs_backup RENAME TO agent_jobs` 恢复原表，
+  写入 `knowledge.migration.agent_jobs_restored` 审计后重新抛出，禁止留下只有 `agent_jobs_v2` 的中间状态；
+- 迁移成功后才删除备份表；迁移与知识表创建在同一个受控窗口内完成，任何一步失败都不提交部分 schema。
+
+`knowledge_change_sets.agent_job_id` 不建立外键：如果旧 Run schema 重建清除了瞬时 Agent job，
+`GENERATING` 变更集在恢复扫描中转为 `FAILED` 并写入 `KNOWLEDGE_AGENT_JOB_LOST`，历史来源快照仍保留。
+
+所有新 mutation 使用 `knowledge_idempotency_keys`。`scope_key` 是 Runtime 构造的稳定资源键：导入为
+`knowledge-repositories`，示例初始化为 `knowledge-example:{exampleId}:{canonicalTargetPath}`，变更集创建为
+`project:{projectId}:run:{runId}:knowledge-change-sets`，其余操作为目标资源完整规范路径。相同 key 与相同
+`request_hash` 在 24 小时窗口内重放已保存的 status/body；相同 key 配不同 hash 返回
+`IDEMPOTENCY_KEY_REUSED`。响应写入与领域 mutation 必须在同一事务提交。
 
 ## 26. Contracts 最终定义
 
@@ -1304,25 +1600,39 @@ export const KNOWLEDGE_FILE_CATEGORIES = [
 公开实体在第 5 节类型基础上统一增加：
 
 ```ts
-type Revisioned = { revision: number };
 type AllowedKnowledgeAction =
   | "discover-rules" | "confirm-rules" | "update-settings" | "remove-repository"
-  | "create-change-set" | "generate" | "validate" | "approve" | "reject"
+  | "create-change-set" | "generate" | "approve" | "reject"
   | "apply" | "abandon" | "stage" | "unstage" | "commit";
 
-type KnowledgeRepositoryDetail = KnowledgeRepositoryBinding & Revisioned & {
+type KnowledgeRepositoryDetail = KnowledgeRepositoryBinding & {
   gitStatus: KnowledgeGitStatus;
   activeRuleSnapshot: RepositoryRuleSnapshot | null;
   recentChangeSets: KnowledgeChangeSetSummary[];
   allowedActions: AllowedKnowledgeAction[];
 };
 
-type KnowledgeChangeSetDetail = KnowledgeChangeSet & Revisioned & {
+type KnowledgeChangeSetDetail = KnowledgeChangeSet & {
   repository: Pick<KnowledgeRepositoryBinding, "id" | "name" | "rootPath">;
   ruleSnapshot: RepositoryRuleSnapshot;
   output: KnowledgeAgentOutputEvent[];
   approval: KnowledgeApproval | null;
   allowedActions: AllowedKnowledgeAction[];
+};
+
+type KnowledgeAgentJobSummary = {
+  id: string;
+  projectId: string | null;
+  runId: string | null;
+  nodeId: string | null;
+  purpose: "knowledge-rule-discovery" | "knowledge-change-set-generation";
+  ownerId: string;
+  provider: "codex" | "claude" | "fake";
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  summary: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 ```
 
@@ -1331,10 +1641,13 @@ type KnowledgeChangeSetDetail = KnowledgeChangeSet & Revisioned & {
 ```ts
 type KnowledgeMutationEnvelope = {
   actor: Actor;
-  expectedRevision: number;
+  expectedRevision: string;
   now: string;
 };
 ```
+
+`revision` 与 `expectedRevision` 沿用当前 Run 契约，属于不透明并发令牌。测试可以使用 `"1"`、`"2"`，
+但任何 Renderer、Desktop 或 API 调用方都不得把它转成 number、排序或自行递增。
 
 列表 API 返回 `{ items, nextCursor }`，首期 `limit` 默认 20、最大 100，按 `updatedAt DESC, id DESC`。
 游标由 Runtime 生成，Renderer 不解析。
@@ -1350,15 +1663,19 @@ Idempotency-Key: <uuid>
 {
   "name": "物流知识库",
   "rootPath": "D:\\knowledge\\logistics",
-  "autoApplyLowRisk": true,
+  "autoApplyLowRisk": false,
   "actor": { ...trustedHuman },
-  "now": "2026-08-05T12:00:00Z"
+  "now": "2026-08-07T12:00:00Z"
 }
 ```
 
 成功返回 `201 KnowledgeRepositoryDetail`。Runtime 必须：规范化路径、拒绝 Git 子目录、确认仓库根、
 计算 `HEAD`、当前分支、冲突状态和 `repositoryIdentity`，然后以 `RULES_PENDING` 创建绑定。
-导入不会自动启动 Agent，界面随后显式调用规则发现。
+导入不会自动启动 Agent，界面随后显式调用规则发现。`autoApplyLowRisk` 默认 `false`，示例按默认值展示；
+仅当用户在该仓库设置中显式开启时才传 `true`。
+若 `canonicalRootPath` 已有活动绑定，返回 409 `KNOWLEDGE_REPOSITORY_DUPLICATE` 和已有 `repositoryId`；
+若已有 `REMOVED` 绑定，则在同一记录上恢复为 `RULES_PENDING`、推进 revision、保留历史变更集，
+并把旧活动快照标记 `STALE`，不得因唯一约束创建第二条记录。
 
 ```http
 GET  /knowledge-examples
@@ -1375,16 +1692,20 @@ POST /knowledge-examples/{exampleId}/initialize
 
 目标目录必须不存在或为空。`initializeGit=true` 时 Runtime 执行 `git init`，但不创建初始 commit。
 返回 `{ rootPath, createdFiles, gitInitialized }`，用户仍需通过普通导入 API 绑定。
+初始化先写入目标父目录下的唯一 staging 目录，逐文件校验资源清单中的相对路径、非空内容和 SHA-256。
+目标不存在时整体原子移动；目标已存在且为空时逐文件原子移动并记录本次创建清单。失败只清理 staging 和本次创建的文件，
+不删除进入操作前已存在的任何内容。
 
 ### 27.2 规则发现
 
 ```http
 POST /knowledge-repositories/{repositoryId}/discover-rules
+Idempotency-Key: <uuid>
 
 {
   "provider": "codex" | "claude" | "fake",
   "actor": { ...trustedHuman },
-  "expectedRevision": 1,
+  "expectedRevision": "1",
   "now": "..."
 }
 ```
@@ -1392,11 +1713,14 @@ POST /knowledge-repositories/{repositoryId}/discover-rules
 成功返回 `202 { jobId, repositoryId, status: "QUEUED" }`。
 
 ```http
-GET /knowledge-agent-jobs/{jobId}
-GET /knowledge-agent-jobs/{jobId}/output?afterSequence=0
+GET  /knowledge-repositories/{repositoryId}/rule-discovery-jobs/{jobId}
+GET  /knowledge-repositories/{repositoryId}/rule-discovery-jobs/{jobId}/output?afterSequence=0
+POST /knowledge-repositories/{repositoryId}/rule-discovery-jobs/{jobId}/cancel
 ```
 
-任务成功后，第一个 API 返回 `result`，其内容是 `PROPOSED RepositoryRuleSnapshot`。
+这三个接口必须同时验证 `purpose=knowledge-rule-discovery` 且 `ownerId=repositoryId`。任务成功后，
+第一个 API 返回 `result`，其内容是 `PROPOSED RepositoryRuleSnapshot`；输出来自现有
+`agent_output_events`。取消是 mutation，携带 `Idempotency-Key`、可信 Actor 和仓库 `expectedRevision`。
 
 确认 API：
 
@@ -1413,7 +1737,7 @@ POST /knowledge-repositories/{repositoryId}/rule-snapshots/{snapshotId}/confirm
   "summary": "...",
   "openQuestions": [],
   "actor": { ...trustedHuman },
-  "expectedRevision": 1,
+  "expectedRevision": "1",
   "now": "..."
 }
 ```
@@ -1424,7 +1748,7 @@ Runtime 重新读取所有引用文件并生成最终哈希。确认成功后：
 - 新快照变成 `CONFIRMED`；
 - 仓库 `active_rule_snapshot_id` 指向新快照；
 - 仓库状态变成 `ACTIVE`；
-- 仓库 revision 加一。
+- 仓库 revision 通过 Runtime `next_revision()` 推进，并将新字符串返回给调用方。
 
 不允许确认仍有 `openQuestions` 的快照。用户必须编辑解决后再提交确认请求。
 
@@ -1447,28 +1771,41 @@ Idempotency-Key: <uuid>
 成功返回 `201 KnowledgeChangeSetDetail`，状态为 `DRAFT`。`mode=preview` 永不自动应用。
 
 ```http
-POST /knowledge-change-sets/{changeSetId}/generate
+GET /projects/{projectId}/runs/{runId}/knowledge-change-sets?cursor=<optional>&limit=20
+GET /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}
+GET /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/output?afterSequence=0
+```
 
-{ "actor": { ...trustedHuman }, "expectedRevision": 1, "now": "..." }
+列表只返回该 Run 的变更集；详情和输出先校验 change set 同时匹配路径中的 `projectId`、`runId`。
+输出接口再校验 `agentJobId` 指向 `purpose=knowledge-change-set-generation` 且 `ownerId=changeSetId` 的现有 Agent job。
+任何一层不匹配统一返回 404 `KNOWLEDGE_CHANGE_SET_NOT_FOUND_IN_RUN`，不得泄露资源是否存在于其他项目或 Run。
+
+```http
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/generate
+Idempotency-Key: <uuid>
+
+{ "actor": { ...trustedHuman }, "expectedRevision": "1", "now": "..." }
 ```
 
 成功返回 `202 { jobId, changeSetId, status: "QUEUED" }`。完成后 Runtime 自动解析输出、运行内建校验、
-计算 diff 和风险，并将变更集推进到下一合法状态。
+计算 diff 和风险，并将变更集推进到下一合法状态。该 job 使用
+`purpose=knowledge-change-set-generation`、`projectId`、`runId` 和 `ownerId=changeSetId`；不要求工作流节点 ID，
+完成后不得调用 `_scan_completed_agent_artifacts()`。
 
 ### 27.4 审核、应用和失效
 
 ```http
-POST /knowledge-change-sets/{changeSetId}/approve
-{ "comment": "已核对扩展点和索引变更", "actor": ..., "expectedRevision": 4, "now": "..." }
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/approve
+{ "comment": "已核对扩展点和索引变更", "actor": ..., "expectedRevision": "4", "now": "..." }
 
-POST /knowledge-change-sets/{changeSetId}/reject
-{ "comment": "来源不足，退回补充", "actor": ..., "expectedRevision": 4, "now": "..." }
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/reject
+{ "comment": "来源不足，退回补充", "actor": ..., "expectedRevision": "4", "now": "..." }
 
-POST /knowledge-change-sets/{changeSetId}/apply
-{ "actor": ..., "expectedRevision": 5, "now": "..." }
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/apply
+{ "actor": ..., "expectedRevision": "5", "now": "..." }
 
-POST /knowledge-change-sets/{changeSetId}/abandon
-{ "reason": "不再需要", "actor": ..., "expectedRevision": 4, "now": "..." }
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/abandon
+{ "reason": "不再需要", "actor": ..., "expectedRevision": "4", "now": "..." }
 ```
 
 `approve` 只接受 `AWAITING_APPROVAL`；`apply` 只接受 `READY_TO_APPLY` 或 `APPROVED`。
@@ -1481,27 +1818,30 @@ POST /knowledge-change-sets/{changeSetId}/abandon
 
 ```http
 GET  /knowledge-repositories/{repositoryId}/git/status
-GET  /knowledge-repositories/{repositoryId}/git/diff?scope=working|staged&changeSetId=<optional>
-POST /knowledge-repositories/{repositoryId}/git/stage
-POST /knowledge-repositories/{repositoryId}/git/unstage
-POST /knowledge-repositories/{repositoryId}/git/commit
+GET  /knowledge-repositories/{repositoryId}/git/diff?scope=working|staged
+GET  /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/diff?scope=working|staged
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/stage
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/unstage
+POST /projects/{projectId}/runs/{runId}/knowledge-change-sets/{changeSetId}/git/commit
 ```
+
+仓库级两个 GET 只提供全仓只读状态。任何会读取或改变变更集状态的 Git 调用都使用完整 Project/Run/Change-Set
+路径，并在查找目标仓库前验证变更集的 `repositoryId` 与请求所操作的仓库一致。
 
 Stage/unstage 请求：
 
 ```json
 {
   "paths": ["candidate/order-adjustment.md"],
-  "changeSetId": "knowledge-change-set-...",
   "actor": { ... },
-  "expectedRevision": 7,
-  "expectedChangeSetRevision": 5,
+  "expectedRepositoryRevision": "7",
+  "expectedRevision": "5",
   "now": "..."
 }
 ```
 
-Git API 的 `expectedRevision` 始终指知识库绑定 revision；请求同时携带 `changeSetId` 时增加
-`expectedChangeSetRevision`。Runtime 必须在同一事务中验证并分别递增两个 revision。
+路径中的 `changeSetId` 是唯一变更集来源。`expectedRepositoryRevision` 指知识库绑定 revision，
+`expectedRevision` 指变更集 revision；Runtime 必须在同一短事务中验证并分别推进两个令牌。
 
 Commit 请求：
 
@@ -1509,18 +1849,17 @@ Commit 请求：
 {
   "title": "knowledge: update order adjustment",
   "body": "Update verified order-adjustment knowledge.",
-  "changeSetId": "knowledge-change-set-...",
   "paths": ["candidate/order-adjustment.md"],
   "actor": { ... },
-  "expectedRevision": 8,
-  "expectedChangeSetRevision": 6,
+  "expectedRepositoryRevision": "8",
+  "expectedRevision": "6",
   "now": "..."
 }
 ```
 
 Runtime 将追踪字段追加到正文。Commit 成功返回 `{ commitHash, branch, committedPaths }`，关联变更集进入
-`COMMITTED`。首期 commit 必须传 `changeSetId`，并且 `paths` 必须是该变更集已 `APPLIED` 的文件子集；
-未传 `changeSetId` 的请求统一返回 `KNOWLEDGE_CHANGE_SET_REQUIRED_FOR_COMMIT`，保证每次内置 Git 提交都能追溯到变更集。
+`COMMITTED`。`paths` 必须是路径中变更集已 `APPLIED` 的文件子集；仓库级没有 commit mutation，
+从 API 结构上保证每次内置 Git 提交都能追溯到 Project、Run 和变更集。
 
 Stage/unstage 完成后，Runtime 以该变更集全部 `APPLIED` 路径为全集重新计算状态：无路径 staged 为 `APPLIED`，
 部分 staged 为 `PARTIALLY_STAGED`，全部 staged 为 `STAGED`。外部 Git 工具改变暂存区时，下一次详情或
@@ -1531,10 +1870,10 @@ Git status 请求执行同一计算并更新状态；检测到包含全部变更
 
 ```http
 POST /knowledge-repositories/{repositoryId}/settings
-{ "autoApplyLowRisk": false, "actor": ..., "expectedRevision": 3, "now": "..." }
+{ "autoApplyLowRisk": false, "actor": ..., "expectedRevision": "3", "now": "..." }
 
 POST /knowledge-repositories/{repositoryId}/remove
-{ "actor": ..., "expectedRevision": 3, "now": "..." }
+{ "actor": ..., "expectedRevision": "3", "now": "..." }
 ```
 
 移除只是解除绑定并设置 `REMOVED`，不删除本地目录、Git 数据、变更集或审计记录。存在运行中 Agent
@@ -1547,7 +1886,7 @@ POST /knowledge-repositories/{repositoryId}/remove
 每个 Agent 任务创建唯一目录：
 
 ```text
-<runtime-temp>/knowledge-jobs/<jobId>/
+<runtime-db-parent>/knowledge-jobs/<jobId>/
   input/
     artifacts/<artifactId>.<ext>
     rules/<relative-rule-files>
@@ -1560,7 +1899,9 @@ POST /knowledge-repositories/{repositoryId}/remove
     output.ndjson
 ```
 
-Runtime 只把确认过的、与任务相关的文件复制到 `input`；Agent 的 `cwd` 是该任务目录，不是目标仓库。
+`runtime-db-parent` 是 `WORKFLOW_PLATFORM_RUNTIME_DB` 所指数据库的父目录；默认开发环境即
+`.workflow-platform/`。规则发现任务只复制确定性扫描选中的入口与有限摘要，变更集任务只复制已确认规则、
+选中 Artifact 和相关目标文件；Agent 的 `cwd` 是该任务目录，不是目标仓库，也不是 Run `executionWorkspace`。
 复制规则：
 
 - 规则文件按原相对路径复制到 `input/rules`；
@@ -1570,11 +1911,14 @@ Runtime 只把确认过的、与任务相关的文件复制到 `input`；Agent �
 - 限制单文件 2 MiB、单个 Artifact 10 MiB、规则文件总量 20 MiB、目标文件总量 20 MiB；
 - 超限进入 `BLOCKED`，不截断、不静默丢弃；
 - 任何符号链接不复制其目标，只记录为不支持并阻断相关路径；
-- 完成任务后保留 `output`、manifest 和有限日志，清理输入内容；故障诊断只保留脱敏日志。
+- 完成任务后把 `output`、manifest 和有限日志保留为持久证据，清理 `input` 内容；
+  `knowledge_file_changes.proposed_content_uri` 必须指向持久 output，不得指向会被系统临时目录清理的文件；
+- Runtime 启动时扫描 `QUEUED`/`RUNNING` 知识 job：进程已不存在则标记为可恢复失败，
+  不得把缺失任务显示为完成。
 
 ### 28.2 Agent CLI 允许能力
 
-调用现有 `CliAgentExecutor`，但知识任务使用专用的 provider 配置：
+调用现有 `CliAgentExecutor`，但由 `knowledge/agent_runner.py` 提供知识任务配置：
 
 - Codex：`codex exec --json --sandbox workspace-write --skip-git-repo-check --cd <analysisRoot> -`；
 - Claude：使用现有 provider 的非交互 JSON 输出；
@@ -1584,8 +1928,18 @@ Runtime 只把确认过的、与任务相关的文件复制到 `input`；Agent �
 - 输出上限 2 MiB；
 - 只信任 output 文件，不信任 stdout 中的 Markdown 或 JSON。
 
-`CliAgentExecutor` 当前使用命令级 `workspace-write`，知识任务仍需在 Runtime 层用分析副本隔离，
-并在 Agent 完成后检查 output 文件是否是本次 job 创建、路径是否位于 output 根。
+Runner 调用 `CliAgentExecutor.run()` 时必须同时传 `cwd=analysisRoot` 与 `project_root=analysisRoot`，
+复用现有 cwd 边界和环境白名单。它直接写入/读取 `AgentJobRepository`，不得调用现有
+`start_agent_job()` 的工作流 node 校验、Run write lease、上下文 Artifact 消费或完成后 Artifact 扫描。
+知识任务首期不创建 `agent_sessions` 或 `agent_checkpoints`：它们当前都绑定工作流 Run/node 语义。
+重启时把遗留 `QUEUED`/`RUNNING` job 标记失败，用户通过重新发现或创建 superseding change set 重试；
+不要为了本功能扩展交互式 Agent 会话。
+`CliAgentExecutor` 当前只提供进程级 cwd、环境白名单和 provider 命令约束；实现知识任务时必须增加测试，
+确认 Prompt、命令参数、环境和 manifest 均不包含目标仓库绝对路径。若某 provider 不能保证只写分析根，
+该 provider 对知识任务返回 `KNOWLEDGE_PROVIDER_ISOLATION_UNAVAILABLE`，不得仅依赖 Prompt 承诺继续运行。
+Agent 完成后检查 output 文件是本 job 创建、没有符号链接、解析后的真实路径位于 output 根且大小未超限。
+写入 `agent_jobs.command_json` 前调用 `redact_command()`：保留可诊断的 executable、固定 flag 和分析根，
+移除 Claude `-p` 后的完整 Prompt 以及任何包含 Artifact 正文的参数；完整 Prompt 只以哈希和受控分析文件引用存在。
 
 ### 28.3 Prompt 固定结构
 
@@ -1607,6 +1961,10 @@ OUTPUT
 ```
 
 Prompt 具体内容以 `manifest.json` 的 JSON 形式嵌入，不允许使用未经转义的用户文本拼接系统命令。
+
+知识任务的 Artifact 输入遵循 `AgentContextSpec.delivery`（2026-08-10 已落地）：`path` 模式不内联文件摘要，
+prompt 指示 Agent 从分析副本按需读取；`hybrid`/`summary` 模式内联有界摘要。规则发现任务同样按需读取
+`input/target`，不在 prompt 内联全部仓库文件。
 
 ### 28.4 `rule-discovery.json` Schema
 
@@ -1735,7 +2093,8 @@ def classify(change_set, snapshot, repository):
 6. 内容不存在明显凭据模式；
 7. 变更集文件数不超过 50，单文件不超过 2 MiB，总 proposed content 不超过 20 MiB；
 8. 清单声明的仓库校验命令（如果已确认）在临时 overlay 中运行，命令失败即阻断；
-9. 只能执行已确认命令的精确 argv，不经 shell 拼接，不接受 Agent 新增命令。
+9. 只能执行已确认命令的精确 argv，不经 shell 拼接，不接受 Agent 新增命令；“已确认”状态与 5.3 一致：
+   `agent-discovery` 来源的命令必须逐条显式确认后才可执行。
 
 仓库校验命令的 cwd 是临时 overlay 根，环境只保留 `PATH`、`SYSTEMROOT`、`TEMP`、`TMP` 和必要的用户级 Git 环境；
 不注入 API Key、Runtime Token 或完整宿主环境。
@@ -1780,15 +2139,15 @@ Git 操作使用同一 Runtime 锁，避免知识写入和 stage/commit 并发�
 ```python
 class KnowledgeRepositoryService:
     def import_repository(self, *, name: str, root_path: str, auto_apply_low_risk: bool, actor: dict, now: str) -> dict: ...
-    def remove_repository(self, repository_id: str, *, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def discover_rules(self, repository_id: str, *, provider: str, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def confirm_rule_snapshot(self, repository_id: str, snapshot_id: str, *, payload: dict, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def update_settings(self, repository_id: str, *, auto_apply_low_risk: bool, actor: dict, expected_revision: int, now: str) -> dict: ...
+    def remove_repository(self, repository_id: str, *, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def discover_rules(self, repository_id: str, *, provider: str, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def get_rule_discovery_job(self, repository_id: str, job_id: str) -> dict: ...
+    def list_rule_discovery_output(self, repository_id: str, job_id: str, *, after_sequence: int) -> list[dict]: ...
+    def cancel_rule_discovery(self, repository_id: str, job_id: str, *, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def confirm_rule_snapshot(self, repository_id: str, snapshot_id: str, *, payload: dict, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def update_settings(self, repository_id: str, *, auto_apply_low_risk: bool, actor: dict, expected_revision: str, now: str) -> dict: ...
     def git_status(self, repository_id: str) -> dict: ...
-    def git_diff(self, repository_id: str, *, staged: bool, change_set_id: str | None) -> dict: ...
-    def git_stage(self, repository_id: str, *, paths: list[str], change_set_id: str, expected_change_set_revision: int, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def git_unstage(self, repository_id: str, *, paths: list[str], change_set_id: str, expected_change_set_revision: int, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def git_commit(self, repository_id: str, *, title: str, body: str, paths: list[str], change_set_id: str, expected_change_set_revision: int, actor: dict, expected_revision: int, now: str) -> dict: ...
+    def git_diff(self, repository_id: str, *, staged: bool) -> dict: ...
 ```
 
 ### 31.2 `KnowledgeChangeSetService`
@@ -1796,17 +2155,24 @@ class KnowledgeRepositoryService:
 ```python
 class KnowledgeChangeSetService:
     def create(self, *, project_id: str, run_id: str, repository_id: str, artifact_ids: list[str], provider: str, mode: str, actor: dict, now: str) -> dict: ...
-    def start_generation(self, change_set_id: str, *, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def get(self, change_set_id: str) -> dict: ...
+    def start_generation(self, project_id: str, run_id: str, change_set_id: str, *, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def get(self, project_id: str, run_id: str, change_set_id: str) -> dict: ...
     def list_for_run(self, project_id: str, run_id: str, *, cursor: str | None, limit: int) -> dict: ...
-    def validate(self, change_set_id: str, *, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def approve(self, change_set_id: str, *, comment: str, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def reject(self, change_set_id: str, *, comment: str, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def apply(self, change_set_id: str, *, actor: dict, expected_revision: int, now: str) -> dict: ...
-    def abandon(self, change_set_id: str, *, reason: str, actor: dict, expected_revision: int, now: str) -> dict: ...
+    def list_output(self, project_id: str, run_id: str, change_set_id: str, *, after_sequence: int) -> list[dict]: ...
+    def approve(self, project_id: str, run_id: str, change_set_id: str, *, comment: str, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def reject(self, project_id: str, run_id: str, change_set_id: str, *, comment: str, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def apply(self, project_id: str, run_id: str, change_set_id: str, *, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def abandon(self, project_id: str, run_id: str, change_set_id: str, *, reason: str, actor: dict, expected_revision: str, now: str) -> dict: ...
+    def git_diff(self, project_id: str, run_id: str, change_set_id: str, *, staged: bool) -> dict: ...
+    def git_stage(self, project_id: str, run_id: str, change_set_id: str, *, paths: list[str], actor: dict, expected_revision: str, expected_repository_revision: str, now: str) -> dict: ...
+    def git_unstage(self, project_id: str, run_id: str, change_set_id: str, *, paths: list[str], actor: dict, expected_revision: str, expected_repository_revision: str, now: str) -> dict: ...
+    def git_commit(self, project_id: str, run_id: str, change_set_id: str, *, title: str, body: str, paths: list[str], actor: dict, expected_revision: str, expected_repository_revision: str, now: str) -> dict: ...
 ```
 
-所有方法先验证 Actor，再验证资源归属、revision、状态和基线；状态转换、审计和数据库写入在一个 SQLite 事务中完成。
+所有 mutation 先验证 Actor，再调用统一的 `require_owned_change_set(project_id, run_id, change_set_id)`，
+然后验证 revision、状态和基线。创建时通过 `get_scoped_run(project_id, run_id)` 与
+`ArtifactRepository.get_for_run(run_id, artifact_id)` 完成归属校验。状态转换、审计和数据库写入在一个 SQLite
+短事务中完成；Agent 进程、校验命令和文件复制不占用事务。
 
 ## 32. 逐任务编码顺序
 
@@ -1823,7 +2189,8 @@ class KnowledgeChangeSetService:
 - Modify: `packages/contracts/src/errors.ts`
 
 - [ ] 写入状态数组、实体类型、请求响应类型、`allowedActions` 和 `isKnowledge...` 守卫。
-- [ ] 增加无效 status、未知 operation、缺少 `expectedRevision` 和空路径的失败测试。
+- [ ] 增加无效 status、未知 operation、缺少/数字型 `expectedRevision`、nullable 知识 Agent node
+  与空路径的失败测试，确认 revision 只能是字符串。
 - [ ] 运行 `npm.cmd --workspace @workflow-platform/contracts run test`，预期全部通过。
 - [ ] 运行 `npm.cmd --workspace @workflow-platform/contracts run build`，预期退出码 0。
 
@@ -1835,10 +2202,14 @@ class KnowledgeChangeSetService:
 - Create: `runtime/src/workflow_platform/persistence/knowledge_repositories.py`
 - Create: `runtime/tests/test_knowledge_repository_persistence.py`
 
-- [ ] 将第 25 节 SQL 放入 `migrate()` 的现有事务，索引全部创建。
-- [ ] Repository 实现 `create/get/list/update_revision/create_snapshot/create_change_set/create_file_change/create_validation/create_approval/create_git_operation`。
+- [ ] 将第 25 节知识表 SQL 放入 `migrate()`；新增表不加入 `RUN_STATE_TABLES_CHILD_FIRST`。
+- [ ] 按第 25 节安全重建 `agent_jobs`（备份表、行数校验、`foreign_key_check` 失败恢复均实现），
+  保留现有 job、output、checkpoint、session 和 artifact consumer，回填 `project_id`/`purpose`。
+- [ ] Repository 实现 `create/get/list/update_revision/create_snapshot/create_change_set/create_file_change/create_validation/create_approval/create_git_operation`
+  以及 `claim/replay_idempotency`。
 - [ ] 所有 JSON 字段使用 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`，读取时验证为预期结构。
-- [ ] 测试新库、旧库迁移、重复 canonical path、外键级联、唯一 sequence 和重启恢复。
+- [ ] 测试新库、旧库迁移、旧 Run schema 重建后知识表保留、重复 canonical path、外键级联、
+  Agent job 迁移、唯一 sequence 和重启恢复。
 - [ ] 运行 `python -m pytest runtime/tests/test_knowledge_repository_persistence.py -q`，预期通过。
 
 ### Task 3：Git Gateway
@@ -1859,8 +2230,8 @@ class KnowledgeChangeSetService:
 **Files:**
 
 - Create: `runtime/src/workflow_platform/knowledge/rule_discovery.py`
-- Create: `runtime/src/workflow_platform/knowledge/examples.py`
-- Create: `runtime/src/workflow_platform/knowledge/examples/complex-business/**`
+- Create: `runtime/src/workflow_platform/examples/knowledge/__init__.py`
+- Create: `runtime/src/workflow_platform/examples/knowledge/complex-business/**`
 - Create: `runtime/tests/test_knowledge_repository_rules.py`
 - Create: `runtime/tests/test_knowledge_examples.py`
 
@@ -1869,6 +2240,7 @@ class KnowledgeChangeSetService:
 - [ ] 创建 Rule Discovery 分析副本和第 28 节 JSON Schema 校验。
 - [ ] 实现规则快照确认、快照文件哈希和 stale 检测。
 - [ ] 生成完整示例包与纯模板包；每个目录中的每个文件必须有非空内容。
+- [ ] 使用 `importlib.resources` 读取示例；验证源码运行和 PyInstaller 数据收集均能列出同一文件集合。
 - [ ] 运行 `python -m pytest runtime/tests/test_knowledge_repository_rules.py runtime/tests/test_knowledge_examples.py -q`，预期通过。
 
 ### Task 5：Agent Prompt、解析与风险
@@ -1879,7 +2251,8 @@ class KnowledgeChangeSetService:
 - Create: `runtime/src/workflow_platform/knowledge/proposal.py`
 - Create: `runtime/tests/test_knowledge_change_sets.py`
 
-- [ ] 实现第 28 节 Prompt 固定段落，并将 manifest 作为 JSON 插值。
+- [ ] 实现第 28 节 Prompt 固定段落，并将 manifest 作为 JSON 插值；Artifact 摘要按 `AgentContextSpec.delivery`
+  语义生成（`path` 模式不内联摘要）。
 - [ ] 校验 `rule-discovery.json` 和 `proposal.json`，拒绝未知字段、输出目录外文件、删除操作和来源缺失。
 - [ ] 实现 SHA-256、working tree fingerprint、基线失效和第 29 节纯风险函数。
 - [ ] 测试 LOW/MEDIUM/HIGH/BLOCKED 全矩阵、凭据内容、路径越界、超限和规则冲突。
@@ -1891,19 +2264,27 @@ class KnowledgeChangeSetService:
 
 - Create: `runtime/src/workflow_platform/knowledge/change_set_service.py`
 - Create: `runtime/src/workflow_platform/knowledge/repository_service.py`
+- Create: `runtime/src/workflow_platform/knowledge/agent_runner.py`
 - Modify: `runtime/src/workflow_platform/runtime_service.py`
-- Modify: `runtime/src/workflow_platform/execution/agent.py` 或当前 Agent 作业编排文件
+- Modify: `runtime/src/workflow_platform/execution/cli.py`
+- Modify: `runtime/src/workflow_platform/persistence/repositories.py`
 - Modify: `runtime/src/workflow_platform/api/app.py`
 - Create: `runtime/src/workflow_platform/api/knowledge_repositories.py`
 - Modify: `runtime/tests/test_knowledge_change_sets.py`
 - Create: `runtime/tests/test_knowledge_repository_api.py`
 
-- [ ] 注册服务，保证 Runtime 单例共享同一 SQLite 连接、RLock、AuditLog 和 Agent executor。
+- [ ] 注册 Router 和服务，保证 Runtime 单例共享同一 SQLite 连接、RLock、AuditLog 和 Agent executor，
+  且新路由经过现有认证、中间件、请求锁与 `RuntimeContractError` handler。
 - [ ] 实现导入、移除、规则发现、确认、设置和 Git API。
-- [ ] 实现项目/Run 归属验证以及 Artifact 正式状态和哈希校验。
-- [ ] 实现变更集创建、Agent 任务排队、输出事件、解析、校验、风险和状态转换。
+- [ ] 实现 `project -> run -> change set -> artifact` 归属验证，并通过 `get_for_run()` 校验 Artifact
+  `status == "verified"` 和哈希。
+- [ ] 扩展现有 Agent job 的 purpose/owner；实现变更集任务排队（规则发现与生成各最多 2 个活动作业，
+  超限返回 409）、现有输出事件、取消、恢复、解析、校验、风险和状态转换。
+- [ ] 知识 Agent 使用分析目录且不要求 Run 写 lease、不验证工作流 node、不触发节点 Artifact 扫描；
+  但变更集 API 仍验证 Project/Run 归属和项目可变更状态。
 - [ ] 实现审核绑定、基线失效、原子写入、回滚和审计。
-- [ ] 使用 Fake Provider 测试成功、无效 JSON、超时、取消、重复请求、revision 冲突和重启恢复。
+- [ ] 使用 Fake Provider 测试成功、无效 JSON、超时、取消、重复请求、字符串 revision 冲突、
+  Agent job 丢失恢复和重启恢复。
 - [ ] 运行 `python -m pytest runtime/tests/test_knowledge_repository_api.py runtime/tests/test_knowledge_change_sets.py -q`，预期通过。
 
 ### Task 7：Renderer API 与知识库工作台
@@ -1911,7 +2292,7 @@ class KnowledgeChangeSetService:
 **Files:**
 
 - Create: `apps/renderer/src/features/knowledge/knowledgeClient.ts`
-- Create: `apps/renderer/src/features/knowledge/useKnowledgeWorkspace.ts`
+- Create: `apps/renderer/src/features/knowledge/useKnowledgeChangeSetPage.ts`
 - Rewrite: `apps/renderer/src/features/knowledge/KnowledgePage.tsx`
 - Create: `apps/renderer/src/features/knowledge/RepositoryList.tsx`
 - Create: `apps/renderer/src/features/knowledge/RepositoryDetail.tsx`
@@ -1926,12 +2307,17 @@ class KnowledgeChangeSetService:
 - Modify: `apps/renderer/src/app/styles.css`
 - Create/Modify: matching `.test.tsx` files beside each component
 
-- [ ] `knowledgeClient.ts` 只调用 Runtime API，所有 mutation 传 `actor`, `expectedRevision`, `now`, `Idempotency-Key`。
-- [ ] 子路由支持 `#/knowledge/repositories`, `#/knowledge/repositories/:id`, `#/knowledge/change-sets/:id`,
-  `#/knowledge/repositories/:id/git` 和 `#/knowledge/examples`。
+- [ ] `knowledgeClient.ts` 复用 `runtimeClient.ts` 的 hardened request，所有 mutation 传 `actor`、
+  字符串 `expectedRevision`、`now` 和 `Idempotency-Key`；支持 `AbortSignal`，错误只暴露 `RuntimeClientError`。
+- [ ] 子路由支持 `#/knowledge/repositories`、`#/knowledge/repositories/:id`、
+  `#/knowledge/change-sets/new?projectId=...&runId=...`、
+  `#/knowledge/change-sets/:id?projectId=...&runId=...`、`#/knowledge/repositories/:id/git` 和
+  `#/knowledge/examples`，并拒绝缺失、重复、错误编码或与当前项目不一致的作用域参数。
 - [ ] 仓库列表实现本地目录选择、导入、规则 pending、ACTIVE、BLOCKED 和 REMOVED 状态。
 - [ ] 规则页展示 discovered files、建议可写/保护目录、校验命令和 open questions；有问题时禁用确认。
-- [ ] 变更集创建页只列出当前 Run 的正式 Artifact，支持全选、取消和来源预览。
+- [ ] 变更集创建页只列出当前 Run 的 `verified` Artifact，支持全选、取消和来源预览。
+- [ ] 变更集页面复用 `scopedPageModel.ts`，上下文切换递增 generation 并取消旧请求；
+  404、维护状态、归档只读和后台刷新行为与现有 Run 支持模块一致。
 - [ ] 变更集详情展示计划、来源、未确定项、风险、逐文件 diff、校验、审核和 Runtime `allowedActions`。
 - [ ] LOW 自动写入显示明确的写入结果；MEDIUM/HIGH 只显示审核动作；BLOCKED 只显示修复入口。
 - [ ] Git 页提供 status、working/staged diff、逐文件 stage/unstage 和 commit；没有 push 按钮。
@@ -1942,18 +2328,21 @@ class KnowledgeChangeSetService:
 
 **Files:**
 
-- Modify: `runtime/workflow-runtime.spec`
-- Modify: `scripts/package-runtime.ps1`（仅当 spec 不支持示例包数据时）
+- Verify first: `runtime/workflow-runtime.spec`
+- Verify first: `scripts/package-runtime.ps1`
 - Modify: `apps/desktop/src/main/main.ts`
 - Modify: `apps/desktop/src/main/gitWorkspace.ts`
 - Modify: `apps/desktop/src/preload/preload.cts`
 - Modify: `apps/desktop/src/preload/global.d.ts`
 - Modify: `apps/renderer/src/app/desktopGit.ts`
 - Create: `tests/e2e/knowledge-repository.spec.ts`
+- Modify: `tests/e2e/desktop-packaged.spec.ts`（验证打包资源并移除旧 publish IPC 断言）
 - Modify: `apps/desktop/test/main.test.ts`（验证目录选择仍可用）
 
-- [ ] 验证开发运行时与 PyInstaller 运行时都能读取示例包。
-- [ ] 删除旧知识 Git IPC、preload 方法和 Renderer 调用，保留项目 worktree Git 能力。
+- [ ] 验证开发运行时与 PyInstaller 运行时都能读取示例包；当前 `collect_data_files`/`--collect-data`
+  足够时不修改打包文件，失败时只修正现有收集规则。
+- [ ] 新链路 E2E 通过且旧页面不再调用后，删除旧知识 Git IPC、preload 方法、Renderer 调用和推送按钮，
+  保留项目 worktree Git 能力以及旧知识只读 API。
 - [ ] E2E 创建本地临时 Git 仓库，导入、发现、确认、选择 Artifact、生成 Fake 提案、预览、审核、写入、stage、commit。
 - [ ] E2E 外部修改目标文件后变更集进入 STALE，旧 apply 按钮消失。
 - [ ] E2E 验证无 push、无自动 commit、重启后状态可恢复。
@@ -1965,18 +2354,46 @@ class KnowledgeChangeSetService:
 ### 33.1 生成任务
 
 ```python
-def generate_change_set(change_set_id, actor, expected_revision, now):
+def next_revision(value: str) -> str:
+    return str(int(value) + 1)
+
+
+def generate_change_set(project_id, run_id, change_set_id, actor, expected_revision, now):
     with transaction():
-        change_set = repo.require_change_set(change_set_id)
+        change_set = repo.require_owned_change_set(project_id, run_id, change_set_id)
         require_human_or_agent_actor(actor)
         require_revision(change_set.revision, expected_revision)
         require_status(change_set.status, {"DRAFT"})
         check_change_set_baseline_or_stale(change_set, now)
         snapshot = repo.require_confirmed_snapshot(change_set.rule_snapshot_id)
         inputs = build_analysis_copy(change_set, snapshot)
-        job = jobs.create(kind="CHANGE_SET_GENERATION", analysis_root=inputs.root, ...)
-        repo.transition(change_set_id, "GENERATING", revision=change_set.revision + 1)
-    executor.submit(job, prompt=build_proposal_prompt(inputs), cwd=inputs.root)
+        repository = repo.require_repository(change_set.repository_id)
+        command = knowledge_agent_runner.build_command(
+            provider=change_set.provider,
+            analysis_root=inputs.root,
+            prompt=build_proposal_prompt(inputs),
+        )
+        job = jobs.create(
+            id=f"agent-job-{uuid4()}",
+            project_id=project_id,
+            run_id=run_id,
+            node_id=None,
+            purpose="knowledge-change-set-generation",
+            owner_id=change_set_id,
+            provider=change_set.provider,
+            status="QUEUED",
+            command=knowledge_agent_runner.redact_command(command),
+            cwd=str(inputs.root),
+            metadata={
+                "repositoryId": change_set.repository_id,
+                "snapshotId": change_set.rule_snapshot_id,
+                "analysisRoot": str(inputs.root),
+                "promptHash": sha256_text(build_proposal_prompt(inputs)),
+            },
+            created_at=now,
+        )
+        repo.transition(change_set_id, "GENERATING", revision=next_revision(change_set.revision))
+    knowledge_agent_runner.submit(job, prompt=build_proposal_prompt(inputs), analysis_root=inputs.root)
     return job_summary(job)
 ```
 
@@ -1986,11 +2403,17 @@ Agent 完成回调不能直接写文件：
 def finish_generation(job_id, output_path, now):
     proposal = parse_proposal(output_path)
     with transaction():
-        change_set = repo.require_job_change_set(job_id)
+        job = jobs.require(job_id, purpose="knowledge-change-set-generation")
+        change_set = repo.require_owned_change_set(job.project_id, job.run_id, job.owner_id)
+        repository = repo.require_repository(change_set.repository_id)
         check_change_set_baseline_or_stale(change_set, now)
         files = validate_and_materialize_changes(proposal, change_set, now)
         validations = run_builtin_and_declared_validations(change_set, files)
-        risk, reasons = classify(change_set.with_files(files, validations), ...)
+        risk, reasons = classify(
+            change_set.with_files(files, validations),
+            repo.require_confirmed_snapshot(change_set.rule_snapshot_id),
+            repository,
+        )
         status = next_status_after_validation(risk, change_set.mode)
         repo.store_proposal_and_transition(change_set.id, files, validations, risk, reasons, status, now)
         auto_apply = (
@@ -1999,25 +2422,33 @@ def finish_generation(job_id, output_path, now):
             and repository.auto_apply_low_risk
         )
         if auto_apply:
-            apply_revision = change_set.revision + 1
+            apply_revision = repo.require_change_set(change_set.id).revision
         else:
             apply_revision = None
     if apply_revision is not None:
-        apply_change_set(change_set.id, actor=SYSTEM_ACTOR, expected_revision=apply_revision, now=now)
+        apply_change_set(
+            job.project_id,
+            job.run_id,
+            change_set.id,
+            actor=SYSTEM_ACTOR,
+            expected_revision=apply_revision,
+            now=now,
+        )
 ```
 
 ### 33.2 原子应用
 
 ```python
-def apply_change_set(change_set_id, actor, expected_revision, now):
-    with repository_lock:
+def apply_change_set(project_id, run_id, change_set_id, actor, expected_revision, now):
+    preview = repo.require_owned_change_set(project_id, run_id, change_set_id)
+    with repository_locks.for_identity(preview.repository_identity):
         with transaction():
-            cs = repo.require_change_set(change_set_id)
+            cs = repo.require_owned_change_set(project_id, run_id, change_set_id)
             require_revision(cs.revision, expected_revision)
             require_status(cs.status, {"READY_TO_APPLY", "APPROVED"})
             check_change_set_baseline_or_stale(cs, now)
             authorize_apply(cs, actor)
-            applying_revision = cs.revision + 1
+            applying_revision = next_revision(cs.revision)
             repo.transition(cs.id, "APPLYING", revision=applying_revision)
         overlay = create_overlay(cs.repository_root)
         try:
@@ -2026,17 +2457,18 @@ def apply_change_set(change_set_id, actor, expected_revision, now):
             replace_files_atomically(cs.repository_root, overlay, cs.file_changes)
             verify_written_hashes(cs)
             with transaction():
-                repo.transition(cs.id, "APPLIED", applied_at=now, revision=applying_revision + 1)
+                repo.transition(cs.id, "APPLIED", applied_at=now, revision=next_revision(applying_revision))
                 audit("knowledge.change_set.applied", cs, actor, now)
         except Exception:
             rollback_replaced_files(overlay)
             with transaction():
-                repo.transition(cs.id, "FAILED", error=redacted_error(), revision=applying_revision + 1)
+                repo.transition(cs.id, "FAILED", error=redacted_error(), revision=next_revision(applying_revision))
             raise
 ```
 
 数据库事务不包住长时间 Agent 进程或仓库校验命令；事务只保护状态快照和短事务写入。文件应用使用 Runtime
-全局知识锁，防止两个变更集同时写同一仓库。不同仓库可以并行生成，但同一仓库同一时刻只允许一个 APPLYING。
+按 `repositoryIdentity` 建立的知识锁，防止两个变更集同时写同一仓库。该锁不是 Run workspace lease；
+不同仓库可以并行生成和应用，但同一仓库同一时刻只允许一个 apply/stage/unstage/commit。
 
 ## 34. 测试数据与 Fake Agent 输出
 
@@ -2072,13 +2504,15 @@ Fake 输出必须真实写入分析副本的 `output/proposal.json`，再走生�
 ```powershell
 npm.cmd --workspace @workflow-platform/contracts run test
 npm.cmd --workspace @workflow-platform/contracts run build
-python -m pytest runtime/tests/test_knowledge_repository_persistence.py runtime/tests/test_knowledge_repository_rules.py runtime/tests/test_knowledge_change_sets.py runtime/tests/test_knowledge_repository_git.py runtime/tests/test_knowledge_repository_api.py runtime/tests/test_knowledge_examples.py -q
+python -m pytest runtime/tests/test_knowledge_repository_persistence.py runtime/tests/test_knowledge_repository_rules.py runtime/tests/test_knowledge_change_sets.py runtime/tests/test_knowledge_repository_git.py runtime/tests/test_knowledge_repository_api.py runtime/tests/test_knowledge_examples.py runtime/tests/test_knowledge_agent_jobs.py -q
 npm.cmd --workspace @workflow-platform/renderer run test
 npm.cmd --workspace @workflow-platform/renderer run build
 npm.cmd --workspace @workflow-platform/desktop run test
 npm.cmd run test:e2e -- tests/e2e/knowledge-repository.spec.ts
 npm.cmd run test:runtime
 npm.cmd run verify
+npm.cmd run package:win:full
+npm.cmd run test:e2e:packaged -- tests/e2e/desktop-packaged.spec.ts
 git diff --check
 ```
 
