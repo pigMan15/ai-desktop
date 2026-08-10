@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { RuntimeClientError, type KnowledgeClient } from "./knowledgeClient";
+import { KnowledgeDiffViewer } from "./KnowledgeDiffViewer";
 
 type Props = {
   client: KnowledgeClient;
@@ -82,7 +83,7 @@ export function KnowledgeGitPanel({ client, repositoryId }: Props) {
         </div>
         <div>
           {diff !== null ? (
-            <pre className="knowledge-diff">{diff}</pre>
+            <KnowledgeDiffViewer diff={diff} />
           ) : (
             <p className="knowledge-meta">点击「查看 diff」显示差异。</p>
           )}

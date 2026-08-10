@@ -4,6 +4,7 @@ import type { KnowledgeChangeSetDetail } from "@workflow-platform/contracts";
 import type { KnowledgeClient } from "./knowledgeClient";
 import { useKnowledgeChangeSetPage } from "./useKnowledgeChangeSetPage";
 import { ChangeSetProgress } from "./ChangeSetProgress";
+import { KnowledgeDiffViewer } from "./KnowledgeDiffViewer";
 
 type Props = {
   client: KnowledgeClient;
@@ -129,7 +130,7 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
           {changeSet.unifiedDiff ? (
             <section className="knowledge-section">
               <h3>统一 diff</h3>
-              <pre className="knowledge-diff">{changeSet.unifiedDiff}</pre>
+              <KnowledgeDiffViewer diff={changeSet.unifiedDiff} />
             </section>
           ) : null}
 
