@@ -1628,6 +1628,16 @@ class AgentJobRepository:
             ("RUNNING", pid, updated_at, id),
         )
 
+    def set_status(self, *, id: str, status: str, updated_at: str) -> None:
+        self._db.execute(
+            """
+            UPDATE agent_jobs
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, updated_at, id),
+        )
+
     def finish(
         self,
         *,
@@ -1830,6 +1840,7 @@ class AgentSessionRepository:
         cwd: str,
         max_output_bytes: int,
         created_at: str,
+        kind: str = "interactive",
     ) -> None:
         self._db.execute(
             """
@@ -1839,12 +1850,13 @@ class AgentSessionRepository:
                 job_id,
                 provider,
                 status,
+                kind,
                 cwd,
                 max_output_bytes,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 id,
@@ -1852,6 +1864,7 @@ class AgentSessionRepository:
                 job_id,
                 provider,
                 "QUEUED",
+                kind,
                 cwd,
                 max_output_bytes,
                 created_at,
@@ -1951,6 +1964,7 @@ class AgentSessionRepository:
             "jobId": row["job_id"],
             "provider": row["provider"],
             "status": row["status"],
+            "kind": row["kind"],
             "desktopSessionId": row["desktop_session_id"],
             "pid": row["pid"],
             "cwd": row["cwd"],

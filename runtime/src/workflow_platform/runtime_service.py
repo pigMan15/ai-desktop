@@ -72,6 +72,10 @@ from workflow_platform.workspaces import normalize_workspace_path
 AGENT_PERMISSION_PENDING_LIMIT = 50
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 class WorkflowRuntimeService:
     def __init__(
         self,
@@ -547,6 +551,82 @@ class WorkflowRuntimeService:
     def continue_scoped_interactive_agent(self, project_id: str, run_id: str, job_id: str, **kwargs) -> dict:
         self.get_scoped_agent_job(project_id, run_id, job_id)
         return self.continue_interactive_agent(run_id, job_id, project_id=project_id, **kwargs)
+
+    def continue_scoped_agent_conversation(
+        self, project_id: str, run_id: str, job_id: str, *, message: str, actor: dict, now: str
+    ) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.continue_agent_conversation(run_id, job_id, message=message, actor=actor, now=now)
+
+    def continue_agent_conversation(
+        self, run_id: str, job_id: str, *, message: str, actor: dict, now: str
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="继续聊天式 Agent")
+        if "\x00" in message or not message.strip():
+            raise ValueError("AGENT_CONVERSATION_INPUT_INVALID: message cannot be blank or contain NUL")
+        with self._lock, self._db:
+            job = self._agent_jobs.get(job_id)
+            if job is None or job["runId"] != run_id:
+                raise RuntimeContractError("AGENT_JOB_NOT_FOUND_IN_RUN", "Agent 任务不存在", status=404)
+            if job["status"] != "AWAITING_INPUT":
+                raise RuntimeContractError(
+                    "AGENT_CONVERSATION_NOT_AWAITING_INPUT",
+                    f"聊天任务状态应为 AWAITING_INPUT（当前 {job['status']}）",
+                    status=409,
+                )
+            executor = self._agent_executors.get(job_id)
+            if executor is None or not hasattr(executor, "continue_conversation"):
+                raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话执行器不可用", status=409)
+            session = self._agent_sessions.get_for_job(job_id)
+            if session is None:
+                raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话记录缺失", status=409)
+            sequence = len(self._agent_sessions.list_input(session["id"])) + 1
+            self._agent_sessions.append_input(
+                id=f"{session['id']}:input:{sequence}",
+                session_id=session["id"],
+                sequence=sequence,
+                kind="conversation_message",
+                content=redact_terminal_output(message.strip()),
+                created_at=now,
+            )
+            turn_id = executor.continue_conversation(job_id, message.strip())
+            self._agent_jobs.set_status(id=job_id, status="RUNNING", updated_at=now)
+            self._audit.record(
+                actor=human_actor,
+                action="agent.conversation.message",
+                resource=f"agent-session:{session['id']}",
+                detail={"runId": run_id, "jobId": job_id},
+                created_at=now,
+            )
+            self._db.commit()
+
+        def finish_turn() -> None:
+            try:
+                alive = executor.wait_turn_completed(job_id, timeout=300)
+            except Exception:
+                alive = False
+            with self._lock, self._db:
+                current = self._agent_jobs.get(job_id)
+                if current is None or current["status"] != "RUNNING":
+                    self._db.commit()
+                    return
+                if alive and executor.is_conversation_alive(job_id):
+                    self._agent_jobs.set_status(id=job_id, status="AWAITING_INPUT", updated_at=_now())
+                else:
+                    self._agent_jobs.finish(
+                        id=job_id,
+                        status="COMPLETED",
+                        summary=None,
+                        error=None,
+                        updated_at=_now(),
+                    )
+                    self._agent_permissions.expire_pending_for_job(job_id, expired_at=_now())
+                    executor.end_conversation(job_id)
+                    self._agent_executors.pop(job_id, None)
+                self._db.commit()
+
+        Thread(target=finish_turn, name=f"workflow-agent-turn-{job_id}", daemon=True).start()
+        return {"turnId": turn_id, "status": "RUNNING"}
 
     def list_scoped_agent_permissions(
         self, project_id: str, run_id: str, job_id: str, *, status: str = "PENDING"
@@ -2942,6 +3022,7 @@ class WorkflowRuntimeService:
         mode: str = "automatic",
         parent_job_id: str | None = None,
         transport: str = "auto",
+        conversational: bool = False,
     ) -> dict:
         execution_guard = (
             self._require_execution_lease(project_id, run_id, write_required=True)
@@ -3010,6 +3091,8 @@ class WorkflowRuntimeService:
                     status=422,
                 )
             resolved_transport = "acp"
+        if conversational and resolved_transport != "acp":
+            raise ValueError("AGENT_CONVERSATIONAL_UNSUPPORTED: conversational requires acp transport")
         # auto 保持 legacy CLI（默认兼容，零回归）；Phase 0 spike 确认各 CLI 的 ACP 参数后再切换
         if resolved_transport == "acp":
             assert acp_provider is not None
@@ -3021,7 +3104,9 @@ class WorkflowRuntimeService:
                 allowed_tools=safe_allowed_tools,
             )
         checkpoint_id = f"agent-checkpoint-{uuid4()}" if mode == "automatic" else None
-        session_id = f"agent-session-{uuid4()}" if mode == "interactive" else None
+        session_id = (
+            f"agent-session-{uuid4()}" if mode == "interactive" or conversational else None
+        )
         output_sequence = 0
 
         def append_output(event: dict[str, Any]) -> None:
@@ -3064,7 +3149,7 @@ class WorkflowRuntimeService:
                 mode=mode,
                 session_id=session_id,
                 parent_job_id=parent_job_id,
-                metadata={"transport": resolved_transport},
+                metadata={"transport": resolved_transport, "conversational": conversational},
             )
             for artifact in context_artifacts:
                 artifact_id = artifact.get("artifactId")
@@ -3100,6 +3185,39 @@ class WorkflowRuntimeService:
                 self._audit.record(
                     actor=actor_model,
                     action="agent.interactive.created",
+                    resource=f"agent-session:{session_id}",
+                    detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
+                    created_at=now,
+                )
+            elif conversational:
+                if session_id is None:
+                    raise AssertionError("Conversational agent sessions require an id")
+                self._agent_sessions.create(
+                    id=session_id,
+                    run_id=run_id,
+                    job_id=job_id,
+                    provider=provider,
+                    cwd=str(execution_cwd),
+                    max_output_bytes=max_output_bytes,
+                    kind="acp-chat",
+                    created_at=now,
+                )
+                self._agent_sessions.append_input(
+                    id=f"{session_id}:input:1",
+                    session_id=session_id,
+                    sequence=1,
+                    kind="initial_prompt",
+                    content=redact_terminal_output(effective_prompt.strip()),
+                    created_at=now,
+                )
+                self._audit.record(
+                    actor={
+                        "id": "runtime-agent",
+                        "type": "system",
+                        "source": "runtime",
+                        "trusted": True,
+                    },
+                    action="agent.conversation.created",
                     resource=f"agent-session:{session_id}",
                     detail={"runId": run_id, "jobId": job_id, "nodeId": node_id},
                     created_at=now,
@@ -3225,6 +3343,7 @@ class WorkflowRuntimeService:
         self._agent_executors[job_id] = executor
 
         def execute_job() -> None:
+            result_status = "FAILED"
             try:
                 result = executor.run(
                     job_id=job_id,
@@ -3234,16 +3353,20 @@ class WorkflowRuntimeService:
                     timeout_seconds=timeout_seconds,
                     max_output_bytes=max_output_bytes,
                     allowed_tools=safe_allowed_tools,
+                    conversational=conversational,
                 )
                 status = result.status
                 summary = result.summary
                 error = result.error
+                result_status = status
             except Exception as exception:
                 status = "FAILED"
                 summary = None
                 error = f"AGENT_EXECUTION_ERROR: {exception}"
+                result_status = status
             finally:
-                self._agent_executors.pop(job_id, None)
+                if result_status != "AWAITING_INPUT":
+                    self._agent_executors.pop(job_id, None)
 
             with self._lock:
                 self._agent_jobs.finish(
@@ -3253,36 +3376,39 @@ class WorkflowRuntimeService:
                     error=error,
                     updated_at=now,
                 )
-                self._agent_permissions.expire_pending_for_job(job_id, expired_at=now)
-                checkpoint_status = "completed" if status == "COMPLETED" else "recoverable"
-                self._agent_checkpoints.update_for_job(
-                    job_id=job_id,
-                    status=checkpoint_status,
-                    recovery_reason=error,
-                    updated_at=now,
-                )
-                if checkpoint_status == "recoverable":
-                    self._audit.record(
-                        actor={
-                            "id": "runtime-agent",
-                            "type": "system",
-                            "source": "runtime",
-                            "trusted": True,
-                        },
-                        action="agent.checkpoint.recoverable",
-                        resource=f"agent-checkpoint:{checkpoint_id}",
-                        detail={"runId": run_id, "jobId": job_id, "reason": error},
-                        created_at=now,
+                if status != "AWAITING_INPUT":
+                    self._agent_permissions.expire_pending_for_job(job_id, expired_at=now)
+                if checkpoint_id is not None:
+                    checkpoint_status = "completed" if status == "COMPLETED" else "recoverable"
+                    self._agent_checkpoints.update_for_job(
+                        job_id=job_id,
+                        status=checkpoint_status,
+                        recovery_reason=error,
+                        updated_at=now,
                     )
+                    if checkpoint_status == "recoverable":
+                        self._audit.record(
+                            actor={
+                                "id": "runtime-agent",
+                                "type": "system",
+                                "source": "runtime",
+                                "trusted": True,
+                            },
+                            action="agent.checkpoint.recoverable",
+                            resource=f"agent-checkpoint:{checkpoint_id}",
+                            detail={"runId": run_id, "jobId": job_id, "reason": error},
+                            created_at=now,
+                        )
                 self._db.commit()
 
-            self._scan_completed_agent_artifacts(
-                run_id=run_id,
-                node_id=node_id,
-                job_id=job_id,
-                status=status,
-                now=now,
-            )
+            if status == "COMPLETED":
+                self._scan_completed_agent_artifacts(
+                    run_id=run_id,
+                    node_id=node_id,
+                    job_id=job_id,
+                    status=status,
+                    now=now,
+                )
 
         Thread(target=execute_job, name=f"workflow-agent-{job_id}", daemon=True).start()
         with self._lock:
@@ -3730,6 +3856,22 @@ class WorkflowRuntimeService:
         executor = self._agent_executors.get(job_id)
         if executor is not None:
             executor.cancel(job_id)
+            if job["status"] == "AWAITING_INPUT":
+                effective_now = now or _now()
+                with self._lock, self._db:
+                    self._agent_jobs.finish(
+                        id=job_id,
+                        status="CANCELLED",
+                        summary=None,
+                        error="AGENT_CANCELLED: chat conversation cancelled",
+                        updated_at=effective_now,
+                    )
+                    self._agent_permissions.expire_pending_for_job(job_id, expired_at=effective_now)
+                    self._db.commit()
+                if hasattr(executor, "end_conversation"):
+                    executor.end_conversation(job_id)
+                self._agent_executors.pop(job_id, None)
+                job = self.get_agent_job(run_id, job_id)
             return job
         if job["mode"] != "interactive" or job["status"] not in {"QUEUED", "RUNNING"}:
             return job

@@ -61,7 +61,9 @@ class CliAgentExecutor:
         timeout_seconds: float,
         max_output_bytes: int,
         allowed_tools: list[str] | None = None,
+        conversational: bool = False,
     ) -> CliExecutionResult:
+        del conversational
         resolved_cwd = _resolve_safe_cwd(cwd, project_root)
         command = self._provider.build_command(
             cwd=resolved_cwd,
@@ -195,7 +197,11 @@ class CliAgentExecutor:
 
 
 class AcpAgentExecutor:
-    """ACP 自动模式执行器：与 CliAgentExecutor 同形状（构造注入 + run 返回结果）。"""
+    """ACP 执行器：与 CliAgentExecutor 同形状（构造注入 + run 返回结果）。
+
+    conversational=True 时 run() 在首轮 turn 完成后保持 ACP 会话存活并返回
+    AWAITING_INPUT，后续通过 continue_conversation() 续话；cancel() 结束会话。
+    """
 
     def __init__(
         self,
@@ -212,6 +218,7 @@ class AcpAgentExecutor:
         self._on_permission = on_permission
         self._extra_environment = extra_environment or {}
         self._sessions: dict[str, AcpSession] = {}
+        self._conversations: dict[str, dict[str, Any]] = {}
         self._cancelled: set[str] = set()
         self._lock = RLock()
 
@@ -227,7 +234,7 @@ class AcpAgentExecutor:
         allowed_tools: list[str] | None = None,
         conversational: bool = False,
     ) -> CliExecutionResult:
-        del max_output_bytes, conversational
+        del max_output_bytes, allowed_tools
         resolved_cwd = _resolve_safe_cwd(cwd, project_root)
         command = self._provider.build_acp_command(cwd=resolved_cwd)
         session = AcpSession(
@@ -236,15 +243,21 @@ class AcpAgentExecutor:
             cwd=command.cwd,
             env=self._allowed_environment(),
         )
-        events: list[dict[str, Any]] = []
         import threading
 
-        completed = threading.Event()
+        state: dict[str, Any] = {
+            "session": session,
+            "session_id": None,
+            "turn_id": None,
+            "events": [],
+            "completed": threading.Event(),
+        }
+        conversation = bool(conversational)
 
         def handle_event(event: dict[str, Any]) -> None:
-            events.append(event)
+            state["events"].append(event)
             if event.get("method") in {"turn/completed", "session/finished", "error"}:
-                completed.set()
+                state["completed"].set()
             if event.get("method") == "permission/request" and self._on_permission is not None:
                 request_id = (event.get("params") or {}).get("requestId")
                 if isinstance(request_id, str) and request_id:
@@ -270,9 +283,11 @@ class AcpAgentExecutor:
                 exit_code=None,
             )
         try:
-            session_id = session.new_session({"mode": "auto"})
-            session.send_turn(prompt, session_id=session_id)
-            if not completed.wait(timeout=timeout_seconds):
+            session_id = session.new_session({"mode": "auto" if not conversation else "chat"})
+            state["session_id"] = session_id
+            turn_id = session.send_turn(prompt, session_id=session_id)
+            state["turn_id"] = turn_id
+            if not state["completed"].wait(timeout=timeout_seconds):
                 return CliExecutionResult(
                     status="FAILED",
                     summary=None,
@@ -286,7 +301,7 @@ class AcpAgentExecutor:
                     error="AGENT_CANCELLED: ACP session was cancelled",
                     exit_code=None,
                 )
-            error_events = [event for event in events if event.get("method") == "error"]
+            error_events = [event for event in state["events"] if event.get("method") == "error"]
             if error_events:
                 params = error_events[-1].get("params") or {}
                 return CliExecutionResult(
@@ -295,13 +310,18 @@ class AcpAgentExecutor:
                     error=str(params.get("text") or params.get("message") or "ACP error"),
                     exit_code=None,
                 )
-            last_text: str | None = None
-            for event in reversed(events):
-                if event.get("method") == "message":
-                    text = (event.get("params") or {}).get("text")
-                    if isinstance(text, str) and text:
-                        last_text = text
-                        break
+            last_text = _last_acp_message(state["events"])
+            if conversation:
+                # 首轮完成：保持会话存活，进入 AWAITING_INPUT
+                with self._lock:
+                    self._conversations[job_id] = state
+                    self._sessions.pop(job_id, None)
+                return CliExecutionResult(
+                    status="AWAITING_INPUT",
+                    summary=last_text,
+                    error=None,
+                    exit_code=None,
+                )
             return CliExecutionResult(
                 status="COMPLETED",
                 summary=last_text,
@@ -309,18 +329,58 @@ class AcpAgentExecutor:
                 exit_code=0,
             )
         finally:
-            session.close()
-            with self._lock:
-                self._sessions.pop(job_id, None)
-                self._cancelled.discard(job_id)
+            if not conversation:
+                session.close()
+                with self._lock:
+                    self._sessions.pop(job_id, None)
+                    self._cancelled.discard(job_id)
+
+    def continue_conversation(self, job_id: str, message: str) -> str:
+        with self._lock:
+            state = self._conversations.get(job_id)
+        if state is None:
+            raise ValueError("AGENT_CONVERSATION_LOST: ACP conversation is not active")
+        session: AcpSession = state["session"]
+        if not session.is_alive():
+            raise ValueError("AGENT_CONVERSATION_LOST: ACP session is not alive")
+        state["events"] = []
+        state["completed"].clear()
+        turn_id = session.continue_turn(str(state["turn_id"]), message)
+        state["turn_id"] = turn_id
+        return turn_id
+
+    def wait_turn_completed(self, job_id: str, timeout: float) -> bool:
+        with self._lock:
+            state = self._conversations.get(job_id)
+        if state is None:
+            return False
+        return bool(state["completed"].wait(timeout=timeout))
+
+    def is_conversation_alive(self, job_id: str) -> bool:
+        with self._lock:
+            state = self._conversations.get(job_id)
+        if state is None:
+            return False
+        return bool(state["session"].is_alive())
+
+    def end_conversation(self, job_id: str) -> None:
+        with self._lock:
+            state = self._conversations.pop(job_id, None)
+            self._cancelled.discard(job_id)
+        if state is not None:
+            state["session"].close()
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:
             session = self._sessions.get(job_id)
+            conversation = self._conversations.get(job_id)
             self._cancelled.add(job_id)
-            if session is None:
+            if session is None and conversation is None:
                 return True
-        session.close()
+        if session is not None:
+            session.close()
+        if conversation is not None:
+            conversation["session"].close()
         return True
 
     def _allowed_environment(self) -> dict[str, str]:
@@ -336,6 +396,14 @@ class AcpAgentExecutor:
         with self._lock:
             return job_id in self._cancelled
 
+
+def _last_acp_message(events: list[dict[str, Any]]) -> str | None:
+    for event in reversed(events):
+        if event.get("method") == "message":
+            text = (event.get("params") or {}).get("text")
+            if isinstance(text, str) and text:
+                return text
+    return None
 
 def _resolve_safe_cwd(cwd: Path, project_root: Path) -> Path:
     resolved_cwd = cwd.resolve()

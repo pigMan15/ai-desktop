@@ -725,6 +725,10 @@ def _migrate_schema(db: sqlite3.Connection) -> None:
         db.execute(
             "ALTER TABLE agent_sessions ADD COLUMN max_output_bytes INTEGER NOT NULL DEFAULT 1000000"
         )
+    if "kind" not in agent_session_columns:
+        db.execute(
+            "ALTER TABLE agent_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'interactive'"
+        )
     db.commit()
 
 

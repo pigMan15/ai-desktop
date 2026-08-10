@@ -216,6 +216,7 @@ class StartAgentJobRequest(BaseModel):
     actor: dict[str, Any]
     mode: str = "automatic"
     transport: str = "auto"
+    conversational: bool = False
     allowedTools: list[str] = Field(default_factory=list)
     timeoutSeconds: float = 300
     maxOutputBytes: int = 1_000_000
@@ -225,6 +226,12 @@ class StartAgentJobRequest(BaseModel):
 class DecideAgentPermissionRequest(BaseModel):
     decision: str
     reason: str | None = None
+    actor: dict[str, Any]
+    now: str
+
+
+class ContinueAgentConversationRequest(BaseModel):
+    message: str
     actor: dict[str, Any]
     now: str
 
@@ -1090,6 +1097,7 @@ def create_app(
             max_output_bytes=request.maxOutputBytes,
             mode=request.mode,
             transport=request.transport,
+            conversational=request.conversational,
             now=request.now,
         )
 
@@ -1140,6 +1148,19 @@ def create_app(
             project_id, run_id, job_id,
             actor=request.actor if request is not None else None,
             now=request.now if request is not None else None,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/conversation/message")
+    def continue_project_agent_conversation(
+        project_id: str, run_id: str, job_id: str, request: ContinueAgentConversationRequest
+    ) -> dict[str, Any]:
+        return _require_service(runtime_service).continue_scoped_agent_conversation(
+            project_id,
+            run_id,
+            job_id,
+            message=request.message,
+            actor=request.actor,
+            now=request.now,
         )
 
     @application.get("/projects/{project_id}/runs/{run_id}/agents/{job_id}/permissions")
