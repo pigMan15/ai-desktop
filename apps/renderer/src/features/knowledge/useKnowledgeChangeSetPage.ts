@@ -76,6 +76,7 @@ export function useKnowledgeChangeSetPage(
       const changeSet = state.changeSet;
       if (!changeSet || !projectId || !runId) return null;
       try {
+        setState((currentState) => ({ ...currentState, operationMessage: `正在${label}…`, error: null }));
         const result = await action({
           actor: { id: "renderer-user", type: "human", source: "renderer", trusted: true },
           expectedRevision: changeSet.revision,

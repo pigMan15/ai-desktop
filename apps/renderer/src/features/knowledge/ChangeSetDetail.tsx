@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { KnowledgeChangeSetDetail } from "@workflow-platform/contracts";
 import type { KnowledgeClient } from "./knowledgeClient";
 import { useKnowledgeChangeSetPage } from "./useKnowledgeChangeSetPage";
+import { ChangeSetProgress } from "./ChangeSetProgress";
 
 type Props = {
   client: KnowledgeClient;
@@ -114,6 +115,16 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
               </div>
             )}
           </section>
+
+          {changeSet.status === "GENERATING" || changeSet.status === "APPLYING" ? (
+            <ChangeSetProgress
+              client={client}
+              projectId={projectId}
+              runId={runId}
+              changeSetId={changeSet.id}
+              status={changeSet.status}
+            />
+          ) : null}
 
           {changeSet.unifiedDiff ? (
             <section className="knowledge-section">
