@@ -287,6 +287,19 @@ def is_protected(path: str, protected_paths: list[str]) -> bool:
     return _path_matches_any(protected_paths, path)
 
 
+def is_hard_protected(path: str, protected_paths: list[str]) -> bool:
+    import fnmatch
+    """系统级禁区（如 .git/**、.ai-workflow/**），任何变更一律 BLOCKED。
+
+    规则：保护模式以点目录开头视为硬禁区；普通保护文件（如 INDEX.md、
+    template/**）属于“修改必须人工审核”，应走 HIGH 由人批准，而非直接阻断。
+    """
+    return any(
+        fnmatch.fnmatch(path, pattern) and pattern.split("/", 1)[0].startswith(".")
+        for pattern in protected_paths
+    )
+
+
 def classify_risk(
     *,
     changes: list[dict],
@@ -299,9 +312,12 @@ def classify_risk(
     protected = snapshot.get("protectedPaths") or []
     if any(change["operation"] not in OPERATIONS for change in changes):
         return "BLOCKED", ["unsupported file operation"]
-    if any(not is_writable(change["path"], writable) for change in changes):
+    if any(
+        not is_writable(change["path"], writable) and not is_protected(change["path"], protected)
+        for change in changes
+    ):
         return "BLOCKED", ["path outside writable paths"]
-    if any(is_protected(change["path"], protected) for change in changes):
+    if any(is_hard_protected(change["path"], protected) for change in changes):
         return "BLOCKED", ["protected path"]
     if snapshot.get("openQuestions") or changes and any(
         change.get("blockedReasons") for change in changes

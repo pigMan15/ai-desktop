@@ -75,6 +75,33 @@ def test_risk_matrix_low_medium_high_blocked() -> None:
         validation_results=[{"status": "FAILED", "validatorId": "x"}],
     )[0] == "BLOCKED"
 
+    # 受保护但可人工审核的索引/模板文件：应判定 HIGH（人工审核），而不是 BLOCKED
+    assert classify_risk(
+        changes=_changes({"path": "INDEX.md", "category": "INDEX"}),
+        snapshot=_snapshot(
+            writable=["main/**", "applications/**", "candidate/**", "personal/**"],
+            protected=[".git/**", ".github/**", ".ai-workflow/**", "INDEX.md", "ROUTING.md", "template/**", "applications/_template/**"],
+        ),
+        validation_results=[],
+    ) == ("HIGH", ["rules, routing, index, or templates changed"])
+    assert classify_risk(
+        changes=_changes({"path": "applications/_template/application.md", "category": "TEMPLATE"}),
+        snapshot=_snapshot(
+            writable=["main/**", "applications/**", "candidate/**", "personal/**"],
+            protected=[".git/**", ".github/**", ".ai-workflow/**", "INDEX.md", "template/**", "applications/_template/**"],
+        ),
+        validation_results=[],
+    ) == ("HIGH", ["rules, routing, index, or templates changed"])
+    # 系统级禁区仍然 BLOCKED
+    assert classify_risk(
+        changes=_changes({"path": ".ai-workflow/knowledge-repo.yaml"}),
+        snapshot=_snapshot(
+            writable=["main/**", "applications/**", "candidate/**", "personal/**"],
+            protected=[".git/**", ".github/**", ".ai-workflow/**", "INDEX.md"],
+        ),
+        validation_results=[],
+    )[0] == "BLOCKED"
+
 
 def test_parse_proposal_persists_content(tmp_path: Path) -> None:
     analysis = tmp_path / "analysis"

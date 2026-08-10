@@ -1283,6 +1283,8 @@ class KnowledgeChangeSetService:
             return ["stage", "unstage", "commit", "abandon"]
         if status in {"GENERATING", "APPLYING"}:
             return []
+        if status == "BLOCKED":
+            return ["abandon"]
         if status == "STALE":
             return ["abandon"]
         return []
