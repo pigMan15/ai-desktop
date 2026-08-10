@@ -66,7 +66,13 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
     client
       .listRuleSnapshots(repositoryId)
       .then((items) => {
-        if (!cancelled) setSnapshots(items);
+        if (cancelled) return;
+        setSnapshots(items);
+        // 仓库尚未激活时，自动展示最新待确认（PROPOSED）报告，刷新后仍可确认
+        const proposed = items.find((item) => item.status === "PROPOSED");
+        if (proposed) {
+          setActiveSnapshot((current) => current ?? proposed);
+        }
       })
       .catch(() => undefined);
     return () => {

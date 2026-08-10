@@ -243,7 +243,7 @@ class KnowledgeRuleSnapshotRepository:
             """,
             (repository_id, limit),
         ).fetchall()
-        return [self._row_to_dict(row) for row in rows]
+        return [self.get(row["id"]) for row in rows]
 
     def mark_confirmed(
         self,
