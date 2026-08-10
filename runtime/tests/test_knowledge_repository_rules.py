@@ -3,6 +3,17 @@ from pathlib import Path
 
 import pytest
 
+from workflow_platform.knowledge.repository_models import (
+    KNOWLEDGE_CHANGE_SET_STATUS_SET,
+    KNOWLEDGE_FILE_CATEGORY_SET,
+    KNOWLEDGE_FILE_OPERATION_SET,
+    KNOWLEDGE_PROVIDER_SET,
+    KNOWLEDGE_REPOSITORY_STATUS_SET,
+    KNOWLEDGE_RISK_LEVEL_SET,
+    KNOWLEDGE_RULE_FILE_CATEGORY_SET,
+    KNOWLEDGE_RULE_SNAPSHOT_STATUS_SET,
+    require_enum,
+)
 from workflow_platform.knowledge.rule_discovery import (
     KnowledgeRuleDiscoveryError,
     build_rule_discovery_analysis,
@@ -12,6 +23,22 @@ from workflow_platform.knowledge.rule_discovery import (
     snapshot_content_hash,
     write_analysis_output,
 )
+
+
+def test_domain_constants_match_contract_vocabulary() -> None:
+    assert KNOWLEDGE_REPOSITORY_STATUS_SET == {"ACTIVE", "RULES_PENDING", "BLOCKED", "REMOVED"}
+    assert KNOWLEDGE_RULE_SNAPSHOT_STATUS_SET == {"PROPOSED", "CONFIRMED", "SUPERSEDED", "STALE"}
+    assert {"DRAFT", "GENERATING", "READY_TO_APPLY", "APPLIED", "COMMITTED", "BLOCKED"} <= KNOWLEDGE_CHANGE_SET_STATUS_SET
+    assert KNOWLEDGE_RISK_LEVEL_SET == {"LOW", "MEDIUM", "HIGH", "BLOCKED"}
+    assert KNOWLEDGE_FILE_OPERATION_SET == {"CREATE", "UPDATE"}
+    assert {"KNOWLEDGE", "INDEX", "RULE", "TEMPLATE", "ROUTING"} <= KNOWLEDGE_FILE_CATEGORY_SET
+    assert KNOWLEDGE_PROVIDER_SET == {"codex", "claude", "fake"}
+    assert require_enum("LOW", KNOWLEDGE_RISK_LEVEL_SET, "风险") == "LOW"
+    try:
+        require_enum("UNKNOWN", KNOWLEDGE_RISK_LEVEL_SET, "风险")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
 
 
 def test_parse_manifest_accepts_valid_content(tmp_path: Path) -> None:
