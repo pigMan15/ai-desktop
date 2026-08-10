@@ -103,7 +103,9 @@ def initialize(
             raise ValueError("KNOWLEDGE_EXAMPLE_EMPTY_CONTENT")
         if target.exists():
             for relative in created:
-                shutil.move(str(staging / relative), str(target / relative))
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(staging / relative), str(destination))
             shutil.rmtree(staging, ignore_errors=True)
         else:
             shutil.move(str(staging), str(target))
