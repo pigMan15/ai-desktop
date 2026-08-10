@@ -27,15 +27,40 @@ export function RuleDiscoveryReview({ snapshot, expectedRevision, busy, onConfir
   const [writablePathsText, setWritablePathsText] = useState(writablePaths.join("\n"));
   const [protectedPathsText, setProtectedPathsText] = useState(protectedPaths.join("\n"));
   const [summary, setSummary] = useState(snapshot.summary ?? "");
-  const disabled = busy || openQuestions.length > 0;
+  const [acknowledged, setAcknowledged] = useState(false);
+  const disabled = busy || (openQuestions.length > 0 && !acknowledged);
+
+  const confirmSummary = () => {
+    const base = summary.trim();
+    if (openQuestions.length === 0) return base;
+    const recorded = [
+      `（确认时已知悉 ${openQuestions.length} 项待确认事项）`,
+      ...openQuestions.map((question) => `- ${question}`),
+    ].join("\n");
+    return base ? `${base}\n\n${recorded}` : recorded;
+  };
 
   return (
     <section className="knowledge-section">
       <h3>规则发现报告</h3>
       {openQuestions.length > 0 ? (
-        <p className="knowledge-toast knowledge-toast--error">
-          存在未确定项，必须先解决才能确认：{openQuestions.join("；")}
-        </p>
+        <div className="knowledge-toast knowledge-toast--warning" style={{ marginBottom: 14 }}>
+          <strong>发现 {openQuestions.length} 个待确认项</strong>
+          <p style={{ margin: "6px 0 8px" }}>
+            待确认项表示仓库文档中存在不一致或未定义的事项，不会阻断规则扫描，但需要你决策：
+          </p>
+          <ul style={{ margin: "0 0 8px", paddingLeft: 18 }}>
+            {openQuestions.map((question) => (
+              <li key={question} style={{ marginBottom: 6 }}>
+                {question}
+              </li>
+            ))}
+          </ul>
+          <p style={{ margin: 0 }}>
+            处理方式：① 修改仓库文档后重新执行规则发现，可消除待确认项；② 逐条阅读后勾选下方确认框，
+            将待确认项记录在快照中并继续确认（不会自动修改仓库）。
+          </p>
+        </div>
       ) : null}
 
       {discoveredFiles.length === 0 ? (
@@ -79,6 +104,20 @@ export function RuleDiscoveryReview({ snapshot, expectedRevision, busy, onConfir
         </label>
       </div>
 
+      {openQuestions.length > 0 ? (
+        <label className="knowledge-check" style={{ marginTop: 14 }}>
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            disabled={busy}
+            onChange={(event) => setAcknowledged(event.target.checked)}
+          />
+          <span>
+            我已逐条阅读以上 {openQuestions.length} 项待确认事项，了解其含义与风险，仍要确认（确认后会记录在快照摘要中）
+          </span>
+        </label>
+      ) : null}
+
       <div className="button-row" style={{ marginTop: 16, marginBottom: 0 }}>
         <button
           type="button"
@@ -92,7 +131,7 @@ export function RuleDiscoveryReview({ snapshot, expectedRevision, busy, onConfir
               routingFiles: snapshot.routingFiles ?? [],
               templateFiles: snapshot.templateFiles ?? [],
               validationCommands: snapshot.validationCommands ?? [],
-              summary: summary.trim(),
+              summary: confirmSummary(),
               openQuestions: [],
             })
           }

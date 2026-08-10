@@ -16,6 +16,10 @@ BOUNDARIES = "只能读取 input/；只能写 output/；禁止删除、重命名
 TASK_RULE_DISCOVERY = "根据输入完成规则发现报告。"
 TASK_CHANGE_SET = "根据输入生成知识变更提案。"
 REQUIRED_REASONING = "分开输出事实、推断、未确定项；每项变更必须引用 Artifact；遇到冲突必须阻断。"
+OPEN_QUESTIONS_GUIDANCE = (
+    "openQuestions 只用于必须由人决策的阻断性冲突（例如规则互相矛盾、无法确定入口）。"
+    "非阻断事项（如未配置校验命令、目录归类建议）不要放入 openQuestions，应写入 findings 或 summary。"
+)
 OUTPUT_RULE_DISCOVERY = "严格按给定 JSON Schema 写入 output/rule-discovery.json；stdout 仅输出进度。"
 OUTPUT_CHANGE_SET = "严格按给定 JSON Schema 写入 output/proposal.json；stdout 仅输出进度。"
 
@@ -58,6 +62,8 @@ def build_rule_discovery_prompt(
         "  " + TASK_RULE_DISCOVERY,
         "REQUIRED_REASONING",
         "  " + REQUIRED_REASONING,
+        "OPEN_QUESTIONS_GUIDANCE",
+        "  " + OPEN_QUESTIONS_GUIDANCE,
         "OUTPUT",
         "  " + OUTPUT_RULE_DISCOVERY,
         "INPUT_MANIFEST",

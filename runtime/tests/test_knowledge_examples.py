@@ -7,6 +7,8 @@ from workflow_platform.examples.knowledge import (
     EXAMPLE_ID,
     _asset_files,
     _read_asset,
+    _template_override_files,
+    _read_template_override,
     initialize,
     list_examples,
 )
@@ -26,6 +28,19 @@ def test_all_assets_are_non_empty_and_safe() -> None:
     for relative in files:
         content = _read_asset(relative)
         assert content.strip(), f"empty asset: {relative}"
+        assert not relative.startswith("/")
+        assert ".." not in relative.split("/")
+
+
+def test_template_override_assets_are_non_empty_and_safe() -> None:
+    files = _template_override_files()
+    assert "INDEX.md" in files
+    assert "ROUTING.md" in files
+    assert "KNOWLEDGE-RULES.md" in files
+    assert ".ai-workflow/knowledge-repo.yaml" in files
+    for relative in files:
+        content = _read_template_override(relative)
+        assert content.strip(), f"empty template override asset: {relative}"
         assert not relative.startswith("/")
         assert ".." not in relative.split("/")
 
@@ -71,10 +86,18 @@ def test_initialize_template_removes_business_content(tmp_path: Path) -> None:
     assert not (target / "personal" / "sample-debugging-note.md").exists()
     assert (target / "KNOWLEDGE-RULES.md").is_file()
     assert (target / "template" / "knowledge-entry.md").is_file()
+    assert (target / "applications" / "_template" / "INDEX.md").is_file()
     assert result["gitInitialized"] is False
     for relative in result["createdFiles"]:
         content = (target / relative).read_bytes()
         assert content.strip(), f"empty created file: {relative}"
+    # 模板模式不允许引用被移除的业务内容（避免规则发现产生误导性待确认项）
+    for relative in result["createdFiles"]:
+        content = (target / relative).read_text(encoding="utf-8")
+        assert "sample-order-service" not in content, f"template mode still references removed content: {relative}"
+    manifest = (target / ".ai-workflow" / "knowledge-repo.yaml").read_text(encoding="utf-8")
+    assert "template/*.md" in manifest
+    assert "applications/_template/**" in manifest
 
 
 def test_initialize_rejects_non_empty_target(tmp_path: Path) -> None:

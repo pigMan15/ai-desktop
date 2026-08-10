@@ -1514,6 +1514,10 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 }
 .knowledge-toast--success { border: 1px solid rgba(24, 121, 78, 0.32); background: rgba(24, 121, 78, 0.08); color: var(--success); }
 .knowledge-toast--error { border: 1px solid rgba(180, 35, 24, 0.32); background: var(--danger-bg); color: var(--danger); }
+.knowledge-toast--warning { border: 1px solid rgba(180, 132, 24, 0.4); background: rgba(180, 132, 24, 0.08); color: var(--ink); }
+.knowledge-toast--warning ul { margin: 0 0 8px; padding-left: 18px; }
+.knowledge-check { display: flex; align-items: flex-start; gap: 8px; font-size: 0.85rem; color: var(--ink); cursor: pointer; }
+.knowledge-check input { margin-top: 2px; }
 
 /* 窄屏 */
 @media (max-width: 720px) {

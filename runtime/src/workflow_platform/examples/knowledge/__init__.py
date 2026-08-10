@@ -29,6 +29,8 @@ _TEMPLATE_REMOVED_FILES = (
     "personal/sample-debugging-note.md",
 )
 
+_TEMPLATE_OVERRIDE_DIR = "complex-business-template"
+
 
 def list_examples() -> list[dict]:
     return [
@@ -56,6 +58,22 @@ def _asset_files() -> list[str]:
 
 def _read_asset(relative: str) -> bytes:
     return (_asset_root() / relative).read_bytes()
+
+def _template_override_root() -> Path:
+    return resources.files(_PACKAGE) / _TEMPLATE_OVERRIDE_DIR
+
+
+def _template_override_files() -> list[str]:
+    root = _template_override_root()
+    files: list[str] = []
+    for path in root.rglob("*"):
+        if path.is_file():
+            files.append(path.relative_to(root).as_posix())
+    return sorted(files)
+
+
+def _read_template_override(relative: str) -> bytes:
+    return (_template_override_root() / relative).read_bytes()
 
 
 def _removed_in_template(relative: str) -> bool:
@@ -99,6 +117,22 @@ def initialize(
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
             created.append(relative)
+        if mode == "template":
+            for relative in _template_override_files():
+                try:
+                    validate_repository_relative_path(relative)
+                except KnowledgeGitError as error:
+                    raise ValueError(
+                        f"KNOWLEDGE_EXAMPLE_INVALID_ASSET: {relative}: {error.message}"
+                    ) from error
+                content = _read_template_override(relative)
+                if not content.strip():
+                    raise ValueError(f"KNOWLEDGE_EXAMPLE_EMPTY_ASSET: {relative}")
+                destination = staging / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+                if relative not in created:
+                    created.append(relative)
         if not created:
             raise ValueError("KNOWLEDGE_EXAMPLE_EMPTY_CONTENT")
         if target.exists():
