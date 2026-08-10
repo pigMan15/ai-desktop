@@ -11,6 +11,9 @@ import type {
   WorkspaceLease,
   WorkspaceMode,
   WorkflowDefinition,
+  AgentPermissionRequest,
+  AgentTransport,
+  ContinueConversationQueued,
 } from "@workflow-platform/contracts";
 
 export type ScopedCreateRunResponse = {
@@ -158,8 +161,9 @@ export type AgentJobSummary = {
   id: string;
   runId: string;
   nodeId: string;
-  provider: "codex" | "claude" | "fake";
-  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  provider: "codex" | "claude" | "opencode" | "fake";
+  status: "QUEUED" | "RUNNING" | "AWAITING_INPUT" | "COMPLETED" | "FAILED" | "CANCELLED";
+  metadata?: Record<string, unknown>;
   mode?: "automatic" | "interactive";
   command: string[];
   cwd: string;
@@ -1154,9 +1158,24 @@ export function createRuntimeClient(apiBaseUrl: string) {
       allowedTools: string[] = [],
       cwd?: string,
       signal?: AbortSignal,
+      options?: { transport?: AgentTransport; conversational?: boolean },
     ) =>
       request<AgentStartResult>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/agents`, {
-        body: { nodeId, provider, prompt, actor: mode === "interactive" ? HUMAN_ACTOR : AGENT_ACTOR, allowedTools, cwd, timeoutSeconds: 300, maxOutputBytes: 1_000_000, mode, now }, signal,
+        body: {
+          nodeId,
+          provider,
+          prompt,
+          actor: mode === "interactive" ? HUMAN_ACTOR : AGENT_ACTOR,
+          allowedTools,
+          cwd,
+          timeoutSeconds: 300,
+          maxOutputBytes: 1_000_000,
+          mode,
+          now,
+          ...(options?.transport ? { transport: options.transport } : {}),
+          ...(options?.conversational !== undefined ? { conversational: options.conversational } : {}),
+        },
+        signal,
       }),
     scanNodeArtifacts: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
       request<NodeArtifactScan>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/artifacts/scan`, {
@@ -1227,6 +1246,24 @@ export function createRuntimeClient(apiBaseUrl: string) {
         apiBaseUrl,
         `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/output?afterSequence=${afterSequence}`,
         { method: "GET", signal },
+      ),
+    listAgentPermissions: (projectId: string, runId: string, jobId: string, status = "PENDING", signal?: AbortSignal) =>
+      request<AgentPermissionRequest[]>(
+        apiBaseUrl,
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/permissions?status=${encodeURIComponent(status)}`,
+        { method: "GET", signal },
+      ),
+    decideAgentPermission: (projectId: string, runId: string, jobId: string, requestId: string, decision: "allow" | "deny", reason?: string, signal?: AbortSignal) =>
+      request<AgentPermissionRequest>(
+        apiBaseUrl,
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/permissions/${encodeURIComponent(requestId)}/decide`,
+        { method: "POST", body: { decision, reason: reason ?? null, actor: HUMAN_ACTOR, now: new Date().toISOString() }, signal },
+      ),
+    continueAgentConversation: (projectId: string, runId: string, jobId: string, message: string, signal?: AbortSignal) =>
+      request<ContinueConversationQueued>(
+        apiBaseUrl,
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/conversation/message`,
+        { method: "POST", body: { message, actor: HUMAN_ACTOR, now: new Date().toISOString() }, signal },
       ),
     cancelAgentJob: (projectId: string, runId: string, jobId: string, now?: string, signal?: AbortSignal) =>
       request<AgentJobSummary>(

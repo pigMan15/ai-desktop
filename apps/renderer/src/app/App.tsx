@@ -50,6 +50,7 @@ import {
   isTerminalSessionMissingError,
   mergeAgentOutput,
 } from "./agentOutput";
+import type { AgentPermissionRequest } from "@workflow-platform/contracts";
 import { desktopGitApi } from "./desktopGit";
 import { desktopProjectApi } from "./desktopProject";
 import {
@@ -180,6 +181,7 @@ export function App() {
   const [deploymentOutput, setDeploymentOutput] = useState<DeploymentOutputEvent[]>([]);
   const [interactiveAgentTerminals, setInteractiveAgentTerminals] = useState<Record<string, InteractiveAgentTerminalBinding>>({});
   const [liveAgentOutput, setLiveAgentOutput] = useState<Record<string, Record<string, TerminalViewportOutput[]>>>({});
+  const [agentPermissionsByJob, setAgentPermissionsByJob] = useState<Record<string, AgentPermissionRequest[]>>({});
   const agentInputBuffersRef = useRef<Record<string, string>>({});
   const liveAgentOutputPendingRef = useRef<Record<string, Record<string, TerminalViewportOutput[]>>>({});
   const liveAgentOutputFrameRef = useRef<number | null>(null);
@@ -949,6 +951,54 @@ export function App() {
     state?.connection === "connected" ? "连接状态：已连接" : "连接状态：不可用";
   const runStatus = state?.projection?.status ?? "尚未创建 Run";
   const client = useMemo(() => createRuntimeClient(apiBaseUrl), [apiBaseUrl]);
+
+  const handleContinueAgent = async (jobId: string, message: string) => {
+    if (!activeRunId) return;
+    await client.continueAgentConversation(projectId, activeRunId, jobId, message);
+  };
+
+  const handleDecideAgentPermission = async (
+    jobId: string,
+    requestId: string,
+    decision: "allow" | "deny",
+  ) => {
+    if (!activeRunId) return;
+    await client.decideAgentPermission(projectId, activeRunId, jobId, requestId, decision);
+    const items = await client.listAgentPermissions(projectId, activeRunId, jobId, "PENDING");
+    setAgentPermissionsByJob((current) => ({ ...current, [jobId]: items }));
+  };
+
+  useEffect(() => {
+    if (!activeRunId) return;
+    let cancelled = false;
+    const jobs = state?.agentJobs ?? [];
+    const chatJobs = jobs.filter(
+      (job) =>
+        job.metadata?.conversational === true &&
+        (job.status === "AWAITING_INPUT" || job.status === "RUNNING"),
+    );
+    if (chatJobs.length === 0) return;
+    Promise.all(
+      chatJobs.map((job) =>
+        client
+          .listAgentPermissions(projectId, activeRunId, job.id, "PENDING")
+          .then((items) => ({ jobId: job.id, items }))
+          .catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      setAgentPermissionsByJob((current) => {
+        const next = { ...current };
+        for (const result of results) {
+          if (result) next[result.jobId] = result.items;
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, runRoute, state?.agentJobs]);
   const runWorkspaceOptions = useMemo(() => {
     const discovered = gitWorktrees
       .filter((worktree) => !worktree.bare)
@@ -2312,6 +2362,9 @@ export function App() {
               onInterrupt={(jobId) => handleAgentTerminalInput(runRoute.runId, jobId, "\u0003")}
               onResize={(jobId, columns, rows) => handleAgentTerminalResize(runRoute.runId, jobId, columns, rows)}
               onStop={(jobId) => handleCancelAgent(runRoute.runId, jobId)}
+              permissionsByJob={agentPermissionsByJob}
+              onContinueConversation={handleContinueAgent}
+              onDecidePermission={handleDecideAgentPermission}
             />
           ) : null}
           {currentRoute === "runs" && runRoute.mode === "detail" ? (
@@ -2351,6 +2404,9 @@ export function App() {
               onAgentInterrupt={(jobId) => handleAgentTerminalInput(runRoute.runId, jobId, "\u0003")}
               onAgentResize={(jobId, columns, rows) => handleAgentTerminalResize(runRoute.runId, jobId, columns, rows)}
               onStopAgent={(jobId) => handleCancelAgent(runRoute.runId, jobId)}
+              agentPermissions={agentPermissionsByJob}
+              onContinueAgent={handleContinueAgent}
+              onDecideAgentPermission={handleDecideAgentPermission}
               scanNodeArtifacts={(nodeId, expectedRevision, now, signal) =>
                 client.scanNodeArtifacts(projectId, runRoute.runId, nodeId, expectedRevision, now, signal)}
               executeAction={executeRunAction}

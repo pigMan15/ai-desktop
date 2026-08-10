@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentJobSummary, AgentOutputSummary } from "../../app/runtimeClient";
-import { agentViewportOutput, selectAgentJob } from "./runAgentExecutorModel";
+import { agentChatMessages, agentViewportOutput, isConversationalJob, selectAgentJob } from "./runAgentExecutorModel";
 
 const job = (
   id: string,
@@ -86,5 +86,33 @@ describe("agentViewportOutput", () => {
       { sequence: 2, data: JSON.stringify({ status: "working" }) },
       { sequence: 3, data: "third" },
     ]);
+  });
+});
+
+
+describe("agent chat model", () => {
+  it("detects conversational jobs from metadata", () => {
+    expect(
+      isConversationalJob({
+        ...job("job-1", "AWAITING_INPUT", "2026-08-11T00:00:00.000Z"),
+        metadata: { conversational: true },
+      }),
+    ).toBe(true);
+    expect(isConversationalJob(job("job-2", "COMPLETED", "2026-08-11T00:00:00.000Z"))).toBe(false);
+  });
+
+  it("builds chat messages from acp output events", () => {
+    const persisted: AgentOutputSummary[] = [
+      { id: "o1", jobId: "job-1", sequence: 1, kind: "acp.turn", payload: {}, createdAt: "2026-08-11T00:00:00.000Z" },
+      { id: "o2", jobId: "job-1", sequence: 2, kind: "acp.message", payload: { text: "你好" }, createdAt: "2026-08-11T00:00:01.000Z" },
+      { id: "o3", jobId: "job-1", sequence: 3, kind: "acp.permission", payload: { status: "PENDING", target: "src/a.ts", permissionType: "write_file" }, createdAt: "2026-08-11T00:00:02.000Z" },
+      { id: "o4", jobId: "other", sequence: 4, kind: "acp.message", payload: { text: "x" }, createdAt: "2026-08-11T00:00:03.000Z" },
+    ];
+    const messages = agentChatMessages("job-1", persisted);
+    expect(messages).toHaveLength(3);
+    expect(messages[1].kind).toBe("message");
+    expect(messages[1].text).toBe("你好");
+    expect(messages[2].kind).toBe("permission");
+    expect(messages[2].text).toContain("src/a.ts");
   });
 });

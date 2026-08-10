@@ -17,6 +17,7 @@ import {
 } from "../../app/runtimeClient";
 import { buildRunModuleHash } from "../../app/routes";
 import type { TerminalViewportOutput } from "../terminal/TerminalViewport";
+import type { AgentPermissionRequest } from "@workflow-platform/contracts";
 import { RunAgentExecutor, type RunAgentSessionState } from "./RunAgentExecutor";
 import {
   RunArtifactScanFeedback,
@@ -63,6 +64,9 @@ export type RunDetailPageProps = {
   onAgentInterrupt(jobId: string): Promise<void> | void;
   onAgentResize(jobId: string, columns: number, rows: number): Promise<void> | void;
   onStopAgent(jobId: string): Promise<void> | void;
+  agentPermissions?: Record<string, AgentPermissionRequest[]>;
+  onContinueAgent?(jobId: string, message: string): Promise<void> | void;
+  onDecideAgentPermission?(jobId: string, requestId: string, decision: "allow" | "deny", reason?: string): Promise<void> | void;
   scanNodeArtifacts?(nodeId: string, expectedRevision: string, now: string, signal: AbortSignal): Promise<NodeArtifactScan>;
   executeAction(
     request: ExecuteRunActionRequest,
@@ -102,6 +106,9 @@ function RunDetailPageContent({
   onAgentInterrupt,
   onAgentResize,
   onStopAgent,
+  agentPermissions,
+  onContinueAgent,
+  onDecideAgentPermission,
   scanNodeArtifacts,
   executeAction,
   onReturnToList,
@@ -507,6 +514,9 @@ function RunDetailPageContent({
             onInterrupt={onAgentInterrupt}
             onResize={onAgentResize}
             onStop={onStopAgent}
+            permissionsByJob={agentPermissions}
+            onContinueConversation={onContinueAgent}
+            onDecidePermission={onDecideAgentPermission}
             showFullScreenLink
           />
         </div>

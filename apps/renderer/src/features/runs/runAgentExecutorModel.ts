@@ -46,3 +46,51 @@ export function agentViewportOutput(
     .sort((left, right) => left.sequence - right.sequence)
     .map((event) => ({ sequence: event.sequence, data: persistedData(event) }));
 }
+
+export type AgentChatMessage = {
+  sequence: number;
+  kind: "message" | "permission" | "turn";
+  text: string;
+};
+
+export function isConversationalJob(job: AgentJobSummary): boolean {
+  return job.metadata?.conversational === true;
+}
+
+export function agentChatMessages(
+  jobId: string,
+  persisted: AgentOutputSummary[],
+): AgentChatMessage[] {
+  return persisted
+    .filter(
+      (event) =>
+        event.jobId === jobId &&
+        (event.kind === "acp.message" ||
+          event.kind === "acp.permission" ||
+          event.kind === "acp.turn"),
+    )
+    .sort((left, right) => left.sequence - right.sequence)
+    .map((event) => {
+      if (event.kind === "acp.permission") {
+        const target = typeof event.payload.target === "string" ? event.payload.target : "";
+        const status = typeof event.payload.status === "string" ? event.payload.status : "";
+        return {
+          sequence: event.sequence,
+          kind: "permission" as const,
+          text: "权限请求" + (status ? "（" + status + "）" : "") + (target ? "：" + target : ""),
+        };
+      }
+      if (event.kind === "acp.turn") {
+        return {
+          sequence: event.sequence,
+          kind: "turn" as const,
+          text: typeof event.payload.text === "string" ? event.payload.text : "",
+        };
+      }
+      return {
+        sequence: event.sequence,
+        kind: "message" as const,
+        text: typeof event.payload.text === "string" ? event.payload.text : persistedData(event),
+      };
+    });
+}

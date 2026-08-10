@@ -1616,3 +1616,18 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .knowledge-diff-line--add { color: #86efac; background: rgba(34, 197, 94, 0.1); }
 .knowledge-diff-line--del { color: #fca5a5; background: rgba(239, 68, 68, 0.1); }
 .knowledge-diff-line--meta { color: #94a3b8; font-style: italic; }
+
+/* Agent 聊天视图与权限审批条 */
+.agent-chat { display: flex; flex-direction: column; gap: 10px; min-height: 260px; }
+.agent-chat-body { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #0f172a; max-height: 420px; }
+.agent-chat-message { padding: 8px 12px; border-radius: 8px; background: rgba(148, 163, 184, 0.12); color: #dbe4f0; font-size: 0.86rem; white-space: pre-wrap; word-break: break-word; }
+.agent-chat-message--permission { background: rgba(180, 132, 24, 0.12); color: #fde68a; }
+.agent-chat-message--turn { background: transparent; color: #7f97ad; font-size: 0.78rem; }
+.agent-chat-empty { color: #64748b; text-align: center; padding: 20px 0; }
+.agent-chat-input { display: flex; gap: 8px; }
+.agent-chat-input input { flex: 1; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.agent-permission-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid rgba(180, 132, 24, 0.4); border-radius: 8px; background: rgba(180, 132, 24, 0.08); color: var(--ink); font-size: 0.84rem; }
+.agent-permission-bar span { flex: 1; }
+.agent-view-toggle { display: inline-flex; gap: 4px; }
+.agent-view-toggle button { min-height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink-muted); cursor: pointer; }
+.agent-view-toggle button.is-active { background: rgba(15, 118, 110, 0.12); border-color: var(--accent); color: var(--accent); }

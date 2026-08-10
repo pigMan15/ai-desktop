@@ -1,10 +1,13 @@
 import { Gem, Hexagon, Orbit, Sparkles, type LucideIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import type { AgentPermissionRequest } from "@workflow-platform/contracts";
 import type { AgentJobSummary, AgentOutputSummary } from "../../app/runtimeClient";
 import { buildRunAgentExecutorHash } from "../../app/routes";
 import { TerminalViewport, type TerminalViewportOutput } from "../terminal/TerminalViewport";
 import { agentIdentities, type AgentIconName } from "./runAgentIdentity";
-import { agentViewportOutput, selectAgentJob } from "./runAgentExecutorModel";
+import { agentChatMessages, agentViewportOutput, isConversationalJob, selectAgentJob } from "./runAgentExecutorModel";
+import { AgentChatView } from "./AgentChatView";
 
 export type RunAgentSessionState = {
   writable: boolean;
@@ -23,6 +26,9 @@ export type RunAgentExecutorProps = {
   onInterrupt(jobId: string): Promise<void> | void;
   onResize(jobId: string, columns: number, rows: number): Promise<void> | void;
   onStop(jobId: string): Promise<void> | void;
+  permissionsByJob?: Record<string, AgentPermissionRequest[]>;
+  onContinueConversation?(jobId: string, message: string): Promise<void> | void;
+  onDecidePermission?(jobId: string, requestId: string, decision: "allow" | "deny", reason?: string): Promise<void> | void;
   showFullScreenLink?: boolean;
   fullScreen?: boolean;
 };
@@ -49,11 +55,28 @@ export function RunAgentExecutor({
   onInterrupt,
   onResize,
   onStop,
+  permissionsByJob,
+  onContinueConversation,
+  onDecidePermission,
   showFullScreenLink = false,
   fullScreen = false,
 }: RunAgentExecutorProps) {
   const selectedJob = selectAgentJob(jobs, selectedJobId);
   const identities = agentIdentities(jobs.map((job) => job.id));
+  const [view, setView] = useState<"chat" | "terminal">("terminal");
+  const viewLockedRef = useRef(false);
+  const conversational = Boolean(selectedJob && isConversationalJob(selectedJob));
+
+  useEffect(() => {
+    if (selectedJob && isConversationalJob(selectedJob) && !viewLockedRef.current) {
+      setView("chat");
+    }
+  }, [selectedJob]);
+
+  const chooseView = (next: "chat" | "terminal") => {
+    viewLockedRef.current = true;
+    setView(next);
+  };
 
   if (!selectedJob) {
     return (
@@ -128,6 +151,24 @@ export function RunAgentExecutor({
               <span>{selectedJob.nodeId} · {selectedJob.status}</span>
             </div>
             <div className="run-agent-executor-actions">
+              {conversational ? (
+                <div className="agent-view-toggle">
+                  <button
+                    type="button"
+                    className={view === "chat" ? "is-active" : ""}
+                    onClick={() => chooseView("chat")}
+                  >
+                    聊天
+                  </button>
+                  <button
+                    type="button"
+                    className={view === "terminal" ? "is-active" : ""}
+                    onClick={() => chooseView("terminal")}
+                  >
+                    终端
+                  </button>
+                </div>
+              ) : null}
               {showFullScreenLink && !fullScreen ? (
                 <a href={buildRunAgentExecutorHash(runId, selectedJob.id)}>全屏执行器</a>
               ) : null}
@@ -140,15 +181,34 @@ export function RunAgentExecutor({
           </div>
 
           {statusMessage ? <p className="run-agent-executor-note">{statusMessage}</p> : null}
-          <TerminalViewport
-            ariaLabel={`Agent 执行器 ${selectedJob.id}`}
-            resetKey={selectedJob.id}
-            output={viewportOutput}
-            writable={writable}
-            onInput={writable ? (data) => onInput(selectedJob.id, data) : undefined}
-            onInterrupt={writable ? () => onInterrupt(selectedJob.id) : undefined}
-            onResize={(columns, rows) => onResize(selectedJob.id, columns, rows)}
-          />
+          {conversational && view === "chat" ? (
+            <AgentChatView
+              jobLabel={`${selectedJob.provider} · ${shortJobId(selectedJob.id)}`}
+              messages={agentChatMessages(selectedJob.id, persistedOutput)}
+              permissions={permissionsByJob?.[selectedJob.id] ?? []}
+              disabled={selectedJob.status !== "AWAITING_INPUT"}
+              onSend={(message) =>
+                onContinueConversation
+                  ? onContinueConversation(selectedJob.id, message)
+                  : Promise.resolve()
+              }
+              onDecide={(requestId, decision) =>
+                onDecidePermission
+                  ? onDecidePermission(selectedJob.id, requestId, decision)
+                  : Promise.resolve()
+              }
+            />
+          ) : (
+            <TerminalViewport
+              ariaLabel={`Agent 执行器 ${selectedJob.id}`}
+              resetKey={selectedJob.id}
+              output={viewportOutput}
+              writable={writable}
+              onInput={writable ? (data) => onInput(selectedJob.id, data) : undefined}
+              onInterrupt={writable ? () => onInterrupt(selectedJob.id) : undefined}
+              onResize={(columns, rows) => onResize(selectedJob.id, columns, rows)}
+            />
+          )}
         </div>
       </div>
     </section>
