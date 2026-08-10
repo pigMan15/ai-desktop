@@ -222,6 +222,13 @@ class StartAgentJobRequest(BaseModel):
     now: str
 
 
+class DecideAgentPermissionRequest(BaseModel):
+    decision: str
+    reason: str | None = None
+    actor: dict[str, Any]
+    now: str
+
+
 class StartInteractiveAgentSessionRequest(BaseModel):
     desktopSessionId: str
     pid: int
@@ -1133,6 +1140,29 @@ def create_app(
             project_id, run_id, job_id,
             actor=request.actor if request is not None else None,
             now=request.now if request is not None else None,
+        )
+
+    @application.get("/projects/{project_id}/runs/{run_id}/agents/{job_id}/permissions")
+    def list_project_agent_permissions(
+        project_id: str, run_id: str, job_id: str, status: str = "PENDING"
+    ) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_agent_permissions(
+            project_id, run_id, job_id, status=status
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/permissions/{request_id}/decide")
+    def decide_project_agent_permission(
+        project_id: str, run_id: str, job_id: str, request_id: str, request: DecideAgentPermissionRequest
+    ) -> dict[str, Any]:
+        return _require_service(runtime_service).decide_scoped_agent_permission(
+            project_id,
+            run_id,
+            job_id,
+            request_id,
+            decision=request.decision,
+            reason=request.reason,
+            actor=request.actor,
+            now=request.now,
         )
 
     @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session/start")

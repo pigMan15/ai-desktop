@@ -2913,6 +2913,25 @@ class AgentPermissionRequestRepository:
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def list_for_job(self, job_id: str, *, status: str | None = None) -> list[dict]:
+        if status is None:
+            rows = self._db.execute(
+                """
+                SELECT * FROM agent_permission_requests
+                WHERE job_id = ? ORDER BY created_at, id
+                """,
+                (job_id,),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                """
+                SELECT * FROM agent_permission_requests
+                WHERE job_id = ? AND status = ? ORDER BY created_at, id
+                """,
+                (job_id, status),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def list_for_run(self, run_id: str, *, status: str | None = None) -> list[dict]:
         if status is None:
             rows = self._db.execute(

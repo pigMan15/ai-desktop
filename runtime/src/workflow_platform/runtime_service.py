@@ -46,6 +46,7 @@ from workflow_platform.terminals.redaction import normalize_terminal_output, red
 from workflow_platform.persistence.repositories import (
     AgentCheckpointRepository,
     AgentJobRepository,
+    AgentPermissionRequestRepository,
     AgentSessionRepository,
     ApprovalRepository,
     ArtifactRepository,
@@ -66,6 +67,9 @@ from workflow_platform.persistence.repositories import (
 )
 from workflow_platform.runtime_errors import RuntimeContractError
 from workflow_platform.workspaces import normalize_workspace_path
+
+
+AGENT_PERMISSION_PENDING_LIMIT = 50
 
 
 class WorkflowRuntimeService:
@@ -91,6 +95,7 @@ class WorkflowRuntimeService:
         self._gate_results = GateResultRepository(db)
         self._terminals = TerminalSessionRepository(db)
         self._agent_jobs = AgentJobRepository(db)
+        self._agent_permissions = AgentPermissionRequestRepository(db)
         self._agent_sessions = AgentSessionRepository(db)
         self._agent_checkpoints = AgentCheckpointRepository(db)
         self._deployments = DeploymentRepository(db)
@@ -542,6 +547,82 @@ class WorkflowRuntimeService:
     def continue_scoped_interactive_agent(self, project_id: str, run_id: str, job_id: str, **kwargs) -> dict:
         self.get_scoped_agent_job(project_id, run_id, job_id)
         return self.continue_interactive_agent(run_id, job_id, project_id=project_id, **kwargs)
+
+    def list_scoped_agent_permissions(
+        self, project_id: str, run_id: str, job_id: str, *, status: str = "PENDING"
+    ) -> list[dict]:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        with self._lock:
+            return self._agent_permissions.list_for_job(job_id, status=status or None)
+
+    def decide_scoped_agent_permission(
+        self,
+        project_id: str,
+        run_id: str,
+        job_id: str,
+        permission_request_id: str,
+        *,
+        decision: str,
+        reason: str | None,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="审批 Agent 权限")
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        if decision not in {"allow", "deny"}:
+            raise ValueError("AGENT_PERMISSION_DECISION_INVALID: decision must be allow or deny")
+        with self._lock, self._db:
+            permission = self._agent_permissions.get(permission_request_id)
+            if permission is None or permission["jobId"] != job_id:
+                raise RuntimeContractError(
+                    "AGENT_PERMISSION_NOT_FOUND_IN_RUN", "权限请求不存在", status=404
+                )
+            if permission["status"] in {"ALLOWED", "DENIED"}:
+                raise RuntimeContractError(
+                    "AGENT_PERMISSION_ALREADY_DECIDED", "权限请求已决定", status=409
+                )
+            if permission["status"] == "EXPIRED":
+                raise RuntimeContractError("AGENT_PERMISSION_EXPIRED", "权限请求已过期", status=409)
+            status = "ALLOWED" if decision == "allow" else "DENIED"
+            self._agent_permissions.decide(
+                permission_request_id,
+                status=status,
+                decided_by=human_actor.model_dump(),
+                decided_at=now,
+                reason=reason,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action=f"agent.permission.{'allowed' if decision == 'allow' else 'denied'}",
+                resource=f"agent-permission:{permission_request_id}",
+                detail={
+                    "runId": run_id,
+                    "jobId": job_id,
+                    "permissionType": permission["permissionType"],
+                    "target": permission["target"],
+                    "reason": reason,
+                },
+                created_at=now,
+            )
+            output_sequence = len(self._agent_jobs.list_output(job_id)) + 1
+            self._agent_jobs.append_output(
+                id=f"{job_id}:output:{output_sequence}",
+                job_id=job_id,
+                sequence=output_sequence,
+                kind="acp.permission",
+                payload={
+                    "requestId": permission_request_id,
+                    "permissionId": permission_request_id,
+                    "status": status,
+                    "reason": reason,
+                },
+                created_at=now,
+            )
+            self._db.commit()
+        updated = self._agent_permissions.get(permission_request_id)
+        if updated is None:
+            raise KeyError(f"Agent permission not found: {permission_request_id}")
+        return updated
 
     def get_scoped_interactive_agent_session(self, project_id: str, run_id: str, job_id: str) -> dict:
         self.get_scoped_agent_job(project_id, run_id, job_id)
@@ -3074,12 +3155,66 @@ class WorkflowRuntimeService:
                 self._agent_jobs.set_running(id=job_id, pid=pid, updated_at=now)
                 self._db.commit()
 
+        def on_permission(request_id: str, mapped: dict) -> None:
+            permission_id = f"agent-permission-{uuid4()}"
+            with self._lock, self._db:
+                pending_count = len(self._agent_permissions.list_pending_for_job(job_id))
+                over_limit = pending_count >= AGENT_PERMISSION_PENDING_LIMIT
+                self._agent_permissions.create(
+                    id=permission_id,
+                    job_id=job_id,
+                    run_id=run_id,
+                    permission_type=str(mapped.get("permissionType") or "other"),
+                    target=str(mapped.get("target") or ""),
+                    details=mapped.get("details") or {},
+                    created_at=now,
+                )
+                if over_limit:
+                    self._agent_permissions.decide(
+                        permission_id,
+                        status="DENIED",
+                        decided_by={
+                            "id": "runtime-policy",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        decided_at=now,
+                        reason="超过 PENDING 上限，自动拒绝",
+                    )
+                    self._audit.record(
+                        actor={
+                            "id": "runtime-policy",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        action="agent.permission.denied",
+                        resource=f"agent-permission:{permission_id}",
+                        detail={"runId": run_id, "jobId": job_id, "reason": "pending limit"},
+                        created_at=now,
+                    )
+                append_output(
+                    {
+                        "kind": "acp.permission",
+                        "payload": {
+                            "requestId": request_id,
+                            "permissionId": permission_id,
+                            "status": "DENIED" if over_limit else "PENDING",
+                            "permissionType": mapped.get("permissionType"),
+                            "target": mapped.get("target"),
+                        },
+                    }
+                )
+                self._db.commit()
+
         if resolved_transport == "acp":
             assert acp_provider is not None
             executor = AcpAgentExecutor(
                 provider=acp_provider,
                 on_output=append_output,
                 on_started=mark_running,
+                on_permission=on_permission,
             )
         else:
             executor = CliAgentExecutor(
@@ -3118,6 +3253,7 @@ class WorkflowRuntimeService:
                     error=error,
                     updated_at=now,
                 )
+                self._agent_permissions.expire_pending_for_job(job_id, expired_at=now)
                 checkpoint_status = "completed" if status == "COMPLETED" else "recoverable"
                 self._agent_checkpoints.update_for_job(
                     job_id=job_id,
@@ -3974,6 +4110,7 @@ class WorkflowRuntimeService:
                         error="RECOVERY_ORPHANED: Runtime 执行器已不可用",
                         updated_at=now,
                     )
+                    self._agent_permissions.expire_pending_for_job(job_id, expired_at=now)
                     self._agent_checkpoints.update_for_job(
                         job_id=job_id,
                         status="recoverable",

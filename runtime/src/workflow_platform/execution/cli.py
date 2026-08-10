@@ -204,10 +204,12 @@ class AcpAgentExecutor:
         on_output: Callable[[dict[str, Any]], None] | None = None,
         on_started: Callable[[int], None] | None = None,
         extra_environment: dict[str, str] | None = None,
+        on_permission: Callable[[str, dict], None] | None = None,
     ) -> None:
         self._provider = provider
         self._on_output = on_output
         self._on_started = on_started
+        self._on_permission = on_permission
         self._extra_environment = extra_environment or {}
         self._sessions: dict[str, AcpSession] = {}
         self._cancelled: set[str] = set()
@@ -243,6 +245,10 @@ class AcpAgentExecutor:
             events.append(event)
             if event.get("method") in {"turn/completed", "session/finished", "error"}:
                 completed.set()
+            if event.get("method") == "permission/request" and self._on_permission is not None:
+                request_id = (event.get("params") or {}).get("requestId")
+                if isinstance(request_id, str) and request_id:
+                    self._on_permission(request_id, self._provider.map_permission(event))
             if self._on_output is not None:
                 self._on_output(acp_event_to_agent_output(event))
 
