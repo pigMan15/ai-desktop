@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   RuntimeClientError,
@@ -23,6 +23,22 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [provider, setProvider] = useState<"codex" | "claude" | "fake">("codex");
+  const [discoveryJob, setDiscoveryJob] = useState<{
+    id: string;
+    status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+    error: string | null;
+    output: Array<{ sequence: number; text: string }>;
+  } | null>(null);
+  const discoveryTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (discoveryTimer.current) {
+        clearInterval(discoveryTimer.current);
+        discoveryTimer.current = null;
+      }
+    };
+  }, []);
 
   const reload = useCallback(() => {
     let cancelled = false;
@@ -62,22 +78,54 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
         expectedRevision: repository.revision,
         now: new Date().toISOString(),
       });
-      setMessage(`规则发现任务已排队：${queued.jobId.slice(0, 18)}…`);
-      const deadline = Date.now() + 30_000;
-      let job = await client.getRuleDiscoveryJob(repositoryId, queued.jobId);
-      while (job.status === "QUEUED" || job.status === "RUNNING") {
-        if (Date.now() > deadline) break;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        job = await client.getRuleDiscoveryJob(repositoryId, queued.jobId);
+      setDiscoveryJob({ id: queued.jobId, status: queued.status, error: null, output: [] });
+
+      if (discoveryTimer.current) {
+        clearInterval(discoveryTimer.current);
       }
-      if (job.status === "COMPLETED") {
-        const items = await client.listRuleSnapshots(repositoryId);
-        const proposed = items.find((item) => item.status === "PROPOSED");
-        if (proposed) setActiveSnapshot(proposed);
-        setMessage("规则发现完成，请确认报告");
-      } else {
-        setError(`规则发现未完成：${job.error ?? job.status}`);
-      }
+      discoveryTimer.current = setInterval(async () => {
+        try {
+          const job = await client.getRuleDiscoveryJob(repositoryId, queued.jobId);
+          const output = await client.listRuleDiscoveryOutput(repositoryId, queued.jobId, 0);
+          const entries = output.items.map((item) => {
+            const payload = item.payload as { text?: unknown };
+            return {
+              sequence: item.sequence,
+              text:
+                typeof payload.text === "string" ? payload.text : JSON.stringify(item.payload),
+            };
+          });
+          setDiscoveryJob((current) => ({
+            id: queued.jobId,
+            status: job.status,
+            error: job.error,
+            output: entries,
+          }));
+
+          if (job.status === "COMPLETED") {
+            if (discoveryTimer.current) {
+              clearInterval(discoveryTimer.current);
+              discoveryTimer.current = null;
+            }
+            const items = await client.listRuleSnapshots(repositoryId);
+            const proposed = items.find((item) => item.status === "PROPOSED");
+            if (proposed) setActiveSnapshot(proposed);
+            setMessage("规则发现完成，请确认报告");
+          } else if (job.status === "FAILED" || job.status === "CANCELLED") {
+            if (discoveryTimer.current) {
+              clearInterval(discoveryTimer.current);
+              discoveryTimer.current = null;
+            }
+            setError(`规则发现未完成：${job.error ?? job.status}`);
+          }
+        } catch (caught: unknown) {
+          if (discoveryTimer.current) {
+            clearInterval(discoveryTimer.current);
+            discoveryTimer.current = null;
+          }
+          setError(caught instanceof RuntimeClientError ? caught.message : "规则发现轮询失败");
+        }
+      }, 1000);
     } catch (caught: unknown) {
       setError(caught instanceof RuntimeClientError ? caught.message : "规则发现失败");
     } finally {
@@ -198,6 +246,37 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
           </div>
         </div>
       </section>
+
+      {discoveryJob ? (
+        <section className="knowledge-section">
+          <div className="knowledge-detail-header" style={{ marginBottom: 10 }}>
+            <h3 style={{ margin: 0 }}>规则发现任务</h3>
+            <span className={`knowledge-badge knowledge-badge--${
+              discoveryJob.status === "COMPLETED"
+                ? "active"
+                : discoveryJob.status === "FAILED" || discoveryJob.status === "CANCELLED"
+                  ? "blocked"
+                  : "rules-pending"
+            }`}>
+              {discoveryJob.status}
+            </span>
+          </div>
+          <p className="knowledge-meta" style={{ marginBottom: 10 }}>
+            任务 ID：<code>{discoveryJob.id}</code>
+            {discoveryJob.status === "QUEUED" || discoveryJob.status === "RUNNING"
+              ? " · 正在执行，实时输出如下…"
+              : null}
+          </p>
+          {discoveryJob.error ? (
+            <p className="knowledge-toast knowledge-toast--error">{discoveryJob.error}</p>
+          ) : null}
+          <pre className="knowledge-diff" style={{ minHeight: 90, maxHeight: 260 }}>
+            {discoveryJob.output.length === 0
+              ? "（暂无输出）"
+              : discoveryJob.output.map((entry) => entry.text).join("\n")}
+          </pre>
+        </section>
+      ) : null}
 
       {activeSnapshot && activeSnapshot.status === "PROPOSED" ? (
         <RuleDiscoveryReview

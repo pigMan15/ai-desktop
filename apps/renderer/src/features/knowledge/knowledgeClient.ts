@@ -66,6 +66,20 @@ export type KnowledgeClient = {
   removeRepository: (repositoryId: string, input: { actor: Actor; expectedRevision: string; now: string }) => Promise<KnowledgeRepositoryDetail>;
   discoverRules: (repositoryId: string, input: { provider: KnowledgeProvider; actor: Actor; expectedRevision: string; now: string }) => Promise<{ jobId: string; repositoryId: string; status: "QUEUED" }>;
   getRuleDiscoveryJob: (repositoryId: string, jobId: string) => Promise<KnowledgeRuleDiscoveryJob>;
+  listRuleDiscoveryOutput: (
+    repositoryId: string,
+    jobId: string,
+    afterSequence: number,
+  ) => Promise<{
+    items: Array<{
+      id: string;
+      jobId: string;
+      sequence: number;
+      kind: string;
+      payload: Record<string, unknown>;
+      createdAt: string;
+    }>;
+  }>;
   listRuleSnapshots: (repositoryId: string) => Promise<KnowledgeRuleSnapshotSummary[]>;
   confirmRuleSnapshot: (
     repositoryId: string,
@@ -132,6 +146,8 @@ export function createKnowledgeClient(apiBaseUrl: string): KnowledgeClient {
     removeRepository: async (repositoryId, input) => request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/remove`, { method: "POST", body: input }),
     discoverRules: async (repositoryId, input) => request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/discover-rules`, { method: "POST", body: input }),
     getRuleDiscoveryJob: async (repositoryId, jobId) => request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/rule-discovery-jobs/${encodeURIComponent(jobId)}`),
+    listRuleDiscoveryOutput: async (repositoryId, jobId, afterSequence) =>
+      request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/rule-discovery-jobs/${encodeURIComponent(jobId)}/output?afterSequence=${afterSequence}`),
     listRuleSnapshots: async (repositoryId) => {
       const response = await request<{ items: KnowledgeRuleSnapshotSummary[] }>(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/rule-snapshots`);
       return response.items;
