@@ -23,6 +23,9 @@ from workflow_platform.governance.actors import require_trusted_human
 from workflow_platform.governance.audit import AuditLog
 from workflow_platform.kernel.projection import rebuild_projection
 from workflow_platform.kernel.transition import transition
+from workflow_platform.knowledge.agent_runner import KnowledgeAgentRunner
+from workflow_platform.knowledge.change_set_service import KnowledgeChangeSetService
+from workflow_platform.knowledge.repository_service import KnowledgeRepositoryService
 from workflow_platform.knowledge.service import LocalKnowledgeService
 from workflow_platform.models import (
     Actor,
@@ -96,6 +99,51 @@ class WorkflowRuntimeService:
         self._interactive_desktop_sessions: dict[str, str] = {}
         self._deploy_executors: dict[str, DeployExecutor] = {}
         self._knowledge_synthesis_executors: dict[str, CliAgentExecutor] = {}
+        self._jobs_root = self._resolve_knowledge_jobs_root(db)
+        self._knowledge_agent_runner = KnowledgeAgentRunner(
+            db=db,
+            lock=self._lock,
+            audit=self._audit,
+            agent_provider_factory=self._agent_provider_factory,
+            jobs_root=self._jobs_root,
+        )
+        self._knowledge_repositories = KnowledgeRepositoryService(
+            db=db,
+            lock=self._lock,
+            audit=self._audit,
+            agent_runner=self._knowledge_agent_runner,
+            jobs_root=self._jobs_root,
+        )
+        self._knowledge_change_sets = KnowledgeChangeSetService(
+            db=db,
+            lock=self._lock,
+            audit=self._audit,
+            agent_runner=self._knowledge_agent_runner,
+            jobs_root=self._jobs_root,
+            artifacts_repository=self._artifacts,
+            runs_repository=self._runs,
+        )
+        self._knowledge_agent_runner._on_completed = self._knowledge_job_completed
+
+    def _resolve_knowledge_jobs_root(self, db: sqlite3.Connection) -> Path:
+        try:
+            row = db.execute("PRAGMA database_list").fetchone()
+            db_path = row["file"] if row and row["file"] else None
+        except Exception:
+            db_path = None
+        if not db_path:
+            db_path = ".workflow-platform/runtime.db"
+        return Path(db_path).resolve().parent / "knowledge-jobs"
+
+    def _knowledge_job_completed(self, job_id: str, result, analysis_root: Path) -> None:
+        with self._lock:
+            job = self._agent_jobs.get(job_id)
+        if job is None:
+            return
+        if job["purpose"] == "knowledge-rule-discovery":
+            self._knowledge_repositories._on_job_completed(job_id, result, analysis_root)
+        elif job["purpose"] == "knowledge-change-set-generation":
+            self._knowledge_change_sets._on_job_completed(job_id, result, analysis_root)
 
     def import_project(self, project_path: Path, *, now: str) -> dict:
         project_path = project_path.resolve()

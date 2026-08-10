@@ -1742,6 +1742,17 @@ class AgentJobRepository:
         ).fetchall()
         return [self._job_row_to_dict(row) for row in rows]
 
+    def list_active_by_purpose(self, purpose: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM agent_jobs
+            WHERE purpose = ? AND status IN ('QUEUED', 'RUNNING')
+            ORDER BY created_at, id
+            """,
+            (purpose,),
+        ).fetchall()
+        return [self._job_row_to_dict(row) for row in rows]
+
     def list_active_by_purpose_owner(self, *, purpose: str, owner_id: str) -> list[dict]:
         rows = self._db.execute(
             """

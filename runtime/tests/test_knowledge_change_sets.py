@@ -50,7 +50,10 @@ def test_risk_matrix_low_medium_high_blocked() -> None:
     ) == ("MEDIUM", ["existing knowledge changed"])
     assert classify_risk(
         changes=_changes({"category": "RULE"}), snapshot=_snapshot(), validation_results=[]
-    ) == ("HIGH", ["rules, routing, or templates changed"])
+    ) == ("HIGH", ["rules, routing, index, or templates changed"])
+    assert classify_risk(
+        changes=_changes({"category": "INDEX"}), snapshot=_snapshot(), validation_results=[]
+    )[0] == "HIGH"
     assert classify_risk(
         changes=_changes({"path": "main/secret.md"}),
         snapshot=_snapshot(writable=["candidate/**"]),

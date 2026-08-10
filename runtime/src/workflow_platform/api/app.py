@@ -1344,6 +1344,15 @@ def create_app(
     def submit_project_gate(project_id: str, run_id: str, request: GateResultRequest) -> dict[str, Any]:
         return _require_service(runtime_service).submit_scoped_gate(project_id, run_id, node_id=request.nodeId, gate_id=request.gateId, status=request.status, evidence=request.evidence, waiver_reason=request.waiverReason, failure_reason=request.failureReason, actor=request.actor, expected_revision=request.expectedRevision, now=request.now).model_dump()
 
+    if runtime_service is not None:
+        from workflow_platform.api.knowledge_repositories import create_knowledge_router
+
+        application.include_router(
+            create_knowledge_router(
+                runtime_service._knowledge_repositories,
+                runtime_service._knowledge_change_sets,
+            )
+        )
     return application
 
 

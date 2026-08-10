@@ -302,6 +302,58 @@ class KnowledgeRuleSnapshotRepository:
                 ),
             )
 
+    def delete_rule_files(self, snapshot_id: str) -> None:
+        self._db.execute(
+            "DELETE FROM knowledge_rule_files WHERE snapshot_id = ?", (snapshot_id,)
+        )
+
+    def update_confirmed_content(
+        self,
+        id: str,
+        *,
+        writable_paths: list[str],
+        protected_paths: list[str],
+        index_files: list[str],
+        routing_files: list[str],
+        template_files: list[str],
+        validation_commands: list[str],
+        summary: str,
+        content_hash: str,
+        updated_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            UPDATE knowledge_rule_snapshots
+            SET writable_paths_json = ?, protected_paths_json = ?,
+                index_files_json = ?, routing_files_json = ?,
+                template_files_json = ?, validation_commands_json = ?,
+                summary = ?, content_hash = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                _json_dumps(writable_paths),
+                _json_dumps(protected_paths),
+                _json_dumps(index_files),
+                _json_dumps(routing_files),
+                _json_dumps(template_files),
+                _json_dumps(validation_commands),
+                summary,
+                content_hash,
+                updated_at,
+                id,
+            ),
+        )
+
+    def update_content_hash(self, id: str, *, content_hash: str, updated_at: str) -> None:
+        self._db.execute(
+            """
+            UPDATE knowledge_rule_snapshots
+            SET content_hash = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (content_hash, updated_at, id),
+        )
+
     def list_rule_files(self, snapshot_id: str) -> list[dict]:
         rows = self._db.execute(
             "SELECT * FROM knowledge_rule_files WHERE snapshot_id = ? ORDER BY relative_path",
@@ -408,6 +460,18 @@ class KnowledgeChangeSetRepository:
             (change_set_id, run_id),
         ).fetchone()
         return self._row_to_dict(row) if row is not None else None
+
+    def list_for_repository(self, repository_id: str, *, limit: int = 20) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM knowledge_change_sets
+            WHERE repository_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (repository_id, limit),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def list_for_run(
         self, run_id: str, *, limit: int = 20, before: tuple[str, str] | None = None
