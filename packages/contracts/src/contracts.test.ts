@@ -1,10 +1,21 @@
 import {
   ERROR_CODES,
+  KNOWLEDGE_CHANGE_SET_STATUSES,
+  KNOWLEDGE_FILE_CATEGORIES,
+  KNOWLEDGE_FILE_OPERATIONS,
+  KNOWLEDGE_PROVIDERS,
+  KNOWLEDGE_REPOSITORY_STATUSES,
+  KNOWLEDGE_RISK_LEVELS,
+  KNOWLEDGE_RULE_FILE_CATEGORIES,
+  KNOWLEDGE_RULE_SNAPSHOT_STATUSES,
   NODE_KINDS,
   NODE_STATES,
   RUN_EVENT_TYPES,
   type CreateRunRequest,
   type ExecuteRunActionRequest,
+  type KnowledgeChangeSetDetail,
+  type KnowledgeRepositoryDetail,
+  type KnowledgeRepositoryStatus,
   type ExecuteRunActionResponse,
   type NodeState,
   type RunListResponse,
@@ -117,6 +128,28 @@ it("exports stable error constants in plan order", () => {
     "RUN_CONCURRENCY_LIMIT",
     "AGENT_CONCURRENCY_LIMIT",
     "PROJECT_CONCURRENCY_INVALID",
+    "KNOWLEDGE_INPUT_INVALID",
+    "KNOWLEDGE_REPOSITORY_NOT_GIT",
+    "KNOWLEDGE_REPOSITORY_DUPLICATE",
+    "KNOWLEDGE_REVISION_CONFLICT",
+    "KNOWLEDGE_RULES_NOT_CONFIRMED",
+    "KNOWLEDGE_PATH_OUTSIDE_REPOSITORY",
+    "KNOWLEDGE_PATH_PROTECTED",
+    "KNOWLEDGE_BASELINE_CHANGED",
+    "KNOWLEDGE_GIT_CONFLICT",
+    "KNOWLEDGE_AGENT_OUTPUT_INVALID",
+    "KNOWLEDGE_VALIDATION_FAILED",
+    "KNOWLEDGE_APPROVAL_INVALIDATED",
+    "KNOWLEDGE_APPLY_ROLLBACK_FAILED",
+    "KNOWLEDGE_GIT_IDENTITY_MISSING",
+    "KNOWLEDGE_CHANGE_SET_NOT_APPLIED",
+    "KNOWLEDGE_JOB_ALREADY_RUNNING",
+    "IDEMPOTENCY_KEY_REUSED",
+    "KNOWLEDGE_CHANGE_SET_NOT_FOUND_IN_RUN",
+    "KNOWLEDGE_AGENT_JOB_LOST",
+    "KNOWLEDGE_PROVIDER_ISOLATION_UNAVAILABLE",
+    "KNOWLEDGE_INPUT_LIMIT_EXCEEDED",
+    "KNOWLEDGE_REPOSITORY_BUSY",
   ]);
 });
 
@@ -433,5 +466,164 @@ it("accepts legacy workflows without role instructions or canvas metadata", () =
     role: { id: "engineer", name: "Engineer" },
     node: { id: "agent-1", name: "Agent", kind: "agent" },
     metadata: {},
+  });
+});
+
+it("exports stable knowledge repository constants in plan order", () => {
+  expect([...KNOWLEDGE_REPOSITORY_STATUSES]).toEqual([
+    "ACTIVE",
+    "RULES_PENDING",
+    "BLOCKED",
+    "REMOVED",
+  ]);
+});
+
+it("exports stable knowledge rule snapshot constants in plan order", () => {
+  expect([...KNOWLEDGE_RULE_SNAPSHOT_STATUSES]).toEqual([
+    "PROPOSED",
+    "CONFIRMED",
+    "SUPERSEDED",
+    "STALE",
+  ]);
+});
+
+it("exports stable knowledge change set constants in state machine order", () => {
+  expect([...KNOWLEDGE_CHANGE_SET_STATUSES]).toEqual([
+    "DRAFT",
+    "GENERATING",
+    "VALIDATING",
+    "READY_TO_APPLY",
+    "AWAITING_APPROVAL",
+    "APPROVED",
+    "APPLYING",
+    "APPLIED",
+    "PARTIALLY_STAGED",
+    "STAGED",
+    "COMMITTED",
+    "STALE",
+    "BLOCKED",
+    "FAILED",
+    "ABANDONED",
+  ]);
+});
+
+it("exports stable knowledge risk, operation, category, and provider constants", () => {
+  expect([...KNOWLEDGE_RISK_LEVELS]).toEqual(["LOW", "MEDIUM", "HIGH", "BLOCKED"]);
+  expect([...KNOWLEDGE_FILE_OPERATIONS]).toEqual(["CREATE", "UPDATE"]);
+  expect([...KNOWLEDGE_FILE_CATEGORIES]).toEqual([
+    "KNOWLEDGE",
+    "INDEX",
+    "ROUTING",
+    "RULE",
+    "TEMPLATE",
+  ]);
+  expect([...KNOWLEDGE_RULE_FILE_CATEGORIES]).toEqual([
+    "RULE",
+    "INDEX",
+    "ROUTING",
+    "TEMPLATE",
+    "REFERENCE",
+  ]);
+  expect([...KNOWLEDGE_PROVIDERS]).toEqual(["codex", "claude", "fake"]);
+});
+
+it("accepts knowledge repository and change set detail shapes", () => {
+  const repositoryStatus: KnowledgeRepositoryStatus = "ACTIVE";
+  const repository: KnowledgeRepositoryDetail = {
+    id: "knowledge-repository-1",
+    name: "物流知识库",
+    rootPath: "D:\\knowledge\\logistics",
+    canonicalRootPath: "D:\\knowledge\\logistics",
+    repositoryIdentity: "sha256-identity",
+    currentBranch: "main",
+    headCommit: "abc123",
+    defaultWritePolicy: "risk-based",
+    autoApplyLowRisk: false,
+    status: repositoryStatus,
+    activeRuleSnapshotId: null,
+    revision: "1",
+    createdAt: "2026-08-10T00:00:00Z",
+    updatedAt: "2026-08-10T00:00:00Z",
+    gitStatus: {
+      rootPath: "D:\\knowledge\\logistics",
+      commonDir: "D:\\knowledge\\logistics\\.git",
+      branch: "main",
+      headCommit: "abc123",
+      dirty: false,
+      conflict: false,
+      worktreeFingerprint: "fingerprint",
+      stagedPaths: [],
+      unstagedPaths: [],
+    },
+    activeRuleSnapshot: null,
+    recentChangeSets: [],
+    allowedActions: ["discover-rules", "remove-repository"],
+  };
+
+  const changeSet: KnowledgeChangeSetDetail = {
+    id: "knowledge-change-set-1",
+    projectId: "project-1",
+    repositoryId: "knowledge-repository-1",
+    ruleSnapshotId: "snapshot-1",
+    runId: "run-1",
+    sourceArtifacts: [],
+    provider: "fake",
+    mode: "preview",
+    agentJobId: null,
+    baseHeadCommit: "abc123",
+    baseWorkingTreeFingerprint: "fingerprint",
+    plan: null,
+    fileChanges: [],
+    unifiedDiff: null,
+    riskLevel: null,
+    riskReasons: [],
+    validationResults: [],
+    status: "DRAFT",
+    approvalId: null,
+    appliedAt: null,
+    committedHash: null,
+    revision: "1",
+    createdAt: "2026-08-10T00:00:00Z",
+    updatedAt: "2026-08-10T00:00:00Z",
+    repository: {
+      id: "knowledge-repository-1",
+      name: "物流知识库",
+      rootPath: "D:\\knowledge\\logistics",
+    },
+    ruleSnapshot: {
+      id: "snapshot-1",
+      repositoryId: "knowledge-repository-1",
+      revision: "1",
+      headCommit: "abc123",
+      discoveredFiles: [],
+      writablePaths: [],
+      protectedPaths: [],
+      indexFiles: [],
+      routingFiles: [],
+      templateFiles: [],
+      validationCommands: [],
+      summary: "summary",
+      openQuestions: [],
+      source: "manifest",
+      contentHash: "hash",
+      status: "CONFIRMED",
+      confirmedBy: null,
+      confirmedAt: null,
+    },
+    output: [],
+    approval: null,
+    allowedActions: ["generate"],
+  };
+
+  expect({
+    repositoryStatus: repository.status,
+    changeSetStatus: changeSet.status,
+    provider: changeSet.provider,
+    firstAction: repository.allowedActions[0],
+  }).toEqual({
+    repositoryStatus: "ACTIVE",
+    changeSetStatus: "DRAFT",
+    provider: "fake",
+    firstAction: "discover-rules",
   });
 });
