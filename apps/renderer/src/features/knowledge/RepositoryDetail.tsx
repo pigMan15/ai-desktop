@@ -30,6 +30,8 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
     output: Array<{ sequence: number; text: string }>;
   } | null>(null);
   const discoveryTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [discoveryElapsed, setDiscoveryElapsed] = useState(0);
+  const discoveryLogRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
     return () => {
@@ -39,6 +41,14 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
       }
     };
   }, []);
+
+  // 日志自动滚动到底部
+  useEffect(() => {
+    const log = discoveryLogRef.current;
+    if (log) {
+      log.scrollTop = log.scrollHeight;
+    }
+  }, [discoveryJob?.output]);
 
   const reload = useCallback(() => {
     let cancelled = false;
@@ -79,6 +89,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
         now: new Date().toISOString(),
       });
       setDiscoveryJob({ id: queued.jobId, status: queued.status, error: null, output: [] });
+      setDiscoveryElapsed(0);
 
       if (discoveryTimer.current) {
         clearInterval(discoveryTimer.current);
@@ -101,6 +112,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
             error: job.error,
             output: entries,
           }));
+          setDiscoveryElapsed((seconds) => seconds + 1);
 
           if (job.status === "COMPLETED") {
             if (discoveryTimer.current) {
@@ -128,6 +140,24 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
       }, 1000);
     } catch (caught: unknown) {
       setError(caught instanceof RuntimeClientError ? caught.message : "规则发现失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCancelDiscovery = async () => {
+    if (!repository || !discoveryJob) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await client.cancelRuleDiscovery(repositoryId, discoveryJob.id, {
+        actor: { id: "renderer-user", type: "human", source: "renderer", trusted: true },
+        expectedRevision: repository.revision,
+        now: new Date().toISOString(),
+      });
+      setMessage("已请求取消规则发现任务");
+    } catch (caught: unknown) {
+      setError(caught instanceof RuntimeClientError ? caught.message : "取消任务失败");
     } finally {
       setBusy(false);
     }
@@ -261,16 +291,35 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
               {discoveryJob.status}
             </span>
           </div>
-          <p className="knowledge-meta" style={{ marginBottom: 10 }}>
-            任务 ID：<code>{discoveryJob.id}</code>
-            {discoveryJob.status === "QUEUED" || discoveryJob.status === "RUNNING"
-              ? " · 正在执行，实时输出如下…"
-              : null}
-          </p>
+          <div className="knowledge-actions" style={{ marginBottom: 10 }}>
+            <p className="knowledge-meta" style={{ margin: 0 }}>
+              任务 ID：<code>{discoveryJob.id}</code>
+            </p>
+            <span className="knowledge-meta">
+              {discoveryJob.status === "QUEUED" || discoveryJob.status === "RUNNING"
+                ? `已运行 ${discoveryElapsed}s`
+                : `输出 ${discoveryJob.output.length} 行`}
+            </span>
+            {discoveryJob.status === "QUEUED" || discoveryJob.status === "RUNNING" ? (
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={busy}
+                onClick={() => void handleCancelDiscovery()}
+              >
+                取消任务
+              </button>
+            ) : null}
+          </div>
+          {discoveryJob.status === "QUEUED" || discoveryJob.status === "RUNNING" ? (
+            <div className="knowledge-job-progress" aria-hidden="true">
+              <span />
+            </div>
+          ) : null}
           {discoveryJob.error ? (
             <p className="knowledge-toast knowledge-toast--error">{discoveryJob.error}</p>
           ) : null}
-          <pre className="knowledge-diff" style={{ minHeight: 90, maxHeight: 260 }}>
+          <pre ref={discoveryLogRef} className="knowledge-diff" style={{ minHeight: 90, maxHeight: 260 }}>
             {discoveryJob.output.length === 0
               ? "（暂无输出）"
               : discoveryJob.output.map((entry) => entry.text).join("\n")}

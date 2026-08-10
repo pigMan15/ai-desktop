@@ -66,6 +66,19 @@ export type KnowledgeClient = {
   removeRepository: (repositoryId: string, input: { actor: Actor; expectedRevision: string; now: string }) => Promise<KnowledgeRepositoryDetail>;
   discoverRules: (repositoryId: string, input: { provider: KnowledgeProvider; actor: Actor; expectedRevision: string; now: string }) => Promise<{ jobId: string; repositoryId: string; status: "QUEUED" }>;
   getRuleDiscoveryJob: (repositoryId: string, jobId: string) => Promise<KnowledgeRuleDiscoveryJob>;
+  cancelRuleDiscovery: (
+    repositoryId: string,
+    jobId: string,
+    input: { actor: Actor; expectedRevision: string; now: string },
+  ) => Promise<{
+    id: string;
+    purpose: string;
+    ownerId: string;
+    provider: string;
+    status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+    summary: string | null;
+    error: string | null;
+  }>;
   listRuleDiscoveryOutput: (
     repositoryId: string,
     jobId: string,
@@ -146,6 +159,8 @@ export function createKnowledgeClient(apiBaseUrl: string): KnowledgeClient {
     removeRepository: async (repositoryId, input) => request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/remove`, { method: "POST", body: input }),
     discoverRules: async (repositoryId, input) => request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/discover-rules`, { method: "POST", body: input }),
     getRuleDiscoveryJob: async (repositoryId, jobId) => request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/rule-discovery-jobs/${encodeURIComponent(jobId)}`),
+    cancelRuleDiscovery: async (repositoryId, jobId, input) =>
+      request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/rule-discovery-jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", body: input }),
     listRuleDiscoveryOutput: async (repositoryId, jobId, afterSequence) =>
       request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/rule-discovery-jobs/${encodeURIComponent(jobId)}/output?afterSequence=${afterSequence}`),
     listRuleSnapshots: async (repositoryId) => {

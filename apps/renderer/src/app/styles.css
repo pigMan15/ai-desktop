@@ -1522,3 +1522,27 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 }
 
 .inline-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.86rem; color: var(--ink-muted); }
+
+/* 规则发现任务：进行中动画条 */
+.knowledge-job-progress {
+  position: relative;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--surface-muted);
+  overflow: hidden;
+  margin: 0 0 10px;
+}
+
+.knowledge-job-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  border-radius: 3px;
+  background: var(--accent);
+  animation: knowledge-job-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes knowledge-job-slide {
+  0% { left: -38%; }
+  100% { left: 100%; }
+}
