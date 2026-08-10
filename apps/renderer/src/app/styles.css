@@ -1030,3 +1030,329 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   .workflow-inspector .form-grid { grid-template-columns: 1fr; }
   .workflow-inspector .form-wide { grid-column: auto; }
 }
+
+
+/* ============================================================
+   Knowledge repository workbench
+   ============================================================ */
+
+.knowledge-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.knowledge-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+
+.knowledge-tabs button {
+  padding: 8px 16px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.knowledge-tabs button:hover {
+  color: var(--ink);
+  background: var(--surface-subtle);
+}
+
+.knowledge-tabs button.active {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--accent-strong);
+  box-shadow: 0 1px 2px rgba(23, 32, 51, 0.06);
+}
+
+.knowledge-section {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 16px 18px;
+}
+
+.knowledge-section > h3 {
+  margin: 0 0 14px;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.knowledge-section + .knowledge-section {
+  margin-top: 14px;
+}
+
+/* 卡片网格与卡片 */
+.knowledge-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.knowledge-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.knowledge-card:hover {
+  border-color: #9fb7c1;
+  box-shadow: 0 2px 8px rgba(23, 32, 51, 0.07);
+}
+
+.knowledge-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.knowledge-card__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.knowledge-card__title.link-button {
+  padding: 0;
+  min-height: auto;
+  text-align: left;
+  font-size: 0.95rem;
+}
+
+.knowledge-card__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.knowledge-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+}
+
+/* 徽章 */
+.knowledge-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 650;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.knowledge-badge--active { color: var(--success); border-color: rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); }
+.knowledge-badge--rules-pending { color: var(--warning); border-color: rgba(154, 91, 8, 0.35); background: var(--warning-bg); }
+.knowledge-badge--blocked { color: var(--danger); border-color: rgba(180, 35, 24, 0.35); background: var(--danger-bg); }
+.knowledge-badge--removed { opacity: 0.65; }
+
+.knowledge-badge--low { color: var(--success); border-color: rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); }
+.knowledge-badge--medium { color: var(--warning); border-color: rgba(154, 91, 8, 0.35); background: var(--warning-bg); }
+.knowledge-badge--high { color: var(--danger); border-color: rgba(180, 35, 24, 0.35); background: var(--danger-bg); }
+
+.knowledge-badge--create { color: var(--success); border-color: rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); }
+.knowledge-badge--update { color: var(--warning); border-color: rgba(154, 91, 8, 0.35); background: var(--warning-bg); }
+
+/* 事实列表 */
+.knowledge-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px 18px;
+  margin: 0;
+  font-size: 0.87rem;
+}
+
+.knowledge-facts dt { color: var(--ink-muted); }
+.knowledge-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+
+/* meta 行 */
+.knowledge-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+
+.knowledge-meta code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.82em;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* 文件变更列表 */
+.knowledge-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.knowledge-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--ink);
+  min-width: 0;
+}
+
+.knowledge-file-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* diff */
+.knowledge-diff {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  overflow: auto;
+  max-height: 420px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--ink);
+}
+
+/* 空状态 */
+.knowledge-empty {
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  padding: 28px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+  color: var(--ink-muted);
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+/* 导入/示例表单 */
+.knowledge-import-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin: 0 0 18px;
+}
+
+.knowledge-import-form label { display: flex; flex-direction: column; gap: 5px; font-size: 0.82rem; color: var(--ink-muted); }
+.knowledge-import-form input,
+.knowledge-import-form select { min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 0.88rem; }
+.knowledge-import-form input:focus,
+.knowledge-import-form select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }
+
+.knowledge-button--primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: 7px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.knowledge-button--primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
+.knowledge-button--primary:disabled { cursor: not-allowed; opacity: 0.52; }
+
+/* 详情头部 */
+.knowledge-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.knowledge-detail-header h2 { margin: 0; font-size: 1.15rem; }
+
+/* 表单堆叠（规则确认等） */
+.knowledge-stacked-form { display: flex; flex-direction: column; gap: 12px; }
+.knowledge-stacked-form label { display: flex; flex-direction: column; gap: 5px; font-size: 0.82rem; color: var(--ink-muted); }
+.knowledge-stacked-form textarea { padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85rem; resize: vertical; }
+.knowledge-stacked-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }
+
+/* 规则文件 chips */
+.knowledge-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.knowledge-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--ink);
+  font-size: 0.8rem;
+}
+.knowledge-chip em { font-style: normal; color: var(--ink-muted); font-size: 0.74rem; }
+
+/* 变更集操作区 */
+.knowledge-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.knowledge-actions input[type="text"] { min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 0.88rem; }
+.knowledge-actions input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }
+
+/* Git 状态两列 */
+.knowledge-git-grid { display: grid; grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.6fr); gap: 14px; }
+@media (max-width: 900px) { .knowledge-git-grid { grid-template-columns: 1fr; } }
+
+/* 消息 */
+.knowledge-toast {
+  padding: 9px 12px;
+  border-radius: 7px;
+  font-size: 0.86rem;
+}
+.knowledge-toast--success { border: 1px solid rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); color: var(--success); }
+.knowledge-toast--error { border: 1px solid rgba(180, 35, 24, 0.35); background: var(--danger-bg); color: var(--danger); }
+
+/* 窄屏 */
+@media (max-width: 720px) {
+  .knowledge-import-form { grid-template-columns: 1fr; }
+  .knowledge-card-grid { grid-template-columns: 1fr; }
+}
+
+/* 复选框/开关行 */
+.inline-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.86rem; color: var(--ink-muted); }

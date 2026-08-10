@@ -58,7 +58,7 @@ describe("RepositoryList", () => {
     render(<RepositoryList client={client as never} onNavigate={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("仓库名称"), { target: { value: "新知识库" } });
     fireEvent.change(screen.getByLabelText("仓库根目录"), { target: { value: "C:/kb" } });
-    fireEvent.click(screen.getByRole("button", { name: "导入" }));
+    fireEvent.click(screen.getByRole("button", { name: /导入/ }));
 
     await waitFor(() => {
       expect(client.importRepository).toHaveBeenCalledWith(

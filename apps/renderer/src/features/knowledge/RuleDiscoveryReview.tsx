@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 
 import type { KnowledgeRuleSnapshotSummary } from "./knowledgeClient";
 
@@ -30,34 +30,59 @@ export function RuleDiscoveryReview({ snapshot, expectedRevision, busy, onConfir
   const disabled = busy || openQuestions.length > 0;
 
   return (
-    <div className="rule-discovery-review">
+    <section className="knowledge-section">
       <h3>规则发现报告</h3>
       {openQuestions.length > 0 ? (
-        <p className="operation-error">存在未确定项，必须先解决才能确认：{openQuestions.join("；")}</p>
+        <p className="knowledge-toast knowledge-toast--error">
+          存在未确定项，必须先解决才能确认：{openQuestions.join("；")}
+        </p>
       ) : null}
-      <h4>发现的规则文件</h4>
-      <ul>
-        {discoveredFiles.map((file) => (
-          <li key={file.path}>
-            {file.path}（{file.category}）
-          </li>
-        ))}
-      </ul>
-      <label>
-        可写目录（每行一个）
-        <textarea value={writablePathsText} onChange={(event) => setWritablePathsText(event.target.value)} rows={4} />
-      </label>
-      <label>
-        保护目录（每行一个）
-        <textarea value={protectedPathsText} onChange={(event) => setProtectedPathsText(event.target.value)} rows={4} />
-      </label>
-      <label>
-        摘要
-        <textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={3} />
-      </label>
-      <div className="button-row">
+
+      {discoveredFiles.length === 0 ? (
+        <p className="knowledge-empty" style={{ minHeight: 70, marginBottom: 14 }}>
+          未发现规则入口文件——请在下方向下确认最小可写边界，或先用示例包初始化规则。
+        </p>
+      ) : (
+        <>
+          <p className="knowledge-meta" style={{ marginBottom: 8 }}>发现的规则文件</p>
+          <div className="knowledge-chip-list" style={{ marginBottom: 14 }}>
+            {discoveredFiles.map((file) => (
+              <span key={file.path} className="knowledge-chip">
+                {file.path}
+                <em>{file.category}</em>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="knowledge-stacked-form">
+        <label>
+          可写目录（每行一个，例如 candidate/**）
+          <textarea
+            value={writablePathsText}
+            onChange={(event) => setWritablePathsText(event.target.value)}
+            rows={4}
+          />
+        </label>
+        <label>
+          保护目录（每行一个，例如 .git/**）
+          <textarea
+            value={protectedPathsText}
+            onChange={(event) => setProtectedPathsText(event.target.value)}
+            rows={3}
+          />
+        </label>
+        <label>
+          规则摘要
+          <textarea value={summary} onChange={(event) => setSummary(event.target.value)} rows={3} />
+        </label>
+      </div>
+
+      <div className="button-row" style={{ marginTop: 16, marginBottom: 0 }}>
         <button
           type="button"
+          className="knowledge-button--primary"
           disabled={disabled}
           onClick={() =>
             onConfirm({
@@ -72,13 +97,13 @@ export function RuleDiscoveryReview({ snapshot, expectedRevision, busy, onConfir
             })
           }
         >
-          确认规则
+          {busy ? "确认中…" : "确认规则"}
         </button>
-        <button type="button" disabled={busy} onClick={onCancel}>
+        <button type="button" className="quiet-button" disabled={busy} onClick={onCancel}>
           取消
         </button>
+        <span className="knowledge-meta">确认后仓库 revision 将推进（当前 {expectedRevision}）。</span>
       </div>
-      <p className="muted">确认后仓库 revision 将推进（当前 {expectedRevision}）。</p>
-    </div>
+    </section>
   );
 }

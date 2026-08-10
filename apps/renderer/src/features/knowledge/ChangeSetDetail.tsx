@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { KnowledgeChangeSetDetail } from "@workflow-platform/contracts";
 import type { KnowledgeClient } from "./knowledgeClient";
@@ -52,167 +52,222 @@ export function ChangeSetDetail({ client, projectId, runId, changeSetId, onNavig
 
   return (
     <div className="knowledge-change-set-detail">
-      <button type="button" className="link-button" onClick={() => onNavigate("#/knowledge/repositories")}>
-        返回知识库
-      </button>
-      <h2>知识变更集</h2>
-      {state.operationMessage ? <p className="operation-message">{state.operationMessage}</p> : null}
-      {state.error ? <p className="operation-error">{state.error}</p> : null}
-      {!changeSet ? <p className="muted">加载中…</p> : null}
-      {changeSet ? (
-        <>
-          <dl>
-            <dt>状态</dt>
-            <dd>{changeSet.status}</dd>
-            <dt>风险</dt>
-            <dd>{changeSet.riskLevel ?? "—"}</dd>
-            <dt>风险原因</dt>
-            <dd>{changeSet.riskReasons.join("；") || "—"}</dd>
-            <dt>revision</dt>
-            <dd>{changeSet.revision}</dd>
-            <dt>仓库</dt>
-            <dd>{changeSet.repository?.name ?? changeSet.repositoryId}</dd>
-          </dl>
+      <div className="knowledge-detail-header">
+        <button type="button" className="quiet-button" onClick={() => onNavigate("#/knowledge/repositories")}>
+          ← 返回知识库
+        </button>
+        <h2>知识变更集</h2>
+        {changeSet ? (
+          <>
+            <span className={`knowledge-badge`}>{changeSet.status}</span>
+            {changeSet.riskLevel ? (
+              <span className={`knowledge-badge knowledge-badge--${changeSet.riskLevel.toLowerCase()}`}>
+                风险 {changeSet.riskLevel}
+              </span>
+            ) : null}
+          </>
+        ) : null}
+      </div>
 
-          <section>
-            <h3>文件变更</h3>
-            <ul>
-              {changeSet.fileChanges.map((fileChange) => (
-                <li key={fileChange.path}>
-                  <span className="file-operation">{fileChange.operation}</span> {fileChange.path}
-                  <span className="file-category">{fileChange.category}</span>
-                </li>
-              ))}
-            </ul>
+      {state.operationMessage ? (
+        <p className="knowledge-toast knowledge-toast--success">{state.operationMessage}</p>
+      ) : null}
+      {state.error ? <p className="knowledge-toast knowledge-toast--error">{state.error}</p> : null}
+
+      {!changeSet ? (
+        <div className="knowledge-empty">加载变更集…</div>
+      ) : (
+        <>
+          <section className="knowledge-section">
+            <h3>概览</h3>
+            <dl className="knowledge-facts">
+              <dt>风险</dt>
+              <dd>{changeSet.riskLevel ?? "—"}</dd>
+              <dt>风险原因</dt>
+              <dd>{changeSet.riskReasons.join("；") || "—"}</dd>
+              <dt>revision</dt>
+              <dd><code>{changeSet.revision}</code></dd>
+              <dt>仓库</dt>
+              <dd>{changeSet.repository?.name ?? changeSet.repositoryId}</dd>
+              <dt>来源 Artifact</dt>
+              <dd>{changeSet.sourceArtifacts.length} 个</dd>
+            </dl>
+          </section>
+
+          <section className="knowledge-section">
+            <h3>文件变更（{changeSet.fileChanges.length}）</h3>
+            {changeSet.fileChanges.length === 0 ? (
+              <div className="knowledge-empty" style={{ minHeight: 70 }}>
+                尚未生成文件变更。
+              </div>
+            ) : (
+              <div className="knowledge-file-list">
+                {changeSet.fileChanges.map((fileChange) => (
+                  <div key={fileChange.path} className="knowledge-file-row">
+                    <span className={`knowledge-badge knowledge-badge--${fileChange.operation.toLowerCase()}`}>
+                      {fileChange.operation}
+                    </span>
+                    <span className="knowledge-chip" style={{ borderRadius: 5 }}>{fileChange.category}</span>
+                    <span>{fileChange.path}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           {changeSet.unifiedDiff ? (
-            <section>
+            <section className="knowledge-section">
               <h3>统一 diff</h3>
               <pre className="knowledge-diff">{changeSet.unifiedDiff}</pre>
             </section>
           ) : null}
 
-          <div className="button-row">
-            {actions.includes("generate") ? (
-              <button type="button" onClick={() => void runAction((input) => client.generateChangeSet(projectId, runId, changeSetId, input), "生成")}>
-                生成变更集
-              </button>
-            ) : null}
-            {actions.includes("approve") ? (
-              <span>
-                <input aria-label="审核意见" value={comment} onChange={(event) => setComment(event.target.value)} placeholder="审核意见" />
+          <section className="knowledge-section">
+            <h3>操作</h3>
+            <div className="knowledge-actions">
+              {actions.includes("generate") ? (
                 <button
                   type="button"
-                  onClick={() => void runAction((input) => client.approveChangeSet(projectId, runId, changeSetId, { ...input, comment }), "审核通过")}
+                  className="knowledge-button--primary"
+                  onClick={() => void runAction((input) => client.generateChangeSet(projectId, runId, changeSetId, input), "生成")}
                 >
-                  通过
+                  生成变更集
                 </button>
+              ) : null}
+              {actions.includes("approve") ? (
+                <>
+                  <input
+                    type="text"
+                    aria-label="审核意见"
+                    value={comment}
+                    onChange={(event) => setComment(event.target.value)}
+                    placeholder="审核意见"
+                  />
+                  <button
+                    type="button"
+                    className="knowledge-button--primary"
+                    onClick={() => void runAction((input) => client.approveChangeSet(projectId, runId, changeSetId, { ...input, comment }), "审核通过")}
+                  >
+                    通过
+                  </button>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    onClick={() => void runAction((input) => client.rejectChangeSet(projectId, runId, changeSetId, { ...input, comment }), "拒绝")}
+                  >
+                    拒绝
+                  </button>
+                </>
+              ) : null}
+              {actions.includes("apply") ? (
                 <button
                   type="button"
-                  onClick={() => void runAction((input) => client.rejectChangeSet(projectId, runId, changeSetId, { ...input, comment }), "拒绝")}
+                  className="knowledge-button--primary"
+                  onClick={() => void runAction((input) => client.applyChangeSet(projectId, runId, changeSetId, input), "应用")}
                 >
-                  拒绝
+                  应用
                 </button>
-              </span>
-            ) : null}
-            {actions.includes("apply") ? (
-              <button type="button" onClick={() => void runAction((input) => client.applyChangeSet(projectId, runId, changeSetId, input), "应用")}>
-                应用
-              </button>
-            ) : null}
-            {actions.includes("abandon") ? (
-              <button
-                type="button"
-                onClick={() => void runAction((input) => client.abandonChangeSet(projectId, runId, changeSetId, { ...input, reason: "用户放弃" }), "放弃")}
-              >
-                放弃
-              </button>
-            ) : null}
-          </div>
+              ) : null}
+              {actions.includes("abandon") ? (
+                <button
+                  type="button"
+                  className="quiet-button"
+                  onClick={() => void runAction((input) => client.abandonChangeSet(projectId, runId, changeSetId, { ...input, reason: "用户放弃" }), "放弃")}
+                >
+                  放弃
+                </button>
+              ) : null}
+            </div>
 
-          {(actions.includes("stage") || actions.includes("unstage") || actions.includes("commit")) ? (
-            <section>
-              <h3>Git 操作</h3>
-              <div className="button-row">
-                {actions.includes("stage") ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void (async () => {
-                        const revision = await refreshRepositoryRevision();
-                        await runAction(
-                          (input) =>
-                            client.gitStage(projectId, runId, changeSetId, {
-                              ...input,
-                              paths: changeSet.fileChanges.map((file) => file.path),
-                              expectedRepositoryRevision: revision,
-                            }),
-                          "暂存",
-                        );
-                      })()
-                    }
-                  >
-                    暂存全部
-                  </button>
-                ) : null}
-                {actions.includes("unstage") ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void (async () => {
-                        const revision = await refreshRepositoryRevision();
-                        await runAction(
-                          (input) =>
-                            client.gitUnstage(projectId, runId, changeSetId, {
-                              ...input,
-                              paths: changeSet.fileChanges.map((file) => file.path),
-                              expectedRepositoryRevision: revision,
-                            }),
-                          "取消暂存",
-                        );
-                      })()
-                    }
-                  >
-                    取消暂存全部
-                  </button>
+            {actions.includes("stage") || actions.includes("unstage") || actions.includes("commit") ? (
+              <div className="knowledge-section" style={{ marginTop: 14, background: "var(--surface-subtle)" }}>
+                <h3 style={{ marginBottom: 10 }}>Git 操作</h3>
+                <div className="knowledge-actions">
+                  {actions.includes("stage") ? (
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      onClick={() =>
+                        void (async () => {
+                          const revision = await refreshRepositoryRevision();
+                          await runAction(
+                            (input) =>
+                              client.gitStage(projectId, runId, changeSetId, {
+                                ...input,
+                                paths: changeSet.fileChanges.map((file) => file.path),
+                                expectedRepositoryRevision: revision,
+                              }),
+                            "暂存",
+                          );
+                        })()
+                      }
+                    >
+                      暂存全部
+                    </button>
+                  ) : null}
+                  {actions.includes("unstage") ? (
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      onClick={() =>
+                        void (async () => {
+                          const revision = await refreshRepositoryRevision();
+                          await runAction(
+                            (input) =>
+                              client.gitUnstage(projectId, runId, changeSetId, {
+                                ...input,
+                                paths: changeSet.fileChanges.map((file) => file.path),
+                                expectedRepositoryRevision: revision,
+                              }),
+                            "取消暂存",
+                          );
+                        })()
+                      }
+                    >
+                      取消暂存全部
+                    </button>
+                  ) : null}
+                </div>
+                {actions.includes("commit") ? (
+                  <div className="knowledge-actions" style={{ marginTop: 10 }}>
+                    <input type="text" aria-label="提交标题" value={commitTitle} onChange={(event) => setCommitTitle(event.target.value)} placeholder="提交标题" />
+                    <input type="text" aria-label="提交正文" value={commitBody} onChange={(event) => setCommitBody(event.target.value)} placeholder="提交正文（可选）" />
+                    <button
+                      type="button"
+                      className="knowledge-button--primary"
+                      disabled={!commitTitle.trim()}
+                      onClick={() =>
+                        void (async () => {
+                          const revision = await refreshRepositoryRevision();
+                          await runAction(
+                            (input) =>
+                              client.gitCommit(projectId, runId, changeSetId, {
+                                ...input,
+                                title: commitTitle,
+                                body: commitBody,
+                                paths: changeSet.fileChanges.map((file) => file.path),
+                                expectedRepositoryRevision: revision,
+                              }),
+                            "提交",
+                          );
+                        })()
+                      }
+                    >
+                      提交
+                    </button>
+                  </div>
                 ) : null}
               </div>
-              {actions.includes("commit") ? (
-                <div className="commit-form">
-                  <input aria-label="提交标题" value={commitTitle} onChange={(event) => setCommitTitle(event.target.value)} placeholder="提交标题" />
-                  <input aria-label="提交正文" value={commitBody} onChange={(event) => setCommitBody(event.target.value)} placeholder="提交正文" />
-                  <button
-                    type="button"
-                    disabled={!commitTitle.trim()}
-                    onClick={() =>
-                      void (async () => {
-                        const revision = await refreshRepositoryRevision();
-                        await runAction(
-                          (input) =>
-                            client.gitCommit(projectId, runId, changeSetId, {
-                              ...input,
-                              title: commitTitle,
-                              body: commitBody,
-                              paths: changeSet.fileChanges.map((file) => file.path),
-                              expectedRepositoryRevision: revision,
-                            }),
-                          "提交",
-                        );
-                      })()
-                    }
-                  >
-                    提交
-                  </button>
-                </div>
-              ) : null}
-            </section>
-          ) : null}
+            ) : null}
+          </section>
         </>
-      ) : null}
-      <button type="button" onClick={refresh}>
-        刷新
-      </button>
+      )}
+
+      <div className="knowledge-actions">
+        <button type="button" className="quiet-button" onClick={refresh}>
+          刷新
+        </button>
+      </div>
     </div>
   );
 }

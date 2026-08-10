@@ -123,12 +123,18 @@ export function KnowledgePage({
   const subRoute = parseKnowledgeSubRoute(hash);
   const artifacts = legacyProps.runs?.length ? [] : [];
   const effectiveRoute = subRoute.mode === "none" ? { mode: "legacy" as const } : subRoute;
+  const repositoryTabActive = [
+    "repositories",
+    "repository",
+    "change-sets-new",
+    "change-set",
+  ].includes(effectiveRoute.mode);
 
   return (
     <div className="knowledge-workbench">
       {client ? (
         <nav className="knowledge-tabs" aria-label="知识库导航">
-          <button type="button" className={effectiveRoute.mode === "repositories" ? "active" : ""} onClick={() => navigate("#/knowledge/repositories")}>
+          <button type="button" className={repositoryTabActive ? "active" : ""} onClick={() => navigate("#/knowledge/repositories")}>
             仓库
           </button>
           <button type="button" className={effectiveRoute.mode === "examples" ? "active" : ""} onClick={() => navigate("#/knowledge/examples")}>

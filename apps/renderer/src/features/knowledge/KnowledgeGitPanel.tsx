@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { RuntimeClientError, type KnowledgeClient } from "./knowledgeClient";
 
@@ -44,42 +44,50 @@ export function KnowledgeGitPanel({ client, repositoryId }: Props) {
   };
 
   return (
-    <div className="knowledge-git-panel">
-      <h4>Git 状态</h4>
-      {error ? <p className="operation-error">{error}</p> : null}
-      {status ? (
-        <dl>
-          <dt>分支</dt>
-          <dd>{status.branch ?? "（detached HEAD）"}</dd>
-          <dt>HEAD</dt>
-          <dd>{status.headCommit}</dd>
-          <dt>工作区</dt>
-          <dd>{status.dirty ? "有未提交变更" : "干净"}</dd>
-          <dt>冲突</dt>
-          <dd>{status.conflict ? "存在冲突" : "无"}</dd>
-          <dt>已暂存</dt>
-          <dd>{status.stagedPaths.join("、") || "无"}</dd>
-          <dt>未暂存</dt>
-          <dd>{status.unstagedPaths.join("、") || "无"}</dd>
-        </dl>
-      ) : null}
-      <div className="button-row">
-        <button type="button" onClick={loadStatus}>
-          刷新状态
-        </button>
-        <select
-          aria-label="diff 范围"
-          value={scope}
-          onChange={(event) => setScope(event.target.value as "working" | "staged")}
-        >
-          <option value="working">工作区</option>
-          <option value="staged">暂存区</option>
-        </select>
-        <button type="button" onClick={loadDiff}>
-          查看 diff
-        </button>
+    <section className="knowledge-section">
+      <h3>Git 状态</h3>
+      {error ? <p className="knowledge-toast knowledge-toast--error">{error}</p> : null}
+      <div className="knowledge-git-grid">
+        <div>
+          {status ? (
+            <dl className="knowledge-facts">
+              <dt>分支</dt>
+              <dd>{status.branch ?? "（detached HEAD）"}</dd>
+              <dt>HEAD</dt>
+              <dd><code>{status.headCommit.slice(0, 12)}</code></dd>
+              <dt>工作区</dt>
+              <dd>{status.dirty ? "有未提交变更" : "干净"}</dd>
+              <dt>冲突</dt>
+              <dd>{status.conflict ? "存在冲突" : "无"}</dd>
+              <dt>已暂存</dt>
+              <dd>{status.stagedPaths.length} 个文件</dd>
+              <dt>未暂存</dt>
+              <dd>{status.unstagedPaths.length} 个文件</dd>
+            </dl>
+          ) : (
+            <p className="knowledge-meta">加载 Git 状态…</p>
+          )}
+          <div className="button-row" style={{ marginTop: 12, marginBottom: 0 }}>
+            <button type="button" className="quiet-button" onClick={loadStatus}>
+              刷新状态
+            </button>
+            <select aria-label="diff 范围" value={scope} onChange={(event) => setScope(event.target.value as "working" | "staged")}>
+              <option value="working">工作区</option>
+              <option value="staged">暂存区</option>
+            </select>
+            <button type="button" className="quiet-button" onClick={loadDiff}>
+              查看 diff
+            </button>
+          </div>
+        </div>
+        <div>
+          {diff !== null ? (
+            <pre className="knowledge-diff">{diff}</pre>
+          ) : (
+            <p className="knowledge-meta">点击「查看 diff」显示差异。</p>
+          )}
+        </div>
       </div>
-      {diff !== null ? <pre className="knowledge-diff">{diff}</pre> : null}
-    </div>
+    </section>
   );
 }

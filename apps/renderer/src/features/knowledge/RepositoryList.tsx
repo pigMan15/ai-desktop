@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   RuntimeClientError,
@@ -10,6 +10,10 @@ type Props = {
   client: KnowledgeClient;
   onNavigate: (hash: string) => void;
 };
+
+function statusClass(status: string): string {
+  return `knowledge-badge knowledge-badge--${status.toLowerCase()}`;
+}
 
 export function RepositoryList({ client, onNavigate }: Props) {
   const [repositories, setRepositories] = useState<KnowledgeRepositoryDetail[]>([]);
@@ -82,57 +86,109 @@ export function RepositoryList({ client, onNavigate }: Props) {
 
   return (
     <div className="knowledge-repository-list">
-      <h2>本地知识库</h2>
-      {message ? <p className="operation-message">{message}</p> : null}
-      {error ? <p className="operation-error">{error}</p> : null}
+      <div className="knowledge-detail-header">
+        <h2>本地知识库</h2>
+        <span className="knowledge-meta">
+          已绑定 {repositories.length} 个仓库
+        </span>
+      </div>
+
+      {message ? <p className="knowledge-toast knowledge-toast--success">{message}</p> : null}
+      {error ? <p className="knowledge-toast knowledge-toast--error">{error}</p> : null}
+
       <form
+        className="knowledge-import-form"
         onSubmit={(event) => {
           event.preventDefault();
           void handleImport();
         }}
       >
-        <input
-          aria-label="仓库名称"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="仓库名称"
-          required
-        />
-        <input
-          aria-label="仓库根目录"
-          value={rootPath}
-          onChange={(event) => setRootPath(event.target.value)}
-          placeholder="本地 Git 工作树根目录"
-          required
-        />
-        <button type="submit" disabled={busy || !name.trim() || !rootPath.trim()}>
-          导入
+        <label>
+          仓库名称
+          <input
+            aria-label="仓库名称"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="例如：物流知识库"
+            required
+          />
+        </label>
+        <label>
+          本地 Git 工作树根目录
+          <input
+            aria-label="仓库根目录"
+            value={rootPath}
+            onChange={(event) => setRootPath(event.target.value)}
+            placeholder="例如：D:\knowledge\logistics"
+            required
+          />
+        </label>
+        <button
+          type="submit"
+          className="knowledge-button--primary"
+          disabled={busy || !name.trim() || !rootPath.trim()}
+        >
+          {busy ? "导入中…" : "导入知识库"}
         </button>
       </form>
-      <ul>
-        {(repositories ?? []).map((repository) => (
-          <li key={repository.id}>
-            <button
-              type="button"
-              className="link-button"
-              onClick={() => onNavigate(`#/knowledge/repositories/${repository.id}`)}
-            >
-              {repository.name}
-            </button>
-            <span className={`knowledge-status knowledge-status-${repository.status.toLowerCase()}`}>
-              {repository.status}
-            </span>
-            <span className="knowledge-path">{repository.rootPath}</span>
-            <button
-              type="button"
-              disabled={busy || repository.status === "REMOVED"}
-              onClick={() => void handleRemove(repository)}
-            >
-              移除
-            </button>
-          </li>
-        ))}
-      </ul>
+
+      {repositories.length === 0 ? (
+        <div className="knowledge-empty">
+          <div>
+            <p>还没有绑定任何本地知识库。</p>
+            <p>填写上方表单导入一个 Git 工作树，或先用「示例包」初始化一个知识库。</p>
+          </div>
+        </div>
+      ) : (
+        <div className="knowledge-card-grid">
+          {repositories.map((repository) => (
+            <article key={repository.id} className="knowledge-card">
+              <div className="knowledge-card__head">
+                <button
+                  type="button"
+                  className="link-button knowledge-card__title"
+                  onClick={() => onNavigate(`#/knowledge/repositories/${repository.id}`)}
+                >
+                  {repository.name}
+                </button>
+                <span className={statusClass(repository.status)}>{repository.status}</span>
+              </div>
+              <dl className="knowledge-facts">
+                <dt>路径</dt>
+                <dd><code>{repository.rootPath}</code></dd>
+                <dt>分支</dt>
+                <dd>{repository.gitStatus.branch ?? "（detached HEAD）"}</dd>
+                <dt>HEAD</dt>
+                <dd><code>{repository.gitStatus.headCommit.slice(0, 10)}</code></dd>
+                <dt>变更集</dt>
+                <dd>{repository.recentChangeSets.length} 个</dd>
+              </dl>
+              <div className="knowledge-card__foot">
+                <span className="knowledge-meta">
+                  规则快照：{repository.activeRuleSnapshotId ? "已确认" : "未确认"}
+                </span>
+                <div className="knowledge-card__actions">
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    onClick={() => onNavigate(`#/knowledge/repositories/${repository.id}`)}
+                  >
+                    打开
+                  </button>
+                  <button
+                    type="button"
+                    className="quiet-button"
+                    disabled={busy || repository.status === "REMOVED"}
+                    onClick={() => void handleRemove(repository)}
+                  >
+                    移除
+                  </button>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

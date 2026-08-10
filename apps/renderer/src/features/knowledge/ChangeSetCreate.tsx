@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { createRuntimeClient } from "../../app/runtimeClient";
 import { RuntimeClientError, type KnowledgeClient } from "./knowledgeClient";
@@ -88,51 +88,77 @@ export function ChangeSetCreate({ client, projectId, runId, artifacts = [], apiB
 
   return (
     <div className="knowledge-change-set-create">
-      <h2>创建知识变更集</h2>
-      {error ? <p className="operation-error">{error}</p> : null}
-      <label>
-        目标知识库
-        <select value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)}>
-          <option value="">选择仓库</option>
-          {repositories.map((repository) => (
-            <option key={repository.id} value={repository.id}>
-              {repository.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <fieldset>
-        <legend>选择 Artifact（只读来源）</legend>
-        {(loadedArtifacts ?? artifacts).map((artifact) => (
-          <label key={artifact.id} className="artifact-option">
-            <input
-              type="checkbox"
-              checked={selectedArtifacts.includes(artifact.id)}
-              onChange={() => toggleArtifact(artifact.id)}
-            />
-            {artifact.id}（{artifact.type}）
+      <div className="knowledge-detail-header">
+        <h2>创建知识变更集</h2>
+        <span className="knowledge-meta">Run 范围资源，只读来源为 Run Artifact</span>
+      </div>
+      {error ? <p className="knowledge-toast knowledge-toast--error">{error}</p> : null}
+
+      <section className="knowledge-section">
+        <h3>目标与来源</h3>
+        <div className="knowledge-stacked-form">
+          <label>
+            目标知识库
+            <select value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)}>
+              <option value="">选择仓库</option>
+              {repositories.map((repository) => (
+                <option key={repository.id} value={repository.id}>
+                  {repository.name}
+                </option>
+              ))}
+            </select>
           </label>
-        ))}
-        {(loadedArtifacts ?? artifacts).length === 0 ? <p className="muted">该 Run 暂无 Artifact</p> : null}
-      </fieldset>
-      <label>
-        Provider
-        <select value={provider} onChange={(event) => setProvider(event.target.value as "codex" | "claude" | "fake")}>
-          <option value="codex">Codex</option>
-          <option value="claude">Claude</option>
-          <option value="fake">Fake</option>
-        </select>
-      </label>
-      <label>
-        模式
-        <select value={mode} onChange={(event) => setMode(event.target.value as "preview" | "risk-based")}>
-          <option value="preview">预览（永不自动应用）</option>
-          <option value="risk-based">风险分级</option>
-        </select>
-      </label>
-      <button type="button" disabled={busy || !repositoryId || selectedArtifacts.length === 0} onClick={() => void handleCreate()}>
-        创建变更集
-      </button>
+          <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "10px 14px" }}>
+            <legend style={{ fontSize: "0.82rem", color: "var(--ink-muted)" }}>选择 Artifact（只读来源）</legend>
+            {(loadedArtifacts ?? artifacts).length === 0 ? (
+              <p className="knowledge-meta">该 Run 暂无 Artifact</p>
+            ) : (
+              <div className="knowledge-chip-list">
+                {(loadedArtifacts ?? artifacts).map((artifact) => (
+                  <label key={artifact.id} className="knowledge-chip" style={{ cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedArtifacts.includes(artifact.id)}
+                      onChange={() => toggleArtifact(artifact.id)}
+                    />
+                    {artifact.id}
+                    <em>{artifact.type}</em>
+                  </label>
+                ))}
+              </div>
+            )}
+          </fieldset>
+          <div className="knowledge-actions">
+            <label className="knowledge-meta">
+              Provider
+              <select value={provider} onChange={(event) => setProvider(event.target.value as "codex" | "claude" | "fake")}>
+                <option value="codex">Codex</option>
+                <option value="claude">Claude</option>
+                <option value="fake">Fake</option>
+              </select>
+            </label>
+            <label className="knowledge-meta">
+              模式
+              <select value={mode} onChange={(event) => setMode(event.target.value as "preview" | "risk-based")}>
+                <option value="preview">预览（永不自动应用）</option>
+                <option value="risk-based">风险分级</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <div className="knowledge-actions">
+        <button
+          type="button"
+          className="knowledge-button--primary"
+          disabled={busy || !repositoryId || selectedArtifacts.length === 0}
+          onClick={() => void handleCreate()}
+        >
+          {busy ? "创建中…" : "创建变更集"}
+        </button>
+        <span className="knowledge-meta">已选择 {selectedArtifacts.length} 个 Artifact</span>
+      </div>
     </div>
   );
 }
