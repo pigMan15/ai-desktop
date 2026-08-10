@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 NODE_KINDS = (
@@ -106,6 +106,7 @@ NodeState = Literal[
 ActionRisk = Literal["low", "medium", "high"]
 RequirementType = Literal["artifact", "approval", "gate", "evidence"]
 ArtifactContextScope = Literal["none", "direct", "ancestors"]
+ArtifactContextDelivery = Literal["path", "hybrid", "summary"]
 AdvanceMode = Literal["manual", "auto"]
 
 
@@ -138,10 +139,20 @@ class NodeArtifactSpec(CanonicalModel):
 
 class AgentContextSpec(CanonicalModel):
     upstream: ArtifactContextScope = "none"
+    delivery: ArtifactContextDelivery = "path"
     artifactTypes: list[str] = Field(default_factory=list)
     maxArtifacts: int = 8
     summaryCharsPerArtifact: int = 4000
     maxTotalChars: int = 16000
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_legacy_summary_delivery(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "delivery" not in value and (
+            "summaryCharsPerArtifact" in value or "maxTotalChars" in value
+        ):
+            return {**value, "delivery": "summary"}
+        return value
 
 
 class NodeAgentSpec(CanonicalModel):

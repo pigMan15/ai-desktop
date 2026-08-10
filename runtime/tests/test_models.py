@@ -117,6 +117,7 @@ def test_workflow_node_defaults_collection_fields_to_empty_containers() -> None:
     assert node.metadata == {}
     assert node.artifacts.outputs == []
     assert node.agent.context.upstream == "none"
+    assert node.agent.context.delivery == "path"
     assert node.advance.mode == "manual"
 
 
@@ -160,6 +161,7 @@ def test_workflow_node_accepts_declarative_artifact_and_agent_contracts() -> Non
     )
     assert node.agent.context == AgentContextSpec(
         upstream="ancestors",
+        delivery="summary",
         artifactTypes=["requirement", "plan"],
         maxArtifacts=8,
         summaryCharsPerArtifact=4000,

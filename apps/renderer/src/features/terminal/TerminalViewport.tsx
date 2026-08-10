@@ -50,6 +50,16 @@ export function TerminalViewport({
   const [visibleOutput, setVisibleOutput] = useState(output);
   const outputText = useMemo(() => visibleOutput.map((event) => event.data).join(""), [visibleOutput]);
 
+  function forwardInput(data: string) {
+    if (!data || !writableRef.current) {
+      return;
+    }
+    if (localEchoRef.current) {
+      terminalRef.current?.write(localEchoData(data));
+    }
+    void onInputRef.current?.(data);
+  }
+
   useEffect(() => {
     onInputRef.current = onInput;
   }, [onInput]);
@@ -84,7 +94,9 @@ export function TerminalViewport({
         return;
       }
       const terminal = new Terminal({
-        convertEol: true,
+        // PTY output already contains the line endings and cursor controls emitted by the TUI.
+        // Converting LF to CRLF here moves the cursor twice and produces drift/blank lines.
+        convertEol: false,
         cursorBlink: writableRef.current,
         disableStdin: !writableRef.current,
         scrollback: 2_000,
@@ -110,15 +122,8 @@ export function TerminalViewport({
         ? null
         : new window.ResizeObserver(fitTerminal);
       resizeObserver?.observe(containerRef.current);
-      inputDisposable = terminal.onData((data) => {
-        if (writableRef.current) {
-          if (localEchoRef.current) {
-            terminal.write(localEchoData(data));
-          }
-          void onInputRef.current?.(data);
-        }
-      });
       terminalRef.current = terminal;
+      inputDisposable = terminal.onData(forwardInput);
       fitAddonRef.current = fitAddon;
       searchAddonRef.current = searchAddon;
       for (const event of outputRef.current) {
@@ -288,6 +293,14 @@ export function TerminalViewport({
           tabIndex={0}
           onMouseDownCapture={() => terminalRef.current?.focus()}
           onClick={() => terminalRef.current?.focus()}
+          onPasteCapture={(event) => {
+            const pastedText = event.clipboardData.getData("text");
+            if (!pastedText || !writableRef.current) {
+              return;
+            }
+            event.preventDefault();
+            forwardInput(pastedText);
+          }}
           onScroll={handleScroll}
         />
         {unreadCount > 0 ? (

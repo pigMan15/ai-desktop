@@ -49,13 +49,15 @@ class AgentContextBuilder:
                 if len(selected) >= context.maxArtifacts:
                     break
                 safe_path = _artifact_path(project_root, str(artifact.get("uri", "")))
-                summary = _artifact_summary(safe_path, context.summaryCharsPerArtifact)
-                remaining = max(0, context.maxTotalChars - total_chars)
-                if remaining == 0:
-                    summary = "[摘要已截断：已达到上下文总长度上限]"
-                elif len(summary) > remaining:
-                    summary = summary[:remaining] + "\n[摘要已截断：已达到上下文总长度上限]"
-                total_chars += len(summary)
+                summary: str | None = None
+                if context.delivery != "path":
+                    summary = _artifact_summary(safe_path, context.summaryCharsPerArtifact)
+                    remaining = max(0, context.maxTotalChars - total_chars)
+                    if remaining == 0:
+                        summary = "[摘要已截断：已达到上下文总长度上限]"
+                    elif len(summary) > remaining:
+                        summary = summary[:remaining] + "\n[摘要已截断：已达到上下文总长度上限]"
+                    total_chars += len(summary)
                 selected.append(
                     {
                         "artifactId": artifact.get("id"),
@@ -72,16 +74,18 @@ class AgentContextBuilder:
         if not selected:
             return AgentContextResult(artifacts=[], prompt="")
         lines = ["上游正式产物（仅供当前任务使用）："]
+        if context.delivery in {"path", "hybrid"}:
+            lines.append("这些文件位于当前 Run 工作区。请按需使用 read 工具读取，且不得修改前置产物。")
         for item in selected:
             lines.extend(
                 [
                     f"- 类型：{item['type']}",
                     f"  路径：{item['path']}",
                     f"  内容哈希：{item['contentHash'] or '未记录'}",
-                    "  摘要：",
-                    item["summary"],
                 ]
             )
+            if item["summary"] is not None:
+                lines.extend(["  摘要：", item["summary"]])
         return AgentContextResult(artifacts=selected, prompt="\n".join(lines))
 
 

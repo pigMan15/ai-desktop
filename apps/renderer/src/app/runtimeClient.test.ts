@@ -368,6 +368,40 @@ describe("runtimeClient", () => {
     expect(init.method).toBe("POST");
   });
 
+  it("loads and updates project concurrency and workspace occupancy", async () => {
+    const calls: Array<{ path: string; method?: string; body?: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({
+        path: url.pathname,
+        method: init?.method,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return jsonResponse(url.pathname.endsWith("/workspaces") ? [] : { maxActiveRuns: 3, maxActiveAgents: 2 });
+    }));
+
+    const client = createRuntimeClient("http://127.0.0.1:8765");
+    await client.getProjectConcurrency("project/a");
+    await client.updateProjectConcurrency("project/a", { maxActiveRuns: 4, maxActiveAgents: 3 }, "2026-08-06T00:00:00Z");
+    await client.listProjectWorkspaces("project/a");
+    await client.createProjectWorktree("project/a", "run-123", "run/123");
+
+    expect(calls.map((call) => call.path)).toEqual([
+      "/projects/project%2Fa/concurrency",
+      "/projects/project%2Fa/concurrency",
+      "/projects/project%2Fa/workspaces",
+      "/projects/project%2Fa/worktrees",
+    ]);
+    expect(calls[1]).toMatchObject({
+      method: "PUT",
+      body: { maxActiveRuns: 4, maxActiveAgents: 3, actor: { type: "human", trusted: true } },
+    });
+    expect(calls[3]).toMatchObject({
+      method: "POST",
+      body: { name: "run-123", branchName: "run/123", baseRef: "HEAD" },
+    });
+  });
+
   it("在桌面环境通过 preload 代理调用 Runtime，避免 Renderer 持有本地令牌", async () => {
     const request = vi.fn(async () => ({ status: "ok", service: "workflow-runtime" }));
     const fetchMock = vi.fn();
@@ -412,6 +446,7 @@ describe("runtimeClient", () => {
 
     await expect(
       createRuntimeClient("http://127.0.0.1:8765").scanNodeArtifacts(
+        "project-1",
         "run-1",
         "plan",
         "1",
@@ -572,6 +607,7 @@ describe("runtimeClient", () => {
     );
 
     const result = await createRuntimeClient("http://127.0.0.1:8765").cleanupOrphanTerminalSessions(
+      "project-1",
       "run-demo",
       "2026-07-28T00:00:00Z",
     );
@@ -582,7 +618,7 @@ describe("runtimeClient", () => {
     });
     expect(calls).toEqual([
       {
-        path: "/runs/run-demo/recovery/cleanup-orphan-terminals",
+        path: "/projects/project-1/runs/run-demo/recovery/cleanup-orphan-terminals",
         body: { now: "2026-07-28T00:00:00Z" },
       },
     ]);
@@ -622,14 +658,14 @@ describe("runtimeClient", () => {
     );
 
     const client = createRuntimeClient("http://127.0.0.1:8765");
-    const sessions = await client.listTerminalSessions("run-demo");
-    const output = await client.listTerminalOutput("run-demo", "terminal-history");
+    const sessions = await client.listTerminalSessions("project-1", "run-demo");
+    const output = await client.listTerminalOutput("project-1", "run-demo", "terminal-history");
 
     expect(sessions[0]?.status).toBe("stopped");
     expect(output[0]?.data).toContain("历史输出");
     expect(calls).toEqual([
-      "/runs/run-demo/terminals",
-      "/runs/run-demo/terminals/terminal-history/output?afterSequence=0",
+      "/projects/project-1/runs/run-demo/terminals",
+      "/projects/project-1/runs/run-demo/terminals/terminal-history/output?afterSequence=0",
     ]);
   });
 
@@ -741,16 +777,16 @@ describe("runtimeClient", () => {
     );
 
     const client = createRuntimeClient("http://127.0.0.1:8765");
-    await client.startDeployment("run-1", "deploy", "7", "2026-07-28T00:00:00Z");
-    await client.listDeployments("run-1");
-    await client.listDeploymentOutput("run-1", "deployment-1", 3);
-    await client.cancelDeployment("run-1", "deployment-1", "2026-07-28T00:00:01Z");
+    await client.startDeployment("project-1", "run-1", "deploy", "7", "2026-07-28T00:00:00Z");
+    await client.listDeployments("project-1", "run-1");
+    await client.listDeploymentOutput("project-1", "run-1", "deployment-1", 3);
+    await client.cancelDeployment("project-1", "run-1", "deployment-1", "2026-07-28T00:00:01Z");
 
     expect(calls.map((call) => call.path)).toEqual([
-      "/runs/run-1/deployments",
-      "/runs/run-1/deployments",
-      "/runs/run-1/deployments/deployment-1/output?afterSequence=3",
-      "/runs/run-1/deployments/deployment-1/cancel",
+      "/projects/project-1/runs/run-1/deployments",
+      "/projects/project-1/runs/run-1/deployments",
+      "/projects/project-1/runs/run-1/deployments/deployment-1/output?afterSequence=3",
+      "/projects/project-1/runs/run-1/deployments/deployment-1/cancel",
     ]);
     expect(calls[0]?.body).toEqual({
       nodeId: "deploy",
@@ -778,22 +814,22 @@ describe("runtimeClient", () => {
     );
 
     const client = createRuntimeClient("http://127.0.0.1:8765");
-    await client.startAgentJob("run-1", "plan", "codex", "继续开发", "2026-07-29T00:00:00Z", "interactive");
-    await client.startInteractiveAgentSession("run-1", "job-1", "terminal-1", 1234, "2026-07-29T00:00:01Z");
-    await client.recordInteractiveAgentInput("run-1", "job-1", "继续", "2026-07-29T00:00:02Z");
-    await client.appendInteractiveAgentOutput("run-1", "job-1", [{ data: "需要确认\r\n" }], "2026-07-29T00:00:03Z");
-    await client.finishInteractiveAgentSession("run-1", "job-1", "COMPLETED", "完成", null, "2026-07-29T00:00:04Z");
-    await client.getInteractiveAgentSession("run-1", "job-1");
-    await client.continueInteractiveAgent("run-1", "job-1", "2026-07-29T00:00:05Z");
+    await client.startAgentJob("project-1", "run-1", "plan", "codex", "继续开发", "2026-07-29T00:00:00Z", "interactive");
+    await client.startInteractiveAgentSession("project-1", "run-1", "job-1", "terminal-1", 1234, "2026-07-29T00:00:01Z");
+    await client.recordInteractiveAgentInput("project-1", "run-1", "job-1", "继续", "2026-07-29T00:00:02Z");
+    await client.appendInteractiveAgentOutput("project-1", "run-1", "job-1", [{ data: "需要确认\r\n" }], "2026-07-29T00:00:03Z");
+    await client.finishInteractiveAgentSession("project-1", "run-1", "job-1", "COMPLETED", "完成", null, "2026-07-29T00:00:04Z");
+    await client.getInteractiveAgentSession("project-1", "run-1", "job-1");
+    await client.continueInteractiveAgent("project-1", "run-1", "job-1", "2026-07-29T00:00:05Z");
 
     expect(calls.map((call) => call.path)).toEqual([
-      "/runs/run-1/agents",
-      "/runs/run-1/agents/job-1/interactive-session/start",
-      "/runs/run-1/agents/job-1/interactive-session/input",
-      "/runs/run-1/agents/job-1/interactive-session/output",
-      "/runs/run-1/agents/job-1/interactive-session/ended",
-      "/runs/run-1/agents/job-1/interactive-session",
-      "/runs/run-1/agents/job-1/interactive-session/continue",
+      "/projects/project-1/runs/run-1/agents",
+      "/projects/project-1/runs/run-1/agents/job-1/interactive-session/start",
+      "/projects/project-1/runs/run-1/agents/job-1/interactive-session/input",
+      "/projects/project-1/runs/run-1/agents/job-1/interactive-session/output",
+      "/projects/project-1/runs/run-1/agents/job-1/interactive-session/ended",
+      "/projects/project-1/runs/run-1/agents/job-1/interactive-session",
+      "/projects/project-1/runs/run-1/agents/job-1/interactive-session/continue",
     ]);
     expect(calls[0]?.body).toMatchObject({
       mode: "interactive",
@@ -819,12 +855,12 @@ describe("runtimeClient", () => {
         calls.push(url.pathname);
         const responses: Record<string, unknown> = {
           "/health": { status: "ok" },
-          "/runs/run-1/projection": projection("run-1", "4", "REVIEWING"),
-          "/runs/run-1/timeline": [{ id: "event-1", type: "GATE_PASSED", createdAt: "2026-07-28T00:00:00Z" }],
-          "/runs/run-1/artifacts": [{ id: "artifact-1", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test" }],
-          "/runs/run-1/approvals": [{ id: "approval-1", status: "approved" }],
-          "/runs/run-1/gates": [{ id: "gate-1", status: "passed", evidence: ["file:///plan.md"] }],
-          "/runs/run-1/agents": [],
+          "/projects/project-1/runs/run-1/projection": projection("run-1", "4", "REVIEWING"),
+          "/projects/project-1/runs/run-1/timeline": [{ id: "event-1", type: "GATE_PASSED", createdAt: "2026-07-28T00:00:00Z" }],
+          "/projects/project-1/runs/run-1/artifacts": [{ id: "artifact-1", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test" }],
+          "/projects/project-1/runs/run-1/approvals": [{ id: "approval-1", status: "approved" }],
+          "/projects/project-1/runs/run-1/gates": [{ id: "gate-1", status: "passed", evidence: ["file:///plan.md"] }],
+          "/projects/project-1/runs/run-1/agents": [],
         };
         return jsonResponse(responses[url.pathname]);
       }),
@@ -832,6 +868,7 @@ describe("runtimeClient", () => {
 
     const state = await restoreWorkbenchState({
       apiBaseUrl: "http://127.0.0.1:8765",
+      projectId: "project-1",
       projectPath: "G:\\Project\\demo",
       projectName: "demo",
       workflowName: "Demo Workflow",
@@ -839,17 +876,9 @@ describe("runtimeClient", () => {
     });
 
     expect(state.workspaceStatus).toBe("ready");
-    expect(state.projection?.runId).toBe("run-1");
-    expect(state.timeline[0]?.type).toBe("GATE_PASSED");
-    expect(calls).toEqual([
-      "/health",
-      "/runs/run-1/projection",
-      "/runs/run-1/timeline",
-      "/runs/run-1/artifacts",
-      "/runs/run-1/approvals",
-      "/runs/run-1/gates",
-      "/runs/run-1/agents",
-    ]);
+    expect(state.projection).toBeNull();
+    expect(state.timeline).toEqual([]);
+    expect(calls).toEqual(["/health"]);
   });
 
   it("executes interactive runtime actions without local process access", async () => {
@@ -869,19 +898,19 @@ describe("runtimeClient", () => {
       if (url.pathname === "/runs") {
         return jsonResponse(projection("run-demo", "1", "CREATED"));
       }
-      if (url.pathname === "/runs/run-demo/transition") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/transition") {
         return jsonResponse(projection("run-demo", "2", "IN_PROGRESS"));
       }
-      if (url.pathname === "/runs/run-demo/artifacts") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/artifacts") {
         return jsonResponse(projection("run-demo", "3", "REVIEWING"));
       }
-      if (url.pathname === "/runs/run-demo/approvals/plan/decide") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/approvals/plan/decide") {
         return jsonResponse(projection("run-demo", "4", "REVIEWING"));
       }
-      if (url.pathname === "/runs/run-demo/gates") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/gates") {
         return jsonResponse(projection("run-demo", "5", "IN_PROGRESS"));
       }
-      if (url.pathname === "/runs/run-demo/agents" && init?.method === "GET") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/agents" && init?.method === "GET") {
         return jsonResponse([
           {
             id: "job-1",
@@ -897,7 +926,7 @@ describe("runtimeClient", () => {
           },
         ]);
       }
-      if (url.pathname === "/runs/run-demo/agents/job-1/output") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/agents/job-1/output") {
         return jsonResponse([
           {
             id: "out-1",
@@ -909,7 +938,7 @@ describe("runtimeClient", () => {
           },
         ]);
       }
-      if (url.pathname === "/runs/run-demo/agents/job-1/cancel") {
+      if (url.pathname === "/projects/project-demo/runs/run-demo/agents/job-1/cancel") {
         return jsonResponse({ id: "job-1", status: "CANCELLED" });
       }
 
@@ -924,10 +953,11 @@ describe("runtimeClient", () => {
       "中文 Run",
       "2026-07-28T00:00:00Z",
       undefined,
-      imported.projectId,
+      imported.projectId!,
     );
-    await client.startNode(created.runId, "plan", created.revision, "2026-07-28T00:00:00Z");
+    await client.startNode(imported.projectId!, created.runId, "plan", created.revision, "2026-07-28T00:00:00Z");
     await client.submitArtifact(
+      imported.projectId!,
       created.runId,
       "plan",
       "G:\\Project\\demo\\plan.md",
@@ -936,6 +966,7 @@ describe("runtimeClient", () => {
       "2026-07-28T00:00:00Z",
     );
     await client.decideApproval(
+      imported.projectId!,
       created.runId,
       "plan",
       "approved",
@@ -944,6 +975,7 @@ describe("runtimeClient", () => {
       "2026-07-28T00:00:00Z",
     );
     await client.submitGate(
+      imported.projectId!,
       created.runId,
       "plan",
       "plan-ready",
@@ -954,19 +986,21 @@ describe("runtimeClient", () => {
       "2026-07-28T00:00:00Z",
     );
     const job = await client.startAgentJob(
+      imported.projectId!,
       created.runId,
       "plan",
       "fake",
       "请实现剩余内容",
       "2026-07-28T00:00:00Z",
     );
-    await client.listAgentJobs(created.runId);
-    await client.listAgentOutput(created.runId, job.id, 0);
-    await client.cancelAgentJob(created.runId, job.id);
-    await client.rebuildProjection(created.runId, "2026-07-28T00:00:00Z");
-    await client.getEvidencePackage(created.runId);
-    await client.getRunReport(created.runId);
+    await client.listAgentJobs(imported.projectId!, created.runId);
+    await client.listAgentOutput(imported.projectId!, created.runId, job.id, 0);
+    await client.cancelAgentJob(imported.projectId!, created.runId, job.id);
+    await client.rebuildProjection(imported.projectId!, created.runId, "2026-07-28T00:00:00Z");
+    await client.getEvidencePackage(imported.projectId!, created.runId);
+    await client.getRunReport(imported.projectId!, created.runId);
     await client.registerTerminalSession(
+      imported.projectId!,
       created.runId,
       "plan",
       "shell",
@@ -974,30 +1008,30 @@ describe("runtimeClient", () => {
       1234,
       "2026-07-28T00:00:00Z",
     );
-    await client.stopTerminalSession(created.runId, "terminal-1", "2026-07-28T00:00:01Z");
-    await client.exportTerminalEvidence(created.runId, "terminal-1", "2026-07-28T00:00:02Z");
-    await client.retryGate(created.runId, "plan", "5", "2026-07-28T00:00:03Z");
+    await client.stopTerminalSession(imported.projectId!, created.runId, "terminal-1", "2026-07-28T00:00:01Z");
+    await client.exportTerminalEvidence(imported.projectId!, created.runId, "terminal-1", "2026-07-28T00:00:02Z");
+    await client.retryGate(imported.projectId!, created.runId, "plan", "5", "2026-07-28T00:00:03Z");
     await client.listKnowledgeDocuments();
     await client.replayKnowledgeDocument("document-1");
 
     expect(calls.map((call) => call.path)).toEqual([
       "/projects/import",
       "/runs",
-      "/runs/run-demo/transition",
-      "/runs/run-demo/artifacts",
-      "/runs/run-demo/approvals/plan/decide",
-      "/runs/run-demo/gates",
-      "/runs/run-demo/agents",
-      "/runs/run-demo/agents",
-      "/runs/run-demo/agents/job-1/output?afterSequence=0",
-      "/runs/run-demo/agents/job-1/cancel",
-      "/runs/run-demo/rebuild-projection",
-      "/runs/run-demo/evidence-package",
-      "/runs/run-demo/report",
-      "/runs/run-demo/terminals",
-      "/runs/run-demo/terminals/terminal-1/stop",
-      "/runs/run-demo/terminals/terminal-1/evidence",
-      "/runs/run-demo/transition",
+      "/projects/project-demo/runs/run-demo/transition",
+      "/projects/project-demo/runs/run-demo/artifacts",
+      "/projects/project-demo/runs/run-demo/approvals/plan/decide",
+      "/projects/project-demo/runs/run-demo/gates",
+      "/projects/project-demo/runs/run-demo/agents",
+      "/projects/project-demo/runs/run-demo/agents",
+      "/projects/project-demo/runs/run-demo/agents/job-1/output?afterSequence=0",
+      "/projects/project-demo/runs/run-demo/agents/job-1/cancel",
+      "/projects/project-demo/runs/run-demo/rebuild-projection",
+      "/projects/project-demo/runs/run-demo/evidence-package",
+      "/projects/project-demo/runs/run-demo/report",
+      "/projects/project-demo/runs/run-demo/terminals",
+      "/projects/project-demo/runs/run-demo/terminals/terminal-1/stop",
+      "/projects/project-demo/runs/run-demo/terminals/terminal-1/evidence",
+      "/projects/project-demo/runs/run-demo/transition",
       "/knowledge/documents",
       "/knowledge/documents/document-1/replay",
     ]);

@@ -11,10 +11,14 @@ const clearDecorations = vi.fn();
 const fit = vi.fn();
 const focus = vi.fn();
 const reset = vi.fn();
+let terminalOptions: Record<string, unknown> | null = null;
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class FakeTerminal {
     options = {};
+    constructor(options: Record<string, unknown>) {
+      terminalOptions = options;
+    }
     loadAddon() {}
     open() {}
     write(data: string) {
@@ -55,9 +59,17 @@ afterEach(() => {
   vi.clearAllMocks();
   terminalWrites.length = 0;
   terminalDataHandler = null;
+  terminalOptions = null;
 });
 
 describe("TerminalViewport", () => {
+  it("preserves PTY line endings so terminal cursor positioning remains stable", async () => {
+    render(<TerminalViewport ariaLabel="ANSI terminal" output={[]} />);
+
+    await waitFor(() => expect(terminalOptions).not.toBeNull());
+    expect(terminalOptions?.convertEol).toBe(false);
+  });
+
   it("writes output to xterm and sends direct user input", async () => {
     const onInput = vi.fn();
     render(
@@ -94,6 +106,27 @@ describe("TerminalViewport", () => {
 
     expect(terminalWrites.at(-1)).toBe("echo hello");
     expect(onInput).toHaveBeenCalledWith("echo hello");
+  });
+
+  it("forwards clipboard paste from the terminal surface", async () => {
+    const onInput = vi.fn();
+    render(
+      <TerminalViewport
+        ariaLabel="ANSI 终端"
+        output={[]}
+        writable
+        localEcho
+        onInput={onInput}
+      />,
+    );
+
+    await waitFor(() => expect(fit).toHaveBeenCalled());
+    fireEvent.paste(screen.getByLabelText("ANSI 终端", { exact: true }), {
+      clipboardData: { getData: () => "npm test\r" },
+    });
+
+    expect(onInput).toHaveBeenCalledWith("npm test\r");
+    expect(terminalWrites.at(-1)).toBe("npm test\r");
   });
 
   it("focuses xterm before interactive viewport click handlers run", async () => {

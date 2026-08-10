@@ -207,6 +207,28 @@ class ProjectRepository:
             is not None
         )
 
+    def concurrency(self, project_id: str) -> dict[str, int]:
+        row = self._db.execute(
+            "SELECT max_active_runs, max_active_agents FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Project not found: {project_id}")
+        return {"maxActiveRuns": int(row["max_active_runs"]), "maxActiveAgents": int(row["max_active_agents"])}
+
+    def update_concurrency(
+        self, project_id: str, *, max_active_runs: int, max_active_agents: int, now: str
+    ) -> dict[str, int]:
+        if not 1 <= max_active_runs <= 10 or not 1 <= max_active_agents <= 10:
+            raise ValueError("PROJECT_CONCURRENCY_INVALID: limits must be between 1 and 10")
+        cursor = self._db.execute(
+            "UPDATE projects SET max_active_runs = ?, max_active_agents = ?, updated_at = ? WHERE id = ?",
+            (max_active_runs, max_active_agents, now, project_id),
+        )
+        if cursor.rowcount == 0 and not self.exists(project_id):
+            raise KeyError(f"Project not found: {project_id}")
+        return self.concurrency(project_id)
+
 
 class WorkflowAssetRepository:
     def __init__(self, db: sqlite3.Connection) -> None:
@@ -2263,6 +2285,7 @@ class AuditRecordRepository:
         actor_id: str | None = None,
         action: str | None = None,
         resource: str | None = None,
+        run_id: str | None = None,
         limit: int = 100,
     ) -> list[dict]:
         conditions: list[str] = []
@@ -2276,6 +2299,9 @@ class AuditRecordRepository:
         if resource:
             conditions.append("resource = ?")
             values.append(resource)
+        if run_id:
+            conditions.append("(resource = ? OR json_extract(detail_json, '$.runId') = ?)")
+            values.extend((f"run:{run_id}", run_id))
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         values.append(limit)
         rows = self._db.execute(

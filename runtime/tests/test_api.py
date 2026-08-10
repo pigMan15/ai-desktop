@@ -146,6 +146,20 @@ def execute_scoped_action(
     return {**response.json()["projection"], "projectId": run["projectId"]}
 
 
+def test_runtime_api_removes_unscoped_run_child_routes_and_returns_typed_scoped_errors(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(create_app(WorkflowRuntimeService(db)))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    assert client.get(f"/runs/{run['runId']}/artifacts").status_code == 404
+    response = client.get(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/missing/output"
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "RESOURCE_NOT_FOUND"
+
+
 def test_runtime_api_scoped_action_returns_projection_and_emitted_events(tmp_path) -> None:
     db = connect(tmp_path / "workflow.db")
     migrate(db)
@@ -260,7 +274,7 @@ def test_runtime_api_scoped_artifact_action_uses_typed_artifact_service(tmp_path
 
     assert response.status_code == 200
     assert response.json()["emittedEvents"][0]["type"] == "ARTIFACT_SUBMITTED"
-    artifacts = client.get(f"/runs/{run['runId']}/artifacts").json()
+    artifacts = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts").json()
     assert artifacts[0]["uri"] == artifact_path.resolve().as_uri()
     approval_action = next(
         candidate
@@ -279,7 +293,7 @@ def test_runtime_api_scoped_artifact_action_uses_typed_artifact_service(tmp_path
 
     assert approved.status_code == 200
     assert approved.json()["emittedEvents"][0]["type"] == "HUMAN_APPROVED"
-    assert client.get(f"/runs/{run['runId']}/approvals").json()[0]["status"] == "approved"
+    assert client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/approvals").json()[0]["status"] == "approved"
     gate_action = next(
         candidate
         for candidate in approved.json()["projection"]["allowedActions"]
@@ -300,7 +314,7 @@ def test_runtime_api_scoped_artifact_action_uses_typed_artifact_service(tmp_path
     )
 
     assert spoofed_gate.status_code == 400
-    assert client.get(f"/runs/{run['runId']}/gates").json() == []
+    assert client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/gates").json() == []
     gated = client.post(
         f"/projects/{run['projectId']}/runs/{run['runId']}/actions",
         json={
@@ -314,7 +328,7 @@ def test_runtime_api_scoped_artifact_action_uses_typed_artifact_service(tmp_path
 
     assert gated.status_code == 200
     assert gated.json()["emittedEvents"][0]["type"] == "GATE_PASSED"
-    assert client.get(f"/runs/{run['runId']}/gates").json()[0]["status"] == "passed"
+    assert client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/gates").json()[0]["status"] == "passed"
 
 
 def test_runtime_api_persists_run_objective_and_parameters(tmp_path) -> None:
@@ -404,7 +418,7 @@ def test_runtime_api_scans_declared_node_artifacts(tmp_path) -> None:
     )
 
     response = client.post(
-        f"/runs/{run['runId']}/nodes/plan/artifacts/scan",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/nodes/plan/artifacts/scan",
         json={"expectedRevision": started["revision"], "now": NOW},
     )
 
@@ -413,7 +427,7 @@ def test_runtime_api_scans_declared_node_artifacts(tmp_path) -> None:
     assert response.json()["projection"]["nodeStates"]["plan"] == "RUNNING"
 
     requirements = client.get(
-        f"/runs/{run['runId']}/nodes/plan/artifact-requirements"
+        f"/projects/{run['projectId']}/runs/{run['runId']}/nodes/plan/artifact-requirements"
     )
 
     assert requirements.status_code == 200
@@ -432,7 +446,7 @@ def start_and_submit_plan(client: TestClient, run: dict, artifact_path) -> dict:
         expected_revision=run["revision"],
     )
     return client.post(
-        f"/runs/{run['runId']}/artifacts",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts",
         json={
             "nodeId": "plan",
             "artifactPath": str(artifact_path),
@@ -975,7 +989,7 @@ def test_runtime_api_returns_recovery_diagnostics_for_a_run(tmp_path) -> None:
         imported["projectId"],
     )
 
-    diagnostics = client.get(f"/runs/{run['runId']}/recovery-diagnostics")
+    diagnostics = client.get(f"/projects/{imported['projectId']}/runs/{run['runId']}/recovery-diagnostics")
 
     assert diagnostics.status_code == 200
     assert diagnostics.json()["runId"] == run["runId"]
@@ -992,7 +1006,7 @@ def test_runtime_api_registers_and_lists_run_bound_terminal_sessions(tmp_path) -
     project_path, run = import_project_and_create_run(client, tmp_path)
 
     created = client.post(
-        f"/runs/{run['runId']}/terminals",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals",
         json={
             "nodeId": "plan",
             "kind": "shell",
@@ -1001,7 +1015,7 @@ def test_runtime_api_registers_and_lists_run_bound_terminal_sessions(tmp_path) -
             "now": NOW,
         },
     )
-    sessions = client.get(f"/runs/{run['runId']}/terminals")
+    sessions = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/terminals")
 
     assert created.status_code == 200
     assert created.json()["runId"] == run["runId"]
@@ -1017,7 +1031,7 @@ def test_runtime_api_records_terminal_command_decision_for_trusted_human(tmp_pat
     client = TestClient(create_app(WorkflowRuntimeService(db)))
     project_path, run = import_project_and_create_run(client, tmp_path)
     session = client.post(
-        f"/runs/{run['runId']}/terminals",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals",
         json={
             "nodeId": "plan",
             "kind": "shell",
@@ -1028,7 +1042,7 @@ def test_runtime_api_records_terminal_command_decision_for_trusted_human(tmp_pat
     ).json()
 
     recorded = client.post(
-        f"/runs/{run['runId']}/terminals/{session['id']}/command-decisions",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals/{session['id']}/command-decisions",
         json={
             "decision": "rejected",
             "riskLevel": "high",
@@ -1039,7 +1053,7 @@ def test_runtime_api_records_terminal_command_decision_for_trusted_human(tmp_pat
         },
     )
     denied = client.post(
-        f"/runs/{run['runId']}/terminals/{session['id']}/command-decisions",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals/{session['id']}/command-decisions",
         json={
             "decision": "approved",
             "riskLevel": "high",
@@ -1061,7 +1075,7 @@ def test_runtime_api_appends_and_reads_terminal_scrollback(tmp_path) -> None:
     client = TestClient(create_app(WorkflowRuntimeService(db)))
     project_path, run = import_project_and_create_run(client, tmp_path)
     session = client.post(
-        f"/runs/{run['runId']}/terminals",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals",
         json={
             "nodeId": "plan",
             "kind": "shell",
@@ -1072,10 +1086,10 @@ def test_runtime_api_appends_and_reads_terminal_scrollback(tmp_path) -> None:
     ).json()
 
     appended = client.post(
-        f"/runs/{run['runId']}/terminals/{session['id']}/output",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals/{session['id']}/output",
         json={"stream": "stdout", "data": "hello\n", "now": NOW},
     )
-    output = client.get(f"/runs/{run['runId']}/terminals/{session['id']}/output?afterSequence=0")
+    output = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/terminals/{session['id']}/output?afterSequence=0")
 
     assert appended.status_code == 200
     assert output.status_code == 200
@@ -1097,7 +1111,7 @@ def test_runtime_api_exports_terminal_scrollback_as_human_evidence(tmp_path) -> 
     client = TestClient(create_app(WorkflowRuntimeService(db)))
     project_path, run = import_project_and_create_run(client, tmp_path)
     session = client.post(
-        f"/runs/{run['runId']}/terminals",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals",
         json={
             "nodeId": "plan",
             "kind": "shell",
@@ -1107,12 +1121,12 @@ def test_runtime_api_exports_terminal_scrollback_as_human_evidence(tmp_path) -> 
         },
     ).json()
     client.post(
-        f"/runs/{run['runId']}/terminals/{session['id']}/output",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals/{session['id']}/output",
         json={"stream": "stdout", "data": "done\n", "now": NOW},
     )
 
     evidence = client.post(
-        f"/runs/{run['runId']}/terminals/{session['id']}/evidence",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/terminals/{session['id']}/evidence",
         json={"actor": HUMAN_ACTOR, "now": NOW},
     )
 
@@ -1156,10 +1170,10 @@ def test_runtime_api_cleans_orphan_agent_jobs_during_recovery(tmp_path) -> None:
     db.commit()
 
     cleaned = client.post(
-        f"/runs/{run['runId']}/recovery/cleanup-orphan-agents",
+        f"/projects/{imported['projectId']}/runs/{run['runId']}/recovery/cleanup-orphan-agents",
         json={"now": NOW},
     )
-    jobs = client.get(f"/runs/{run['runId']}/agents")
+    jobs = client.get(f"/projects/{imported['projectId']}/runs/{run['runId']}/agents")
 
     assert cleaned.status_code == 200
     assert cleaned.json()["cleanedJobIds"] == ["job-orphan"]
@@ -1172,8 +1186,9 @@ def test_runtime_api_cleans_orphan_terminal_sessions_during_recovery(tmp_path) -
     migrate(db)
     client = TestClient(create_app(WorkflowRuntimeService(db)))
     project_path, run = import_project_and_create_run(client, tmp_path)
+    project_id = run["projectId"]
     session = client.post(
-        f"/runs/{run['runId']}/terminals",
+        f"/projects/{project_id}/runs/{run['runId']}/terminals",
         json={
             "nodeId": "plan",
             "kind": "shell",
@@ -1184,7 +1199,7 @@ def test_runtime_api_cleans_orphan_terminal_sessions_during_recovery(tmp_path) -
     ).json()
 
     cleaned = client.post(
-        f"/runs/{run['runId']}/recovery/cleanup-orphan-terminals",
+        f"/projects/{project_id}/runs/{run['runId']}/recovery/cleanup-orphan-terminals",
         json={"now": NOW},
     )
 
@@ -1222,7 +1237,7 @@ def test_runtime_api_imports_project_creates_run_and_transitions(tmp_path) -> No
         expected_revision=run["revision"],
     )
     submitted = client.post(
-        f"/runs/{run['runId']}/artifacts",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts",
         json={
             "nodeId": "plan",
             "artifactPath": str(artifact_path),
@@ -1287,7 +1302,7 @@ def test_runtime_api_rejects_unknown_scoped_action_and_maps_conflicts(tmp_path) 
         },
     )
     missing_artifact = client.post(
-        f"/runs/{run['runId']}/artifacts",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts",
         json={
             "nodeId": "plan",
             "artifactPath": str(project_path / "missing.md"),
@@ -1314,7 +1329,7 @@ def test_runtime_api_completes_p1_loop_and_returns_timeline(tmp_path) -> None:
 
     submitted = start_and_submit_plan(client, run, artifact_path)
     approved = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": HUMAN_ACTOR,
@@ -1324,7 +1339,7 @@ def test_runtime_api_completes_p1_loop_and_returns_timeline(tmp_path) -> None:
         },
     ).json()
     gated = client.post(
-        f"/runs/{run['runId']}/gates",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/gates",
         json={
             "nodeId": "plan",
             "gateId": "plan-ready",
@@ -1336,7 +1351,7 @@ def test_runtime_api_completes_p1_loop_and_returns_timeline(tmp_path) -> None:
             "now": NOW,
         },
     ).json()
-    timeline = client.get(f"/runs/{run['runId']}/timeline").json()
+    timeline = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/timeline").json()
 
     assert gated["nodeStates"]["review"] == "READY"
     assert [event["type"] for event in timeline] == [
@@ -1387,7 +1402,7 @@ def test_runtime_api_automatically_passes_configured_gate_with_artifact_evidence
         expected_revision=run["revision"],
     )
     submitted = client.post(
-        f"/runs/{run['runId']}/artifacts",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts",
         json={
             "nodeId": "plan",
             "artifactPath": str(artifact_path),
@@ -1398,7 +1413,7 @@ def test_runtime_api_automatically_passes_configured_gate_with_artifact_evidence
         },
     ).json()
     completed = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": HUMAN_ACTOR,
@@ -1407,7 +1422,7 @@ def test_runtime_api_automatically_passes_configured_gate_with_artifact_evidence
             "now": NOW,
         },
     )
-    gates = client.get(f"/runs/{run['runId']}/gates")
+    gates = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/gates")
 
     assert completed.status_code == 200
     assert completed.json()["nodeStates"]["plan"] == "PASSED"
@@ -1441,7 +1456,7 @@ def test_runtime_api_returns_persisted_side_records(tmp_path) -> None:
 
     submitted = start_and_submit_plan(client, run, artifact_path)
     approved = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": HUMAN_ACTOR,
@@ -1451,7 +1466,7 @@ def test_runtime_api_returns_persisted_side_records(tmp_path) -> None:
         },
     ).json()
     client.post(
-        f"/runs/{run['runId']}/gates",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/gates",
         json={
             "nodeId": "plan",
             "gateId": "plan-ready",
@@ -1464,9 +1479,9 @@ def test_runtime_api_returns_persisted_side_records(tmp_path) -> None:
         },
     )
 
-    artifacts = client.get(f"/runs/{run['runId']}/artifacts").json()
-    approvals = client.get(f"/runs/{run['runId']}/approvals").json()
-    gates = client.get(f"/runs/{run['runId']}/gates").json()
+    artifacts = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts").json()
+    approvals = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/approvals").json()
+    gates = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/gates").json()
 
     assert artifacts[0]["nodeId"] == "plan"
     assert artifacts[0]["type"] == "plan"
@@ -1489,13 +1504,13 @@ def test_runtime_api_previews_registered_artifact_and_reports_integrity(tmp_path
     artifact_path.write_text("# 计划\n\n完成产物预览。", encoding="utf-8")
 
     start_and_submit_plan(client, run, artifact_path)
-    artifacts = client.get(f"/runs/{run['runId']}/artifacts").json()
+    artifacts = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts").json()
     expected_bytes = artifact_path.read_bytes()
     expected_content = expected_bytes.decode("utf-8")
 
-    verified = client.get(f"/runs/{run['runId']}/artifacts/{artifacts[0]['id']}/preview")
+    verified = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts/{artifacts[0]['id']}/preview")
     artifact_path.write_text("# 已修改\n", encoding="utf-8")
-    changed = client.get(f"/runs/{run['runId']}/artifacts/{artifacts[0]['id']}/preview")
+    changed = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts/{artifacts[0]['id']}/preview")
 
     assert verified.status_code == 200
     assert verified.json() == {
@@ -1525,7 +1540,7 @@ def test_runtime_api_generates_run_evidence_package_and_chinese_markdown_report(
 
     submitted = start_and_submit_plan(client, run, artifact_path)
     approved = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": HUMAN_ACTOR,
@@ -1535,7 +1550,7 @@ def test_runtime_api_generates_run_evidence_package_and_chinese_markdown_report(
         },
     ).json()
     client.post(
-        f"/runs/{run['runId']}/gates",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/gates",
         json={
             "nodeId": "plan",
             "gateId": "plan-ready",
@@ -1548,8 +1563,8 @@ def test_runtime_api_generates_run_evidence_package_and_chinese_markdown_report(
         },
     )
 
-    package = client.get(f"/runs/{run['runId']}/evidence-package")
-    report = client.get(f"/runs/{run['runId']}/report")
+    package = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/evidence-package")
+    report = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/report")
 
     assert package.status_code == 200
     assert package.json()["runId"] == run["runId"]
@@ -1581,7 +1596,7 @@ def test_runtime_api_run_report_includes_failed_gate_review_details(tmp_path) ->
 
     submitted = start_and_submit_plan(client, run, artifact_path)
     approved = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": HUMAN_ACTOR,
@@ -1591,7 +1606,7 @@ def test_runtime_api_run_report_includes_failed_gate_review_details(tmp_path) ->
         },
     ).json()
     client.post(
-        f"/runs/{run['runId']}/gates",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/gates",
         json={
             "nodeId": "plan",
             "gateId": "plan-ready",
@@ -1605,7 +1620,7 @@ def test_runtime_api_run_report_includes_failed_gate_review_details(tmp_path) ->
         },
     )
 
-    report = client.get(f"/runs/{run['runId']}/report")
+    report = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/report")
     content = report.json()["content"]
 
     assert report.status_code == 200
@@ -1859,10 +1874,10 @@ def test_runtime_api_extracts_verified_artifacts_to_repeatable_knowledge_synthes
         created_at=NOW,
     )
     db.commit()
-    artifacts = client.get(f"/runs/{run['runId']}/artifacts").json()
+    artifacts = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts").json()
 
     extracted = client.post(
-        f"/runs/{run['runId']}/artifacts/knowledge-syntheses",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts/knowledge-syntheses",
         json={
             "artifactIds": [artifact["id"] for artifact in artifacts],
             "provider": "fake",
@@ -1871,7 +1886,7 @@ def test_runtime_api_extracts_verified_artifacts_to_repeatable_knowledge_synthes
         },
     )
     extracted_again = client.post(
-        f"/runs/{run['runId']}/artifacts/knowledge-syntheses",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts/knowledge-syntheses",
         json={
             "artifactIds": [artifacts[0]["id"]],
             "provider": "fake",
@@ -1903,7 +1918,7 @@ def test_runtime_api_get_run_and_rebuild_projection_match_current_events(tmp_pat
         f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
     ).json()
     rebuilt = client.post(
-        f"/runs/{run['runId']}/rebuild-projection",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/rebuild-projection",
         json={"now": "2026-07-27T13:05:00Z"},
     ).json()
 
@@ -2005,7 +2020,7 @@ def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
 
     submitted = start_and_submit_plan(client, run, artifact_path)
     denied = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": UNTRUSTED_HUMAN_ACTOR,
@@ -2015,7 +2030,7 @@ def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
         },
     )
     conflict = client.post(
-        f"/runs/{run['runId']}/approvals/plan/decide",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/approvals/plan/decide",
         json={
             "decision": "approved",
             "actor": HUMAN_ACTOR,
@@ -2028,7 +2043,7 @@ def test_runtime_api_maps_p1_error_statuses(tmp_path) -> None:
         f"/projects/{run['projectId']}/runs/run-missing"
     )
     validation_error = client.post(
-        f"/runs/{run['runId']}/gates",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/gates",
         json={
             "nodeId": "plan",
             "gateId": "plan-ready",
@@ -2056,7 +2071,7 @@ def test_runtime_api_runs_agent_job_and_returns_output_without_advancing_run(tmp
     _project_path, run = import_project_and_create_run(client, tmp_path)
 
     started = client.post(
-        f"/runs/{run['runId']}/agents",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
         json={
             "nodeId": "plan",
             "provider": "fake",
@@ -2068,12 +2083,12 @@ def test_runtime_api_runs_agent_job_and_returns_output_without_advancing_run(tmp
     job_id = started.json()["id"]
     completed = started
     for _ in range(100):
-        completed = client.get(f"/runs/{run['runId']}/agents/{job_id}")
+        completed = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}")
         if completed.json()["status"] == "COMPLETED":
             break
         sleep(0.02)
-    jobs = client.get(f"/runs/{run['runId']}/agents")
-    output = client.get(f"/runs/{run['runId']}/agents/{job_id}/output")
+    jobs = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agents")
+    output = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}/output")
     current = client.get(
         f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
     )
@@ -2095,7 +2110,7 @@ def test_runtime_api_persists_interactive_agent_input_and_output(tmp_path) -> No
     _project_path, run = import_project_and_create_run(client, tmp_path)
 
     started = client.post(
-        f"/runs/{run['runId']}/agents",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
         json={
             "nodeId": "plan",
             "provider": "fake",
@@ -2107,7 +2122,7 @@ def test_runtime_api_persists_interactive_agent_input_and_output(tmp_path) -> No
     )
     job = started.json()
     session_started = client.post(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/start",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session/start",
         json={
             "desktopSessionId": "pty-1",
             "pid": 1234,
@@ -2116,17 +2131,17 @@ def test_runtime_api_persists_interactive_agent_input_and_output(tmp_path) -> No
         },
     )
     accepted = client.post(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/input",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session/input",
         json={"content": "选择 A", "actor": HUMAN_ACTOR, "now": NOW},
     )
     output = client.post(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/output",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session/output",
         json={"events": [{"data": "已收到选择 A\r\n"}], "now": NOW},
     )
     fetched_session = client.get(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session"
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session"
     )
-    fetched_output = client.get(f"/runs/{run['runId']}/agents/{job['id']}/output")
+    fetched_output = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/output")
 
     assert started.status_code == 200
     assert job["mode"] == "interactive"
@@ -2151,7 +2166,7 @@ def test_runtime_api_finishes_continues_and_cancels_interactive_agent(tmp_path) 
     _project_path, run = import_project_and_create_run(client, tmp_path)
 
     job = client.post(
-        f"/runs/{run['runId']}/agents",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
         json={
             "nodeId": "plan",
             "provider": "fake",
@@ -2162,7 +2177,7 @@ def test_runtime_api_finishes_continues_and_cancels_interactive_agent(tmp_path) 
         },
     ).json()
     client.post(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/start",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session/start",
         json={
             "desktopSessionId": "pty-1",
             "pid": 1234,
@@ -2171,7 +2186,7 @@ def test_runtime_api_finishes_continues_and_cancels_interactive_agent(tmp_path) 
         },
     )
     finished = client.post(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/ended",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session/ended",
         json={
             "status": "FAILED",
             "summary": None,
@@ -2181,15 +2196,15 @@ def test_runtime_api_finishes_continues_and_cancels_interactive_agent(tmp_path) 
         },
     )
     continued = client.post(
-        f"/runs/{run['runId']}/agents/{job['id']}/interactive-session/continue",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job['id']}/interactive-session/continue",
         json={"actor": HUMAN_ACTOR, "now": NOW},
     )
     cancel_without_actor = client.post(
-        f"/runs/{run['runId']}/agents/{continued.json()['id']}/cancel",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{continued.json()['id']}/cancel",
         json={"now": NOW},
     )
     cancelled = client.post(
-        f"/runs/{run['runId']}/agents/{continued.json()['id']}/cancel",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{continued.json()['id']}/cancel",
         json={"actor": HUMAN_ACTOR, "now": NOW},
     )
 
@@ -2199,7 +2214,7 @@ def test_runtime_api_finishes_continues_and_cancels_interactive_agent(tmp_path) 
     assert continued.json()["mode"] == "interactive"
     assert continued.json()["parentJobId"] == job["id"]
     assert cancel_without_actor.status_code == 400
-    assert "ACTOR_INVALID" in cancel_without_actor.json()["detail"]
+    assert cancel_without_actor.json()["code"] == "ACTOR_INVALID"
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "CANCELLED"
 
@@ -2246,7 +2261,7 @@ def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp
     )
 
     denied = client.post(
-        f"/runs/{run['runId']}/deployments",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/deployments",
         json={
             "nodeId": "deploy",
             "actor": AGENT_ACTOR,
@@ -2255,7 +2270,7 @@ def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp
         },
     )
     started = client.post(
-        f"/runs/{run['runId']}/deployments",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/deployments",
         json={
             "nodeId": "deploy",
             "actor": HUMAN_ACTOR,
@@ -2266,12 +2281,12 @@ def test_runtime_api_runs_a_governed_deploy_command_and_records_log_artifact(tmp
     deployment_id = started.json()["id"]
     completed = started
     for _ in range(100):
-        completed = client.get(f"/runs/{run['runId']}/deployments/{deployment_id}")
+        completed = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/deployments/{deployment_id}")
         if completed.json()["status"] in {"COMPLETED", "FAILED"}:
             break
         sleep(0.02)
-    output = client.get(f"/runs/{run['runId']}/deployments/{deployment_id}/output")
-    artifacts = client.get(f"/runs/{run['runId']}/artifacts")
+    output = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/deployments/{deployment_id}/output")
+    artifacts = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/artifacts")
     projection = client.get(
         f"/projects/{run['projectId']}/runs/{run['runId']}/projection"
     )
@@ -2318,9 +2333,9 @@ def test_runtime_api_lists_and_resumes_recoverable_agent_checkpoints(tmp_path) -
     )
     db.commit()
 
-    listed = client.get(f"/runs/{run['runId']}/agent-checkpoints")
+    listed = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agent-checkpoints")
     resumed = client.post(
-        f"/runs/{run['runId']}/agent-checkpoints/agent-checkpoint-interrupted/resume",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agent-checkpoints/agent-checkpoint-interrupted/resume",
         json={"actor": HUMAN_ACTOR, "now": NOW},
     )
 
@@ -2330,7 +2345,7 @@ def test_runtime_api_lists_and_resumes_recoverable_agent_checkpoints(tmp_path) -
     assert resumed.json()["status"] == "QUEUED"
     original = next(
         checkpoint
-        for checkpoint in client.get(f"/runs/{run['runId']}/agent-checkpoints").json()
+        for checkpoint in client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agent-checkpoints").json()
         if checkpoint["id"] == "agent-checkpoint-interrupted"
     )
     assert original["status"] == "resumed"
@@ -2345,7 +2360,7 @@ def test_runtime_api_rejects_agent_job_for_unknown_node(tmp_path) -> None:
     _project_path, run = import_project_and_create_run(client, tmp_path)
 
     response = client.post(
-        f"/runs/{run['runId']}/agents",
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
         json={
             "nodeId": "missing",
             "provider": "fake",
@@ -2356,7 +2371,7 @@ def test_runtime_api_rejects_agent_job_for_unknown_node(tmp_path) -> None:
     )
 
     assert response.status_code == 400
-    assert "AGENT_UNKNOWN_NODE" in response.json()["detail"]
+    assert response.json()["code"] == "AGENT_UNKNOWN_NODE"
 
 
 def test_runtime_api_cancel_missing_agent_job_maps_404(tmp_path) -> None:
@@ -2365,6 +2380,6 @@ def test_runtime_api_cancel_missing_agent_job_maps_404(tmp_path) -> None:
     client = TestClient(create_app(WorkflowRuntimeService(db)))
     _project_path, run = import_project_and_create_run(client, tmp_path)
 
-    response = client.post(f"/runs/{run['runId']}/agents/agent-job-missing/cancel")
+    response = client.post(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/agent-job-missing/cancel")
 
     assert response.status_code == 404

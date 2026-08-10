@@ -55,12 +55,14 @@ class AuditLog:
         actor_id: str | None = None,
         action: str | None = None,
         resource: str | None = None,
+        run_id: str | None = None,
         limit: int = 100,
     ) -> list[dict]:
         return self._records.list(
             actor_id=actor_id,
             action=action,
             resource=resource,
+            run_id=run_id,
             limit=limit,
         )
 

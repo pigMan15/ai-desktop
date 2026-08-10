@@ -114,6 +114,9 @@ it("exports stable error constants in plan order", () => {
     "RUN_ARCHIVED",
     "WORKSPACE_RECOVERY_REQUIRED",
     "RUN_REARCHITECTURE_MAINTENANCE",
+    "RUN_CONCURRENCY_LIMIT",
+    "AGENT_CONCURRENCY_LIMIT",
+    "PROJECT_CONCURRENCY_INVALID",
   ]);
 });
 

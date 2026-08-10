@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Actor, ExecuteRunActionRequest, RunListQuery, RunSummaryProjection } from "@workflow-platform/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Actor, ExecuteRunActionRequest, ProjectConcurrencySettings, RunListQuery, RunSummaryProjection } from "@workflow-platform/contracts";
 
 import { ApprovalInbox } from "../features/approvals/ApprovalInbox";
 import { ArtifactsPage } from "../features/artifacts/ArtifactsPage";
@@ -14,7 +14,8 @@ import {
 } from "../features/projects/GitWorkspacePanel";
 import { RecoveryPage } from "../features/recovery/RecoveryPage";
 import { NewRunPage } from "../features/runs/NewRunPage";
-import { RunDetailPage } from "../features/runs/RunDetailPage";
+import { RunDetailPage, type RunAgentStartRequest } from "../features/runs/RunDetailPage";
+import { RunAgentExecutorPage } from "../features/runs/RunAgentExecutorPage";
 import { RunListPage } from "../features/runs/RunListPage";
 import { AuditPage } from "../features/audit/AuditPage";
 import {
@@ -23,12 +24,26 @@ import {
   type RuntimeLogEntry,
 } from "../features/settings/SettingsPage";
 import { TerminalPage } from "../features/terminal/TerminalPage";
+import { DeploymentPage } from "../features/deployments/DeploymentPage";
 import type { TerminalViewportOutput } from "../features/terminal/TerminalViewport";
+import {
+  buildTerminalRunOptions,
+  loadAllTerminalRuns,
+} from "../features/terminal/terminalRunModel";
 import { WorkflowViewer } from "../features/workflow/WorkflowViewer";
 import { WorkflowLibraryPage } from "../features/workflow/WorkflowLibraryPage";
 import { RoleAssetsPage } from "../features/workflow/RoleAssetsPage";
 import { Navigation } from "./navigation";
-import { isKnownRouteHash, normalizeRoute, parseRunRoute, parseWorkflowRoute, routeHash } from "./routes";
+import {
+  buildRunAgentExecutorHash,
+  isKnownRouteHash,
+  normalizeRoute,
+  parseRunRoute,
+  parseScopedRunRoute,
+  parseWorkflowRoute,
+  routeHash,
+  routes,
+} from "./routes";
 import {
   isInteractiveAgentSessionClosedError,
   isInteractiveAgentOutputLimitError,
@@ -56,19 +71,20 @@ import {
   type KnowledgeSynthesis,
   type KnowledgeSynthesisOutputEvent,
   type RuntimeWorkbenchState,
-  type RecoveryDiagnostics,
   type RunConfiguration,
   type RunSummary,
   type TerminalOutputEvent,
-  type TerminalSessionSummary,
   type WorkflowDefinitionSummary,
   type WorkflowExportFormat,
   type WorkflowLibraryItem,
   type WorkflowRoleSummary,
   type ProjectWorkflowBinding,
+  type ProjectWorkspaceCandidate,
+  type RecoveryDiagnostics,
   type RoleAssetSummary,
   type RoleVersionSummary,
   type RoleWorkflowReference,
+  type TerminalSessionSummary,
   type WorkflowSimulation,
   type WorkflowVersionDiff,
   type WorkflowVersionSummary,
@@ -151,25 +167,42 @@ export function App() {
   const [resolvedWorkflowAssetId, setResolvedWorkflowAssetId] = useState<string | null>(null);
   const [gitWorkspaceStatus, setGitWorkspaceStatus] = useState<GitWorkspaceStatus | null>(null);
   const [gitWorktrees, setGitWorktrees] = useState<GitWorktree[]>([]);
+  const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspaceCandidate[]>([]);
+  const [projectConcurrency, setProjectConcurrency] = useState<ProjectConcurrencySettings | null>(null);
   const [recoveryDiagnostics, setRecoveryDiagnostics] = useState<RecoveryDiagnostics | null>(null);
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionSummary[]>([]);
+  const [terminalRuns, setTerminalRuns] = useState<RunSummaryProjection[]>([]);
+  const [terminalRunsLoading, setTerminalRunsLoading] = useState(false);
+  const [terminalRunsError, setTerminalRunsError] = useState("");
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [artifactInventory, setArtifactInventory] = useState<RuntimeWorkbenchState["artifacts"]>([]);
   const [deployments, setDeployments] = useState<DeploymentSummary[]>([]);
   const [deploymentOutput, setDeploymentOutput] = useState<DeploymentOutputEvent[]>([]);
-  const [interactiveAgentTerminals, setInteractiveAgentTerminals] = useState<
-    Record<string, InteractiveAgentTerminalBinding>
-  >({});
-  const [liveAgentOutput, setLiveAgentOutput] = useState<
-    Record<string, Record<string, TerminalViewportOutput[]>>
-  >({});
+  const [interactiveAgentTerminals, setInteractiveAgentTerminals] = useState<Record<string, InteractiveAgentTerminalBinding>>({});
+  const [liveAgentOutput, setLiveAgentOutput] = useState<Record<string, Record<string, TerminalViewportOutput[]>>>({});
   const agentInputBuffersRef = useRef<Record<string, string>>({});
   const liveAgentOutputPendingRef = useRef<Record<string, Record<string, TerminalViewportOutput[]>>>({});
   const liveAgentOutputFrameRef = useRef<number | null>(null);
   const runSwitchInProgressRef = useRef(false);
   const workflowRoute = parseWorkflowRoute(routeLocation);
   const runRoute = parseRunRoute(routeLocation);
-  const routeRunId = runRoute.mode === "detail" ? runRoute.runId : null;
+  const scopedRoute = parseScopedRunRoute(routeLocation, projectId);
+  const routePathname = routeLocation.split("?")[0];
+  const routeRequiresRunContext = ["#/artifacts", "#/gates", "#/approvals", "#/audit", "#/recovery", "#/deployment"]
+    .includes(routePathname);
+  const missingRunContext = routeRequiresRunContext && !routeLocation.includes("?");
+  const missingContextHeading = ({
+    terminal: "终端",
+    gates: "门禁",
+    artifacts: "产物",
+    approvals: "审批中心",
+    audit: "审计记录",
+    recovery: "恢复",
+  } as Record<string, string>)[currentRoute] ?? "Run";
+  const invalidScopedRoute = scopedRoute.mode === "invalid" || (routeRequiresRunContext && scopedRoute.mode === "none");
+  const routeRunId = runRoute.mode === "detail" || runRoute.mode === "agent"
+    ? runRoute.runId
+    : null;
   const workflowAssetId = workflowRoute.mode === "edit" ? workflowRoute.workflowId : "";
   const isWorkflowEditor = currentRoute === "workflow" && workflowRoute.mode !== "library";
   const editorWorkflowVersionId = workflowRoute.mode === "edit" && resolvedWorkflowAssetId === workflowAssetId
@@ -187,15 +220,9 @@ export function App() {
   }, [currentRoute]);
 
   function appendLiveAgentOutput(runId: string, jobId: string, event: TerminalViewportOutput) {
-    const pending = liveAgentOutputPendingRef.current;
-    const runOutput = pending[runId] ?? {};
-    pending[runId] = {
-      ...runOutput,
-      [jobId]: [...(runOutput[jobId] ?? []), event],
-    };
-    if (liveAgentOutputFrameRef.current !== null) {
-      return;
-    }
+    const runOutput = liveAgentOutputPendingRef.current[runId] ?? {};
+    liveAgentOutputPendingRef.current[runId] = { ...runOutput, [jobId]: [...(runOutput[jobId] ?? []), event] };
+    if (liveAgentOutputFrameRef.current !== null) return;
     liveAgentOutputFrameRef.current = window.requestAnimationFrame(() => {
       const batch = liveAgentOutputPendingRef.current;
       liveAgentOutputPendingRef.current = {};
@@ -215,22 +242,14 @@ export function App() {
   }
 
   function clearDisplayedAgentTerminal() {
-    setState((current) =>
-      current
-        ? {
-            ...current,
-            agentJobs: [],
-            agentOutput: [],
-          }
-        : current,
-    );
+    setState((current) => current ? { ...current, agentJobs: [], agentOutput: [] } : current);
   }
 
   useEffect(() => {
     let isMounted = true;
 
     const initialRunSession = !initialRouteIsRun && initialRunId && apiBaseUrl === savedSession.apiBaseUrl
-      ? { ...savedSession, runId: initialRunId }
+      ? { ...savedSession, projectId: savedSession.projectId ?? "", runId: initialRunId }
       : null;
     const initialLoad = initialRunSession
       ? restoreWorkbenchState(initialRunSession)
@@ -391,6 +410,42 @@ export function App() {
   }, [currentRoute, projectPath, runRoute.mode]);
 
   useEffect(() => {
+    if (currentRoute !== "runs" || !projectId || state?.connection !== "connected") {
+      setProjectWorkspaces([]);
+      return;
+    }
+    const controller = new AbortController();
+    let mounted = true;
+    createRuntimeClient(apiBaseUrl).listProjectWorkspaces(projectId, controller.signal).then((items) => {
+      if (mounted && !controller.signal.aborted) setProjectWorkspaces(items);
+    }).catch(() => {
+      if (mounted && !controller.signal.aborted) setProjectWorkspaces([]);
+    });
+    return () => {
+      mounted = false;
+      controller.abort();
+    };
+  }, [apiBaseUrl, currentRoute, projectId, state?.connection]);
+
+  useEffect(() => {
+    if (currentRoute !== "settings" || !projectId || state?.connection !== "connected") {
+      setProjectConcurrency(null);
+      return;
+    }
+    const controller = new AbortController();
+    let mounted = true;
+    createRuntimeClient(apiBaseUrl).getProjectConcurrency(projectId, controller.signal).then((settings) => {
+      if (mounted && !controller.signal.aborted) setProjectConcurrency(settings);
+    }).catch(() => {
+      if (mounted && !controller.signal.aborted) setProjectConcurrency(null);
+    });
+    return () => {
+      mounted = false;
+      controller.abort();
+    };
+  }, [apiBaseUrl, currentRoute, projectId, state?.connection]);
+
+  useEffect(() => {
     if (currentRoute !== "projects" || !projectId) return;
     void refreshWorkflowLibrary();
     const requestedWorkflowId = new URLSearchParams(routeLocation.split("?")[1] ?? "").get("bindWorkflow");
@@ -488,13 +543,13 @@ export function App() {
       return;
     }
     let isMounted = true;
-    Promise.all(runs.map((run) => createRuntimeClient(apiBaseUrl).listArtifacts(run.id))).then((artifactGroups) => {
+    Promise.all(runs.map((run) => createRuntimeClient(apiBaseUrl).listArtifacts(projectId, run.id))).then((artifactGroups) => {
       if (isMounted) setArtifactInventory(artifactGroups.flat());
     }).catch((error) => {
       if (isMounted) setOperationMessage(`读取产物列表失败：${errorMessage(error)}`);
     });
     return () => { isMounted = false; };
-  }, [apiBaseUrl, currentRoute, runs, state?.connection]);
+  }, [apiBaseUrl, currentRoute, projectId, runs, state?.connection]);
 
   useEffect(() => {
     if (
@@ -523,7 +578,30 @@ export function App() {
     };
   }, [apiBaseUrl, currentRoute, runRoute.mode, state?.connection, workflowVersionId]);
 
-  const activeRunId = currentRoute === "runs" ? null : state?.projection?.runId ?? null;
+  const activeRunId = routeRunId ?? ("context" in scopedRoute ? scopedRoute.context.runId : null);
+  const terminalActiveRunId = state?.projection?.runId ?? initialRunId;
+  const terminalRunOptions = buildTerminalRunOptions(terminalRuns, terminalActiveRunId);
+  const loadTerminalRuns = useCallback(async () => {
+    if (!projectId || state?.connection !== "connected") {
+      return;
+    }
+    setTerminalRunsLoading(true);
+    setTerminalRunsError("");
+    try {
+      const runtimeClient = createRuntimeClient(apiBaseUrl);
+      const items = await loadAllTerminalRuns((cursor) =>
+        runtimeClient.listProjectRuns(projectId, {
+          ...(cursor ? { cursor } : {}),
+          limit: 100,
+        }),
+      );
+      setTerminalRuns(items);
+    } catch (error) {
+      setTerminalRunsError(`读取项目 Run 失败：${errorMessage(error)}`);
+    } finally {
+      setTerminalRunsLoading(false);
+    }
+  }, [apiBaseUrl, projectId, state?.connection]);
   const loadProjectRuns = useCallback(
     (query: RunListQuery, signal: AbortSignal) =>
       createRuntimeClient(apiBaseUrl).listProjectRuns(projectId, query, signal),
@@ -544,6 +622,13 @@ export function App() {
     [apiBaseUrl, projectId, routeRunId],
   );
 
+  useEffect(() => {
+    if (currentRoute !== "terminal" || !projectId || state?.connection !== "connected") {
+      return;
+    }
+    void loadTerminalRuns();
+  }, [currentRoute, loadTerminalRuns, projectId, state?.connection]);
+
   const agentJobSignature = (state?.agentJobs ?? [])
     .map((job) => `${job.id}:${job.status}`)
     .join("|");
@@ -559,7 +644,7 @@ export function App() {
     }
     let isMounted = true;
     createRuntimeClient(apiBaseUrl)
-      .getRecoveryDiagnostics(activeRunId)
+      .getRecoveryDiagnostics(projectId, activeRunId)
       .then((diagnostics) => {
         if (isMounted) {
           setRecoveryDiagnostics(diagnostics);
@@ -576,13 +661,13 @@ export function App() {
   }, [activeRunId, apiBaseUrl, state?.connection]);
 
   useEffect(() => {
-    if (!activeRunId || state?.connection !== "connected" || currentRoute !== "terminal") {
+    if (!terminalActiveRunId || state?.connection !== "connected" || currentRoute !== "terminal") {
       setTerminalSessions([]);
       return;
     }
     let isMounted = true;
     createRuntimeClient(apiBaseUrl)
-      .listTerminalSessions(activeRunId)
+      .listTerminalSessions(projectId, terminalActiveRunId)
       .then((sessions) => {
         if (isMounted) {
           setTerminalSessions(sessions);
@@ -596,7 +681,7 @@ export function App() {
     return () => {
       isMounted = false;
     };
-  }, [activeRunId, apiBaseUrl, currentRoute, state?.connection]);
+  }, [apiBaseUrl, currentRoute, projectId, state?.connection, terminalActiveRunId]);
 
   useEffect(() => {
     if (!activeRunId) {
@@ -609,7 +694,7 @@ export function App() {
     const pollAgentActivity = async () => {
       try {
         const runtimeClient = createRuntimeClient(apiBaseUrl);
-        const jobs = await runtimeClient.listAgentJobs(activeRunId);
+        const jobs = await runtimeClient.listAgentJobs(projectId, activeRunId);
         if (disposed || runSwitchInProgressRef.current) {
           return;
         }
@@ -620,7 +705,7 @@ export function App() {
             const afterSequence = currentOutput
               .filter((event) => event.jobId === job.id)
               .reduce((latest, event) => Math.max(latest, event.sequence), 0);
-            return runtimeClient.listAgentOutput(activeRunId, job.id, afterSequence);
+            return runtimeClient.listAgentOutput(projectId, activeRunId, job.id, afterSequence);
           }),
         );
         if (disposed) {
@@ -629,7 +714,7 @@ export function App() {
 
         const incomingOutput = outputByJob.flat();
         setState((current) => {
-          if (runSwitchInProgressRef.current || current?.projection?.runId !== activeRunId) {
+          if (runSwitchInProgressRef.current || !current) {
             return current;
           }
           return {
@@ -702,6 +787,7 @@ export function App() {
           if (!persistenceLimited) {
             try {
               recordedOutput = await runtimeClient.appendInteractiveAgentOutput(
+                projectId,
                 activeRunId,
                 job.id,
                 terminalEvents.map((event) => ({ data: event.data })),
@@ -731,7 +817,7 @@ export function App() {
             [job.id]: { ...binding, afterSequence: nextSequence, persistenceLimited },
           }));
           setState((current) => {
-            if (current?.projection?.runId !== activeRunId) {
+            if (!current) {
               return current;
             }
             return {
@@ -769,11 +855,9 @@ export function App() {
             }
             return next;
           });
-          const jobs = await createRuntimeClient(apiBaseUrl).listAgentJobs(activeRunId).catch(() => null);
+          const jobs = await createRuntimeClient(apiBaseUrl).listAgentJobs(projectId, activeRunId).catch(() => null);
           if (jobs) {
-            setState((current) =>
-              current?.projection?.runId === activeRunId ? { ...current, agentJobs: jobs } : current,
-            );
+            setState((current) => current ? { ...current, agentJobs: jobs } : current);
           }
           setOperationMessage("Agent 交互会话已结束，已停止本地终端同步。");
         } else {
@@ -814,10 +898,10 @@ export function App() {
     const pollDeploymentActivity = async () => {
       try {
         const runtimeClient = createRuntimeClient(apiBaseUrl);
-        const items = await runtimeClient.listDeployments(activeRunId);
+        const items = await runtimeClient.listDeployments(projectId, activeRunId);
         const output = (
           await Promise.all(
-            items.map((deployment) => runtimeClient.listDeploymentOutput(activeRunId, deployment.id)),
+            items.map((deployment) => runtimeClient.listDeploymentOutput(projectId, activeRunId, deployment.id)),
           )
         ).flat();
         if (disposed) {
@@ -864,7 +948,24 @@ export function App() {
   const connectionText =
     state?.connection === "connected" ? "连接状态：已连接" : "连接状态：不可用";
   const runStatus = state?.projection?.status ?? "尚未创建 Run";
-  const client = createRuntimeClient(apiBaseUrl);
+  const client = useMemo(() => createRuntimeClient(apiBaseUrl), [apiBaseUrl]);
+  const runWorkspaceOptions = useMemo(() => {
+    const discovered = gitWorktrees
+      .filter((worktree) => !worktree.bare)
+      .map((worktree) => ({
+        path: worktree.path,
+        branch: worktree.branch ?? "detached HEAD",
+        isMain: worktree.path === (gitWorkspaceStatus?.rootPath ?? projectPath),
+        lease: projectWorkspaces.find((item) => item.path === worktree.path),
+      }));
+    if (discovered.length > 0) return discovered;
+    return projectWorkspaces.map((workspace) => ({
+      path: workspace.path,
+      branch: workspace.label ?? "workspace",
+      isMain: workspace.path === projectPath,
+      lease: workspace,
+    }));
+  }, [gitWorktrees, gitWorkspaceStatus?.rootPath, projectPath, projectWorkspaces]);
   const now = () => new Date().toISOString();
 
   useEffect(() => {
@@ -899,12 +1000,12 @@ export function App() {
 
   async function refreshRun(runId: string) {
     const [projection, timeline, artifacts, approvals, gates, agentJobs] = await Promise.all([
-      client.getProjection(runId),
-      client.getTimeline(runId),
-      client.listArtifacts(runId),
-      client.listApprovals(runId),
-      client.listGates(runId),
-      client.listAgentJobs(runId).catch(() => []),
+      client.getProjection(projectId, runId),
+      client.getTimeline(projectId, runId),
+      client.listArtifacts(projectId, runId),
+      client.listApprovals(projectId, runId),
+      client.listGates(projectId, runId),
+      client.listAgentJobs(projectId, runId).catch(() => []),
     ]);
     setState((current) => ({
       connection: "connected",
@@ -1018,14 +1119,21 @@ export function App() {
   async function handleImportProject() {
     try {
       await client.health();
-      const imported = await client.importProject(projectPath, now());
-      setProjectId(imported.projectId);
+      const imported = await client.importProject(projectPath, now()) as {
+        projectId: string;
+        workflowVersionId?: string;
+        workflowName?: string;
+        workflowId?: string;
+      };
+      const importedProjectId = imported.projectId ?? "";
+      const importedWorkflowVersionId = imported.workflowVersionId ?? "";
+      setProjectId(importedProjectId);
       setProjectArchived(false);
-      setWorkflowVersionId(imported.workflowVersionId ?? "");
-      const binding = await client.getProjectWorkflowBinding(imported.projectId);
+      setWorkflowVersionId(importedWorkflowVersionId);
+      const binding = await client.getProjectWorkflowBinding(importedProjectId);
       setProjectWorkflowBinding(binding);
       setRuns([]);
-      const projectName = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? imported.projectId;
+      const projectName = projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? importedProjectId;
       const workflowName = imported.workflowName ?? imported.workflowId ?? imported.workflowVersionId ?? "未绑定工作流";
       setState((current) => ({
         ...(current ?? fallbackState()),
@@ -1037,8 +1145,8 @@ export function App() {
       saveWorkspaceSession({
         apiBaseUrl,
         projectPath,
-        projectId: imported.projectId,
-        workflowVersionId: imported.workflowVersionId ?? "",
+        projectId: importedProjectId,
+        workflowVersionId: importedWorkflowVersionId,
         projectName,
         workflowName,
         runId: null,
@@ -1337,18 +1445,10 @@ export function App() {
     }
   }
 
-  async function handleStartAgent(
-    selectedNodeId: string,
-    provider: AgentJobSummary["provider"],
-    prompt: string,
-    mode: "interactive" | "automatic" = "interactive",
-    allowedTools: string[] = [],
-    cwd?: string,
-  ) {
-    const projection = state?.projection;
-    if (!projection) {
-      return;
-    }
+  async function handleStartScopedAgent(
+    runId: string,
+    { nodeId, provider, prompt, mode, allowedTools, cwd }: RunAgentStartRequest,
+  ): Promise<AgentJobSummary> {
     try {
       const terminalBridge = getDesktopTerminalBridge();
       const canUseInteractiveTerminal =
@@ -1356,8 +1456,9 @@ export function App() {
       const agentMode = canUseInteractiveTerminal ? "interactive" : "automatic";
       const executionCwd = cwd || projectPath;
       const job = await client.startAgentJob(
-        projection.runId,
-        selectedNodeId,
+        projectId,
+        runId,
+        nodeId,
         provider,
         prompt,
         now(),
@@ -1377,14 +1478,15 @@ export function App() {
             initialPrompt: job.effectivePrompt ?? prompt,
           });
           await client.startInteractiveAgentSession(
-            projection.runId,
+            projectId,
+            runId,
             job.id,
             terminalSession.id,
             terminalSession.pid,
             now(),
           );
           terminalBridge.onOutput?.(terminalSession.id, (event) => {
-            appendLiveAgentOutput(projection.runId, job.id, event);
+            appendLiveAgentOutput(runId, job.id, event);
           });
           setInteractiveAgentTerminals((current) => ({
             ...current,
@@ -1399,7 +1501,8 @@ export function App() {
             await terminalBridge.stop(terminalSession.id).catch(() => undefined);
           }
           await client.finishInteractiveAgentSession(
-            projection.runId,
+            projectId,
+            runId,
             job.id,
             "RECOVERABLE",
             null,
@@ -1409,12 +1512,18 @@ export function App() {
           throw error;
         }
       }
-      const output = await client.listAgentOutput(projection.runId, job.id, 0).catch(() => []);
+      const [jobs, output] = await Promise.all([
+        client.listAgentJobs(projectId, runId).catch(() => []),
+        client.listAgentOutput(projectId, runId, job.id, 0).catch(() => []),
+      ]);
+      const currentJob = jobs.find((candidate) => candidate.id === job.id) ?? job;
       setState((current) =>
         current
           ? {
               ...current,
-              agentJobs: [...current.agentJobs.filter((candidate) => candidate.id !== job.id), job],
+              agentJobs: jobs.length > 0
+                ? jobs
+                : [...current.agentJobs.filter((candidate) => candidate.id !== currentJob.id), currentJob],
               agentOutput: output,
             }
           : current,
@@ -1424,13 +1533,14 @@ export function App() {
           ? `交互式 Agent 已启动：${job.id}`
           : `Agent 已启动：${job.id}`,
       );
+      return currentJob;
     } catch (error) {
       setOperationMessage(`Agent 启动失败：${errorMessage(error)}`);
+      throw error;
     }
   }
 
-  async function handleAgentTerminalInput(jobId: string, data: string) {
-    const runId = state?.projection?.runId;
+  async function handleAgentTerminalInput(runId: string, jobId: string, data: string) {
     const binding = interactiveAgentTerminals[jobId];
     const terminalBridge = getDesktopTerminalBridge();
     if (!runId || !binding || !terminalBridge) {
@@ -1440,21 +1550,21 @@ export function App() {
     try {
       if (data === "\u0003") {
         await terminalBridge.interrupt(binding.desktopSessionId);
-        await client.recordInteractiveAgentInput(runId, jobId, "Ctrl+C", now());
+        await client.recordInteractiveAgentInput(projectId, runId, jobId, "Ctrl+C", now());
         setOperationMessage(`已中断 Agent：${jobId}`);
         return;
       }
       await terminalBridge.writeInput(binding.desktopSessionId, data);
       const completedInputs = collectCompletedTerminalInputs(jobId, data, agentInputBuffersRef.current);
       for (const content of completedInputs) {
-        await client.recordInteractiveAgentInput(runId, jobId, content, now());
+        await client.recordInteractiveAgentInput(projectId, runId, jobId, content, now());
       }
     } catch (error) {
       setOperationMessage(`发送 Agent 输入失败：${errorMessage(error)}`);
     }
   }
 
-  async function handleAgentTerminalResize(jobId: string, columns: number, rows: number) {
+  async function handleAgentTerminalResize(runId: string, jobId: string, columns: number, rows: number) {
     const binding = interactiveAgentTerminals[jobId];
     const terminalBridge = getDesktopTerminalBridge();
     if (!binding || !terminalBridge || columns < 1 || rows < 1) {
@@ -1463,8 +1573,7 @@ export function App() {
     await terminalBridge.resize(binding.desktopSessionId, columns, rows).catch(() => undefined);
   }
 
-  async function handleCancelAgent(jobId: string) {
-    const runId = state?.projection?.runId;
+  async function handleCancelAgent(runId: string, jobId: string) {
     if (!runId) {
       return;
     }
@@ -1481,7 +1590,7 @@ export function App() {
         next[runId] = runOutput;
         return next;
       });
-      const job = await client.cancelAgentJob(runId, jobId, now());
+      const job = await client.cancelAgentJob(projectId, runId, jobId, now());
       setInteractiveAgentTerminals((current) => {
         const next = { ...current };
         delete next[jobId];
@@ -1511,6 +1620,7 @@ export function App() {
     }
     try {
       const deployment = await client.startDeployment(
+        projectId,
         projection.runId,
         nodeId,
         projection.revision,
@@ -1534,7 +1644,7 @@ export function App() {
       return;
     }
     try {
-      const deployment = await client.cancelDeployment(runId, deploymentId, now());
+      const deployment = await client.cancelDeployment(projectId, runId, deploymentId, now());
       setDeployments((current) =>
         current.map((candidate) => (candidate.id === deployment.id ? { ...candidate, ...deployment } : candidate)),
       );
@@ -1582,7 +1692,7 @@ export function App() {
     artifact: RuntimeWorkbenchState["artifacts"][number],
   ) {
     try {
-      const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(runId, artifact.id);
+      const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(projectId, runId, artifact.id);
       if (preview.content === null || !preview.content.trim()) {
         throw new Error("该产物不是可提炼的文本内容，或内容为空。");
       }
@@ -1649,7 +1759,7 @@ export function App() {
     provider: KnowledgeSynthesis["provider"],
   ) {
     try {
-      const result = await client.extractArtifactsToKnowledgeSyntheses(runId, artifactIds, provider, now());
+      const result = await client.extractArtifactsToKnowledgeSyntheses(projectId, runId, artifactIds, provider, now());
       await refreshKnowledge();
       setArtifactInventory((current) => [...current]);
       setOperationMessage(`已启动 ${result.items.length} 项产物的 ${provider === "claude" ? "Claude Code" : "Codex"} CLI 合成，可在知识库查看进度与结果。`);
@@ -1767,7 +1877,7 @@ export function App() {
       return;
     }
     try {
-      await client.rebuildProjection(runId, now());
+      await client.rebuildProjection(projectId, runId, now());
       await refreshRun(runId);
       setOperationMessage(`投影已重建：${runId}`);
     } catch (error) {
@@ -1781,9 +1891,9 @@ export function App() {
       return;
     }
     try {
-      const result = await client.cleanupOrphanAgentJobs(runId, now());
+      const result = await client.cleanupOrphanAgentJobs(projectId, runId, now());
       await refreshRun(runId);
-      const diagnostics = await client.getRecoveryDiagnostics(runId);
+      const diagnostics = await client.getRecoveryDiagnostics(projectId, runId);
       setRecoveryDiagnostics(diagnostics);
       setOperationMessage(`已清理遗留 Agent：${result.cleanedJobIds.length} 个`);
     } catch (error) {
@@ -1797,9 +1907,9 @@ export function App() {
       return;
     }
     try {
-      const result = await client.cleanupOrphanTerminalSessions(runId, now());
+      const result = await client.cleanupOrphanTerminalSessions(projectId, runId, now());
       await refreshRun(runId);
-      const diagnostics = await client.getRecoveryDiagnostics(runId);
+      const diagnostics = await client.getRecoveryDiagnostics(projectId, runId);
       setRecoveryDiagnostics(diagnostics);
       setOperationMessage(`已清理遗留终端：${result.cleanedSessionIds.length} 个`);
     } catch (error) {
@@ -1813,9 +1923,9 @@ export function App() {
       return;
     }
     try {
-      const job = await client.resumeAgentCheckpoint(runId, checkpointId, now());
+      const job = await client.resumeAgentCheckpoint(projectId, runId, checkpointId, now());
       await refreshRun(runId);
-      setRecoveryDiagnostics(await client.getRecoveryDiagnostics(runId));
+      setRecoveryDiagnostics(await client.getRecoveryDiagnostics(projectId, runId));
       setOperationMessage(`已从 checkpoint 恢复 Agent：${job.id}`);
     } catch (error) {
       setOperationMessage(`恢复 Agent checkpoint 失败：${errorMessage(error)}`);
@@ -1828,8 +1938,8 @@ export function App() {
       return;
     }
     try {
-      await client.discardAgentCheckpoint(runId, checkpointId, now());
-      setRecoveryDiagnostics(await client.getRecoveryDiagnostics(runId));
+      await client.discardAgentCheckpoint(projectId, runId, checkpointId, now());
+      setRecoveryDiagnostics(await client.getRecoveryDiagnostics(projectId, runId));
       setOperationMessage(`已放弃 Agent checkpoint：${checkpointId}`);
     } catch (error) {
       setOperationMessage(`放弃 Agent checkpoint 失败：${errorMessage(error)}`);
@@ -1838,7 +1948,7 @@ export function App() {
 
   async function handlePreviewArtifact(runId: string, artifactId: string) {
     try {
-      const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(runId, artifactId);
+      const preview = await createRuntimeClient(apiBaseUrl).previewArtifact(projectId, runId, artifactId);
       setArtifactPreview(preview);
       setOperationMessage(
         preview.integrity === "changed" ? "产物内容已变更，请重新审核。" : "产物预览已加载。",
@@ -1851,8 +1961,8 @@ export function App() {
   async function handleCompareArtifacts(beforeRunId: string, beforeArtifactId: string, afterRunId: string, afterArtifactId: string) {
     try {
       const [before, after] = await Promise.all([
-        createRuntimeClient(apiBaseUrl).previewArtifact(beforeRunId, beforeArtifactId),
-        createRuntimeClient(apiBaseUrl).previewArtifact(afterRunId, afterArtifactId),
+        createRuntimeClient(apiBaseUrl).previewArtifact(projectId, beforeRunId, beforeArtifactId),
+        createRuntimeClient(apiBaseUrl).previewArtifact(projectId, afterRunId, afterArtifactId),
       ]);
       if (before.integrity !== "verified" || after.integrity !== "verified") {
         throw new Error("产物内容已变更，不能生成可信差异");
@@ -1880,7 +1990,7 @@ export function App() {
       return;
     }
     try {
-      const evidencePackage = await createRuntimeClient(apiBaseUrl).getEvidencePackage(runId);
+      const evidencePackage = await createRuntimeClient(apiBaseUrl).getEvidencePackage(projectId, runId);
       downloadTextFile(
         `${runId}-evidence-package.json`,
         JSON.stringify(evidencePackage, null, 2),
@@ -1898,7 +2008,7 @@ export function App() {
       return;
     }
     try {
-      const report = await createRuntimeClient(apiBaseUrl).getRunReport(runId);
+      const report = await createRuntimeClient(apiBaseUrl).getRunReport(projectId, runId);
       downloadTextFile(report.fileName, report.content, report.mediaType);
       setOperationMessage("运行报告已下载。");
     } catch (error) {
@@ -2037,7 +2147,7 @@ export function App() {
     };
     await updateProjection(
       (runId, revision, timestamp) =>
-        client.decideApproval(runId, nodeId, decision, comment, revision, timestamp),
+        client.decideApproval(projectId, runId, nodeId, decision, comment, revision, timestamp),
       `${messageByDecision[decision]}：${nodeId}`,
     );
   }
@@ -2058,7 +2168,22 @@ export function App() {
           </div>
         </header>
         <div className="content-grid">
-          {currentRoute === "projects" ? (
+          {invalidScopedRoute ? (
+            <section className="panel page-workspace" aria-labelledby="invalid-run-context-title">
+              <h2 id="invalid-run-context-title">
+                {missingRunContext
+                  ? missingContextHeading
+                  : "Run 链接无效"}
+              </h2>
+              <p className="body-copy">
+                {missingRunContext
+                  ? "请从 Run 详情进入此模块，以确保 projectId 与 runId 上下文完整。"
+                  : "该页面需要完整且属于当前项目的 projectId 与 runId。"}
+              </p>
+              <a className="quiet-button" href="#/runs">返回 Run 列表</a>
+            </section>
+          ) : null}
+          {currentRoute === "projects" && !invalidScopedRoute ? (
             <ProjectDashboard
               state={state}
               projectPath={projectPath}
@@ -2103,15 +2228,20 @@ export function App() {
               }
             />
           ) : null}
+          {scopedRoute.mode === "deployment" ? (
+            <DeploymentPage
+              key={`${scopedRoute.context.projectId}:${scopedRoute.context.runId}`}
+              context={scopedRoute.context}
+              client={client}
+            />
+          ) : null}
           {currentRoute === "runs" && runRoute.mode === "list" && projectId ? (
             <RunListPage
               key={projectId}
               projectId={projectId}
               projectName={state?.projectName ?? projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? projectId}
               workflowName={projectWorkflowBinding ? state?.workflowName ?? workflowVersionId : undefined}
-              workspaces={gitWorktrees
-                .filter((worktree) => !worktree.bare)
-                .map((worktree) => ({ path: worktree.path, label: worktree.branch ?? "detached HEAD" }))}
+              workspaces={runWorkspaceOptions.map((workspace) => ({ path: workspace.path, label: workspace.branch }))}
               loadRuns={loadProjectRuns}
               onOpenRun={openRunRoute}
               onNewRun={() => { window.location.hash = "#/runs/new"; }}
@@ -2127,16 +2257,29 @@ export function App() {
                 workflowVersionId: projectWorkflowBinding.workflowVersionId,
                 workflowName: state?.workflowName ?? projectWorkflowBinding.workflowId,
               } : null}
-              workspaces={gitWorktrees
-                .filter((worktree) => !worktree.bare)
-                .map((worktree) => ({
-                  path: worktree.path,
-                  branch: worktree.branch ?? "detached HEAD",
-                  isMain: worktree.path === (gitWorkspaceStatus?.rootPath ?? projectPath),
-                }))}
+              workspaces={runWorkspaceOptions.map((workspace) => ({
+                path: workspace.path,
+                branch: workspace.branch,
+                isMain: workspace.isMain,
+                ...(workspace.lease ? {
+                  occupiedByRunId: workspace.lease.occupiedByRunId,
+                  leaseStatus: workspace.lease.leaseStatus ?? undefined,
+                  recommended: workspace.lease.recommended,
+                } : {}),
+              }))}
               actor={{ id: "renderer-human", type: "human", source: "renderer", trusted: true }}
               onCreate={({ idempotencyKey, request }) =>
                 createRuntimeClient(apiBaseUrl).createProjectRun(projectId, idempotencyKey, request)}
+              onCreateWorkspace={async (branch) => {
+                const created = await client.createProjectWorktree(
+                  projectId,
+                  branch.replaceAll("/", "-"),
+                  branch,
+                );
+                setProjectWorkspaces(await client.listProjectWorkspaces(projectId));
+                if (desktopGitApi()) await refreshGitWorkspace();
+                return { path: created.path, branch: created.branch };
+              }}
               onCreated={openRunRoute}
               onCancel={() => { window.location.hash = "#/runs"; }}
               onOpenWorkflowLibrary={() => { window.location.hash = "#/workflow"; }}
@@ -2149,6 +2292,28 @@ export function App() {
               <a className="quiet-button" href="#/projects">前往项目工作区</a>
             </section>
           ) : null}
+          {currentRoute === "runs" && runRoute.mode === "agent" ? (
+            <RunAgentExecutorPage
+              runId={runRoute.runId}
+              jobId={runRoute.jobId}
+              jobs={state?.agentJobs ?? []}
+              persistedOutput={state?.agentOutput ?? []}
+              liveOutputByJob={liveAgentOutput[runRoute.runId] ?? {}}
+              sessionStateByJob={Object.fromEntries(
+                Object.entries(interactiveAgentTerminals).map(([jobId, binding]) => [
+                  jobId,
+                  { writable: true, persistenceLimited: Boolean(binding.persistenceLimited) },
+                ]),
+              )}
+              onSelectJob={(jobId) => {
+                window.location.hash = buildRunAgentExecutorHash(runRoute.runId, jobId);
+              }}
+              onInput={(jobId, data) => handleAgentTerminalInput(runRoute.runId, jobId, data)}
+              onInterrupt={(jobId) => handleAgentTerminalInput(runRoute.runId, jobId, "\u0003")}
+              onResize={(jobId, columns, rows) => handleAgentTerminalResize(runRoute.runId, jobId, columns, rows)}
+              onStop={(jobId) => handleCancelAgent(runRoute.runId, jobId)}
+            />
+          ) : null}
           {currentRoute === "runs" && runRoute.mode === "detail" ? (
             <RunDetailPage
               key={`${projectId}:${runRoute.runId}`}
@@ -2158,6 +2323,36 @@ export function App() {
               actor={RENDERER_ACTOR}
               gateActor={RENDERER_VERIFIER_ACTOR}
               loadOverview={loadRunOverview}
+              agentJobs={state?.agentJobs ?? []}
+              agentOutput={state?.agentOutput ?? []}
+              agentLiveOutput={liveAgentOutput[runRoute.runId] ?? {}}
+              agentSessionState={Object.fromEntries(
+                Object.entries(interactiveAgentTerminals).map(([jobId, binding]) => [
+                  jobId,
+                  { writable: true, persistenceLimited: Boolean(binding.persistenceLimited) },
+                ]),
+              )}
+              providerDiagnostics={providerDiagnostics}
+              onStartAgent={(request) => handleStartScopedAgent(runRoute.runId, request)}
+              onStartDeployment={async (nodeId, expectedRevision) => {
+                const deployment = await client.startDeployment(
+                  projectId,
+                  runRoute.runId,
+                  nodeId,
+                  expectedRevision,
+                  now(),
+                );
+                setDeployments((current) => [
+                  deployment,
+                  ...current.filter((candidate) => candidate.id !== deployment.id),
+                ]);
+              }}
+              onAgentInput={(jobId, data) => handleAgentTerminalInput(runRoute.runId, jobId, data)}
+              onAgentInterrupt={(jobId) => handleAgentTerminalInput(runRoute.runId, jobId, "\u0003")}
+              onAgentResize={(jobId, columns, rows) => handleAgentTerminalResize(runRoute.runId, jobId, columns, rows)}
+              onStopAgent={(jobId) => handleCancelAgent(runRoute.runId, jobId)}
+              scanNodeArtifacts={(nodeId, expectedRevision, now, signal) =>
+                client.scanNodeArtifacts(projectId, runRoute.runId, nodeId, expectedRevision, now, signal)}
               executeAction={executeRunAction}
               onReturnToList={() => { window.location.hash = "#/runs"; }}
             />
@@ -2215,15 +2410,28 @@ export function App() {
               roleAssets={roleAssets}
             />
           ) : null}
-          {currentRoute === "terminal" ? (
+          {currentRoute === "terminal" && !invalidScopedRoute ? (
             <TerminalPage
-              runId={state?.projection?.runId ?? null}
+              projectId={projectId}
+              runId={terminalActiveRunId}
+              runOptions={terminalRunOptions}
+              runOptionsLoading={terminalRunsLoading}
+              runOptionsError={terminalRunsError}
+              onRetryRunOptions={() => void loadTerminalRuns()}
+              onLoadRunNodes={async (runId) => {
+                const overview = await client.getProjectRunOverview(projectId, runId);
+                return overview.workflow.nodes.map((node) => ({ id: node.id, name: node.name }));
+              }}
+              onLoadRunSessions={(runId) => client.listTerminalSessions(projectId, runId)}
               projectPath={projectPath}
-              executionWorkspace={runs.find((run) => run.id === state?.projection?.runId)?.context?.executionWorkspace ?? projectPath}
+              executionWorkspace={terminalRuns.find((run) => run.id === terminalActiveRunId)?.workspace?.path
+                ?? runs.find((run) => run.id === terminalActiveRunId)?.context?.executionWorkspace
+                ?? projectPath}
               nodeId={state?.projection?.currentNodeIds[0] ?? ""}
               historySessions={terminalSessions}
               onRegisterSession={async ({ runId, nodeId, kind, cwd, pid }) => {
                 const registered = await client.registerTerminalSession(
+                  projectId,
                   runId,
                   nodeId,
                   kind,
@@ -2231,37 +2439,38 @@ export function App() {
                   pid,
                   now(),
                 );
-                setTerminalSessions(await client.listTerminalSessions(runId));
+                setTerminalSessions(await client.listTerminalSessions(projectId, runId));
                 return registered;
               }}
               onStopSession={async ({ runId, sessionId }) => {
-                await client.stopTerminalSession(runId, sessionId, now());
-                setTerminalSessions(await client.listTerminalSessions(runId));
+                await client.stopTerminalSession(projectId, runId, sessionId, now());
+                setTerminalSessions(await client.listTerminalSessions(projectId, runId));
               }}
               onAppendOutput={async ({ runId, sessionId, stream, data }) => {
-                await client.appendTerminalOutput(runId, sessionId, stream, data, now());
+                await client.appendTerminalOutput(projectId, runId, sessionId, stream, data, now());
               }}
-              onLoadHistoryOutput={async (sessionId): Promise<TerminalOutputEvent[]> => {
-                const runId = state?.projection?.runId;
-                return runId ? client.listTerminalOutput(runId, sessionId) : [];
-              }}
+              onLoadHistoryOutput={(runId, sessionId): Promise<TerminalOutputEvent[]> =>
+                client.listTerminalOutput(projectId, runId, sessionId)}
               onExportEvidence={async ({ runId, sessionId }) => {
-                await client.exportTerminalEvidence(runId, sessionId, now());
-                const artifacts = await client.listArtifacts(runId);
+                const artifact = await client.exportTerminalEvidence(projectId, runId, sessionId, now());
+                const artifacts = await client.listArtifacts(projectId, runId);
                 setState((current) =>
                   current?.projection?.runId === runId ? { ...current, artifacts } : current,
                 );
                 setOperationMessage("终端输出已转为 Evidence");
+                return { uri: artifact.uri };
               }}
             />
           ) : null}
-          {currentRoute === "gates" ? (
+          {currentRoute === "gates" && !invalidScopedRoute ? (
             <GatesPage
+              context={scopedRoute.mode === "gates" ? scopedRoute.context : undefined}
+              client={scopedRoute.mode === "gates" ? client : undefined}
               state={state}
               onRetryGate={(nodeId) =>
                 updateProjection(
                   (runId, revision, timestamp) =>
-                    client.retryGate(runId, nodeId, revision, timestamp),
+                    client.retryGate(projectId, runId, nodeId, revision, timestamp),
                   "Gate 已进入重试复核",
                 )
               }
@@ -2270,6 +2479,7 @@ export function App() {
                 updateProjection(
                   (runId, revision, timestamp) =>
                     client.submitGate(
+                      projectId,
                       runId,
                       nodeId,
                       gateId,
@@ -2284,10 +2494,12 @@ export function App() {
               }
             />
           ) : null}
-          {currentRoute === "artifacts" ? (
+          {currentRoute === "artifacts" && !invalidScopedRoute ? (
             <ArtifactsPage
+              context={scopedRoute.mode === "artifacts" ? scopedRoute.context : undefined}
+              client={scopedRoute.mode === "artifacts" ? client : undefined}
               state={state}
-              artifacts={artifactInventory}
+              artifacts={scopedRoute.mode === "artifacts" ? undefined : artifactInventory}
               runs={runs}
               extractionCountsByArtifactId={Object.fromEntries(
                 knowledgeCandidates.reduce((counts, candidate) => {
@@ -2311,17 +2523,22 @@ export function App() {
                 void updateProjection(
                   (activeRunId, revision, timestamp) => {
                     if (activeRunId !== runId) throw new Error("请先切换到该产物所属 Run 后确认产物。");
-                    return client.confirmArtifact(activeRunId, artifact.nodeId!, artifact.id, revision, timestamp)
+                    return client.confirmArtifact(projectId, activeRunId, artifact.nodeId!, artifact.id, revision, timestamp)
                       .then((result) => result.projection);
                   },
                   `产物已确认：${artifact.id}`,
                 );
               }}
-              onLoadArtifactConsumers={(runId, artifactId) => client.listArtifactConsumers(runId, artifactId)}
+              onLoadArtifactConsumers={(runId, artifactId) => client.listArtifactConsumers(projectId, runId, artifactId)}
             />
           ) : null}
-          {currentRoute === "approvals" ? (
-            <ApprovalInbox state={state} onDecide={handleApprovalDecision} />
+          {currentRoute === "approvals" && !invalidScopedRoute ? (
+            <ApprovalInbox
+              context={scopedRoute.mode === "approvals" ? scopedRoute.context : undefined}
+              client={scopedRoute.mode === "approvals" ? client : undefined}
+              state={state}
+              onDecide={handleApprovalDecision}
+            />
           ) : null}
           {currentRoute === "knowledge" ? (
             <KnowledgePage
@@ -2346,13 +2563,20 @@ export function App() {
               operationMessage={operationMessage}
             />
           ) : null}
-          {currentRoute === "audit" ? (
-            <AuditPage records={auditRecords} onFilter={refreshAuditRecords} />
+          {currentRoute === "audit" && !invalidScopedRoute ? (
+            <AuditPage
+              context={scopedRoute.mode === "audit" ? scopedRoute.context : undefined}
+              client={scopedRoute.mode === "audit" ? client : undefined}
+              records={auditRecords}
+              onFilter={refreshAuditRecords}
+            />
           ) : null}
-          {currentRoute === "recovery" ? (
+          {currentRoute === "recovery" && !invalidScopedRoute ? (
             <RecoveryPage
+              context={scopedRoute.mode === "recovery" ? scopedRoute.context : undefined}
+              client={scopedRoute.mode === "recovery" ? client : undefined}
               state={state}
-              diagnostics={recoveryDiagnostics}
+              diagnostics={scopedRoute.mode === "recovery" ? undefined : recoveryDiagnostics}
               onRebuild={handleRebuildProjection}
               onCleanupOrphans={handleCleanupOrphanAgentJobs}
               onCleanupTerminalSessions={handleCleanupOrphanTerminalSessions}
@@ -2374,6 +2598,12 @@ export function App() {
               operationMessage={operationMessage}
               providerDiagnostics={providerDiagnostics}
               onRefreshProviderDiagnostics={refreshProviderDiagnostics}
+              projectConcurrency={projectConcurrency}
+              onSaveProjectConcurrency={async (settings) => {
+                const saved = await client.updateProjectConcurrency(projectId, settings, now());
+                setProjectConcurrency(saved);
+                setOperationMessage("项目并发限制已保存");
+              }}
             />
           ) : null}
         </div>

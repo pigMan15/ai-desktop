@@ -97,6 +97,14 @@ export function RunProgressMap({ workflow, projection, selectedNodeId, onSelectN
     };
   }, []);
 
+  useEffect(() => {
+    if (!flowRef.current || nodes.length === 0) return;
+    const frame = requestAnimationFrame(() => {
+      void flowRef.current?.fitView(FIT_VIEW_OPTIONS);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [nodes.length, edges.length]);
+
   return (
     <section ref={containerRef} className="run-progress-map" aria-label="运行进度图">
       <ReactFlow<RunProgressMapNode, RunProgressMapEdge>

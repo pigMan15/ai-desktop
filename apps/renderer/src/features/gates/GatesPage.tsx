@@ -1,19 +1,48 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
+import { RuntimeClientError, type RuntimeWorkbenchState } from "../../app/runtimeClient";
+import { buildRunDetailHash, type RunContext } from "../../app/routes";
 
 type Props = {
+  context?: RunContext;
+  client?: {
+    getProjectRunOverview: (projectId: string, runId: string, signal?: AbortSignal) => Promise<{ projection: NonNullable<RuntimeWorkbenchState["projection"]> }>;
+    listGates: (projectId: string, runId: string, signal?: AbortSignal) => Promise<RuntimeWorkbenchState["gates"]>;
+    retryGate?: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string) => Promise<unknown>;
+    submitGate?: (projectId: string, runId: string, nodeId: string, gateId: string, status: "passed" | "failed" | "waived", evidence: string[], waiverReason: string | null, expectedRevision: string, now: string) => Promise<unknown>;
+  };
   state: RuntimeWorkbenchState | null;
   onRetryGate?: (nodeId: string) => void;
   onDownloadGateReport?: () => void;
   onWaiveGate?: (nodeId: string, gateId: string, waiverReason: string) => void;
 };
 
-export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGate }: Props) {
+export function GatesPage({ context, client, state, onRetryGate, onDownloadGateReport, onWaiveGate }: Props) {
   const [waiverReasons, setWaiverReasons] = useState<Record<string, string>>({});
-  const gates = Array.isArray(state?.gates) ? state.gates : [];
-  const allowedActions = state?.projection?.allowedActions ?? [];
-  const blockingReasons = state?.projection?.blockingReasons ?? [];
+  const [scopedGates, setScopedGates] = useState<RuntimeWorkbenchState["gates"] | null>(null);
+  const [scopedProjection, setScopedProjection] = useState<RuntimeWorkbenchState["projection"]>(null);
+  const [scopedError, setScopedError] = useState<RuntimeClientError | null>(null);
+  const gates = scopedGates ?? (Array.isArray(state?.gates) ? state.gates : []);
+  const projection = scopedProjection ?? state?.projection;
+  const allowedActions = projection?.allowedActions ?? [];
+  const blockingReasons = projection?.blockingReasons ?? [];
+
+  useEffect(() => {
+    if (!context || !client) return;
+    const controller = new AbortController();
+    setScopedGates(null);
+    setScopedProjection(null);
+    setScopedError(null);
+    void Promise.all([
+      client.getProjectRunOverview(context.projectId, context.runId, controller.signal),
+      client.listGates(context.projectId, context.runId, controller.signal),
+    ]).then(([overview, records]) => {
+      if (!controller.signal.aborted) { setScopedProjection(overview.projection); setScopedGates(records); }
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setScopedError(error instanceof RuntimeClientError ? error : new RuntimeClientError(null, "RUNTIME_ERROR", error instanceof Error ? error.message : String(error), undefined, null));
+    });
+    return () => controller.abort();
+  }, [client, context?.projectId, context?.runId]);
   const retryableNodeIds = new Set(
     allowedActions
       .filter((action) => action.eventType === "NODE_RETRIED" && action.nodeId)
@@ -25,8 +54,32 @@ export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGat
       .map((action) => action.nodeId),
   );
 
+  async function refreshScoped() {
+    if (!context || !client) return;
+    const [overview, records] = await Promise.all([
+      client.getProjectRunOverview(context.projectId, context.runId),
+      client.listGates(context.projectId, context.runId),
+    ]);
+    setScopedProjection(overview.projection);
+    setScopedGates(records);
+  }
+
+  async function retryScopedGate(nodeId: string) {
+    if (!context || !client?.retryGate || !projection) return;
+    await client.retryGate(context.projectId, context.runId, nodeId, projection.revision, new Date().toISOString());
+    await refreshScoped();
+  }
+
+  async function waiveScopedGate(gate: RuntimeWorkbenchState["gates"][number], reason: string) {
+    if (!context || !client?.submitGate || !projection || !gate.nodeId || !gate.gateId) return;
+    await client.submitGate(context.projectId, context.runId, gate.nodeId, gate.gateId, "waived", gate.evidence, reason, projection.revision, new Date().toISOString());
+    await refreshScoped();
+  }
+
   return (
     <section id="gates" className="panel page-workspace page-gates" aria-labelledby="gates-title">
+      {context ? <div className="button-row"><a className="quiet-button" href={buildRunDetailHash(context.runId)}>返回 Run</a></div> : null}
+      {scopedError ? <p role="alert" className="body-copy">{scopedError.message}</p> : null}
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Quality Gates</p>
@@ -61,7 +114,7 @@ export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGat
             const isAutomaticGate =
               gate.actor?.id === "runtime-auto-gate" && gate.actor?.type === "system";
             const canWaive =
-              Boolean(onWaiveGate) &&
+              Boolean(onWaiveGate || (context && client?.submitGate)) &&
               gate.status === "failed" &&
               Boolean(gate.nodeId) &&
               Boolean(gate.gateId) &&
@@ -120,7 +173,7 @@ export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGat
                     : "无"}
                 </p>
                 {gate.status === "failed" && gate.nodeId && retryableNodeIds.has(gate.nodeId) ? (
-                  <button className="quiet-button" onClick={() => onRetryGate?.(gate.nodeId!)}>
+                  <button className="quiet-button" onClick={() => context ? void retryScopedGate(gate.nodeId!) : onRetryGate?.(gate.nodeId!)}>
                     重试 Gate
                   </button>
                 ) : null}
@@ -143,9 +196,9 @@ export function GatesPage({ state, onRetryGate, onDownloadGateReport, onWaiveGat
                       <button
                         className="quiet-button"
                         disabled={!waiverReason.trim()}
-                        onClick={() =>
-                          onWaiveGate?.(gate.nodeId!, gate.gateId!, waiverReason.trim())
-                        }
+                        onClick={() => context
+                          ? void waiveScopedGate(gate, waiverReason.trim())
+                          : onWaiveGate?.(gate.nodeId!, gate.gateId!, waiverReason.trim())}
                       >
                         提交 Gate 豁免
                       </button>

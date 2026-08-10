@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   bootstrap,
   createMainWindow,
@@ -583,6 +586,7 @@ const providerSpawnCalls: Array<{
   env: NodeJS.ProcessEnv;
 }> = [];
 const providerWrites: string[] = [];
+const providerOutputCallbacks: Array<(data: string) => void> = [];
 const providerManager = new TerminalManager({
   spawnPty: (command: string, args: string[], options: TerminalSpawnOptions) => {
     providerSpawnCalls.push({ command, args, cwd: options.cwd, env: options.env });
@@ -593,7 +597,8 @@ const providerManager = new TerminalManager({
       },
       resize() {},
       kill() {},
-      onData() {
+      onData(callback) {
+        providerOutputCallbacks.push(callback);
         return { dispose() {} };
       },
     };
@@ -607,20 +612,30 @@ const claudeSession = providerManager.create({
   rows: 36,
   initialPrompt: "请等待用户回复。",
 });
+assert.deepEqual(providerWrites, []);
+providerOutputCallbacks[0]?.("Claude is ready\r\n");
+await new Promise((resolve) => setTimeout(resolve, 350));
 assert.equal(claudeSession.kind, "claude");
 assert.deepEqual(providerSpawnCalls[0], {
   command: "claude.cmd",
-  args: ["--ax-screen-reader", "--permission-mode", "acceptEdits", "请等待用户回复。"],
+  args: ["--ax-screen-reader", "--permission-mode", "acceptEdits"],
   cwd: "G:\\Project\\demo",
   env: providerSpawnCalls[0]?.env,
 });
+assert.deepEqual(providerWrites, ["请等待用户回复。\r"]);
 assert.equal(providerSpawnCalls[0]?.env.PYTHONIOENCODING, "utf-8");
+const longPrompt = `${"上下文".repeat(4_000)}\n执行测试并输出结论`;
 const codexSession = providerManager.create({
   kind: "codex",
   cwd: "G:\\Project\\demo",
   projectRoot: "G:\\Project\\demo",
-  initialPrompt: "继续实现交互式终端\n并写入计划",
+  initialPrompt: longPrompt,
 });
+assert.deepEqual(providerWrites, [
+  "请等待用户回复。\r",
+]);
+providerOutputCallbacks[1]?.("Codex is ready\r\n");
+await new Promise((resolve) => setTimeout(resolve, 350));
 assert.deepEqual(providerSpawnCalls[1]?.args, [
   "--sandbox",
   "workspace-write",
@@ -628,11 +643,14 @@ assert.deepEqual(providerSpawnCalls[1]?.args, [
   "on-request",
   "--cd",
   "G:\\Project\\demo",
-  "继续实现交互式终端 并写入计划",
+]);
+assert.deepEqual(providerWrites, [
+  "请等待用户回复。\r",
+  `${longPrompt.replace(/\s*[\r\n]+\s*/g, " ")}\r`,
 ]);
 providerManager.writeInput(claudeSession.id, "继续\r");
 providerManager.writeInput(codexSession.id, "\u0003");
-assert.deepEqual(providerWrites, ["继续\r", "\u0003"]);
+assert.deepEqual(providerWrites.slice(-2), ["继续\r", "\u0003"]);
 assert.throws(() => terminalManager.writeInput(terminal.id, "echo no\r"), /Provider terminal/);
 
 const commandManager = terminalManager as TerminalManager & {
@@ -703,21 +721,26 @@ const auditedSession = auditedManager.create({
   cwd: "G:\\Project\\demo",
   projectRoot: "G:\\Project\\demo",
 });
+const standalonePending = auditedManager.requestCommand(auditedSession.id, "npm test");
+assert.equal(standalonePending.status, "pending_approval");
+assert.deepEqual(
+  await auditedManager.approveCommand(auditedSession.id, standalonePending.approval!.id),
+  { status: "executed", commandSummary: "npm test" },
+);
+assert.deepEqual(auditedCommandWrites, ["npm test\r"]);
+assert.deepEqual(auditedDecisions, []);
+
+auditedManager.bindRuntimeSession(auditedSession.id, "project-1", "run-1", "runtime-terminal-1");
 const auditedPending = auditedManager.requestCommand(auditedSession.id, "del .\\build");
 assert.equal(auditedPending.status, "pending_approval");
-await assert.rejects(
-  () => auditedManager.approveCommand(auditedSession.id, auditedPending.approval!.id),
-  /Runtime 终端会话尚未绑定/,
-);
-assert.deepEqual(auditedCommandWrites, []);
-auditedManager.bindRuntimeSession(auditedSession.id, "run-1", "runtime-terminal-1");
 assert.deepEqual(
   await auditedManager.approveCommand(auditedSession.id, auditedPending.approval!.id),
   { status: "executed", commandSummary: "del .\\build" },
 );
-assert.deepEqual(auditedCommandWrites, ["del .\\build\r"]);
+assert.deepEqual(auditedCommandWrites, ["npm test\r", "del .\\build\r"]);
 assert.deepEqual(auditedDecisions, [
   {
+    projectId: "project-1",
     runId: "run-1",
     runtimeSessionId: "runtime-terminal-1",
     decision: "approved",
@@ -726,6 +749,50 @@ assert.deepEqual(auditedDecisions, [
     impact: "该命令可能删除文件、覆盖工作区、强制推送或影响系统进程。",
   },
 ]);
+
+const terminalExportRoot = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-terminal-export-"));
+try {
+  let emitStandaloneOutput: ((data: string) => void) | undefined;
+  const standaloneManager = new TerminalManager({
+    spawnPty: () => ({
+      pid: 2468,
+      write() {},
+      resize() {},
+      kill() {},
+      onData(callback) {
+        emitStandaloneOutput = callback;
+        return { dispose() {} };
+      },
+    }),
+  });
+  const standaloneSession = standaloneManager.create({
+    kind: "shell",
+    cwd: terminalExportRoot,
+    projectRoot: terminalExportRoot,
+  });
+  emitStandaloneOutput?.("OPENAI_API_KEY=sk-live-secret\r\nbuild complete\r\n");
+
+  const exported = standaloneManager.exportOutput(standaloneSession.id);
+  assert.match(exported.path, /\.workflow-platform[\\/]terminal-logs/);
+  assert.equal(exported.firstSequence, 1);
+  assert.equal(exported.lastSequence, 1);
+  assert.equal(
+    fs.readFileSync(exported.path, "utf8"),
+    "OPENAI_API_KEY=[REDACTED]\r\nbuild complete\r\n",
+  );
+
+  const emptySession = standaloneManager.create({
+    kind: "shell",
+    cwd: terminalExportRoot,
+    projectRoot: terminalExportRoot,
+  });
+  assert.throws(
+    () => standaloneManager.exportOutput(emptySession.id),
+    /Terminal session has no output/,
+  );
+} finally {
+  fs.rmSync(terminalExportRoot, { recursive: true, force: true });
+}
 
 const terminalChannels: string[] = [];
 const terminalHandlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -750,6 +817,7 @@ assert.deepEqual(terminalChannels, [
   "terminal:read",
   "terminal:resize",
   "terminal:interrupt",
+  "terminal:export-output",
   "terminal:stop",
 ]);
 const terminalFromIpc = terminalHandlers.get("terminal:create")?.(
@@ -795,6 +863,7 @@ assert.equal(shellDecisionFromIpc.status, "pending_approval");
 terminalHandlers.get("terminal:bind-runtime-session")?.(
   undefined,
   terminalFromIpc.id,
+  "project-1",
   "run-1",
   "runtime-terminal-1",
 );

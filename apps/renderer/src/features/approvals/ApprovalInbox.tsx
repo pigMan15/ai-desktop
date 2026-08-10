@@ -1,8 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { RuntimeWorkbenchState } from "../../app/runtimeClient";
+import { RuntimeClientError, type RuntimeWorkbenchState } from "../../app/runtimeClient";
+import { buildRunDetailHash, type RunContext } from "../../app/routes";
 
 type Props = {
+  context?: RunContext;
+  client?: {
+    getProjectRunOverview: (projectId: string, runId: string, signal?: AbortSignal) => Promise<{ projection: NonNullable<RuntimeWorkbenchState["projection"]> }>;
+    listApprovals: (projectId: string, runId: string, signal?: AbortSignal) => Promise<RuntimeWorkbenchState["approvals"]>;
+    decideApproval?: (projectId: string, runId: string, nodeId: string, decision: "approved" | "rejected" | "deferred", comment: string, expectedRevision: string, now: string) => Promise<unknown>;
+  };
   state: RuntimeWorkbenchState | null;
   onDecide?: (
     nodeId: string,
@@ -18,10 +25,30 @@ const approvalStatusText: Record<string, string> = {
   deferred: "已暂缓",
 };
 
-export function ApprovalInbox({ state, onDecide }: Props) {
-  const approvals = Array.isArray(state?.approvals) ? state.approvals : [];
+export function ApprovalInbox({ context, client, state, onDecide }: Props) {
+  const [scopedApprovals, setScopedApprovals] = useState<RuntimeWorkbenchState["approvals"] | null>(null);
+  const [scopedProjection, setScopedProjection] = useState<RuntimeWorkbenchState["projection"]>(null);
+  const [scopedError, setScopedError] = useState<RuntimeClientError | null>(null);
+  const approvals = scopedApprovals ?? (Array.isArray(state?.approvals) ? state.approvals : []);
   const [comment, setComment] = useState("");
-  const projection = state?.projection;
+  const projection = scopedProjection ?? state?.projection;
+
+  useEffect(() => {
+    if (!context || !client) return;
+    const controller = new AbortController();
+    setScopedApprovals(null);
+    setScopedProjection(null);
+    setScopedError(null);
+    void Promise.all([
+      client.getProjectRunOverview(context.projectId, context.runId, controller.signal),
+      client.listApprovals(context.projectId, context.runId, controller.signal),
+    ]).then(([overview, records]) => {
+      if (!controller.signal.aborted) { setScopedProjection(overview.projection); setScopedApprovals(records); }
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setScopedError(error instanceof RuntimeClientError ? error : new RuntimeClientError(null, "RUNTIME_ERROR", error instanceof Error ? error.message : String(error), undefined, null));
+    });
+    return () => controller.abort();
+  }, [client, context?.projectId, context?.runId]);
   const nodeId = projection?.currentNodeIds.find(
     (candidate) => projection.nodeStates[candidate] === "AWAITING_APPROVAL",
   );
@@ -30,8 +57,21 @@ export function ApprovalInbox({ state, onDecide }: Props) {
       (action) => action.nodeId === nodeId && action.eventType === eventType,
     ));
 
+  async function decideScoped(decision: "approved" | "rejected" | "deferred") {
+    if (!context || !client?.decideApproval || !projection || !nodeId) return;
+    await client.decideApproval(context.projectId, context.runId, nodeId, decision, comment.trim(), projection.revision, new Date().toISOString());
+    const [overview, records] = await Promise.all([
+      client.getProjectRunOverview(context.projectId, context.runId),
+      client.listApprovals(context.projectId, context.runId),
+    ]);
+    setScopedProjection(overview.projection);
+    setScopedApprovals(records);
+  }
+
   return (
     <section id="approvals" className="panel page-workspace page-approvals" aria-labelledby="approvals-title">
+      {context ? <div className="button-row"><a className="quiet-button" href={buildRunDetailHash(context.runId)}>返回 Run</a></div> : null}
+      {scopedError ? <p role="alert" className="body-copy">{scopedError.message}</p> : null}
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Human Review</p>
@@ -65,21 +105,21 @@ export function ApprovalInbox({ state, onDecide }: Props) {
             <button
               className="quiet-button"
               disabled={!canDecide("HUMAN_APPROVED")}
-              onClick={() => onDecide?.(nodeId, "approved", comment.trim())}
+              onClick={() => context ? void decideScoped("approved") : onDecide?.(nodeId, "approved", comment.trim())}
             >
               批准
             </button>
             <button
               className="quiet-button"
               disabled={!canDecide("HUMAN_REJECTED")}
-              onClick={() => onDecide?.(nodeId, "rejected", comment.trim())}
+              onClick={() => context ? void decideScoped("rejected") : onDecide?.(nodeId, "rejected", comment.trim())}
             >
               拒绝
             </button>
             <button
               className="quiet-button"
               disabled={!canDecide("HUMAN_DEFERRED")}
-              onClick={() => onDecide?.(nodeId, "deferred", comment.trim())}
+              onClick={() => context ? void decideScoped("deferred") : onDecide?.(nodeId, "deferred", comment.trim())}
             >
               暂缓审批
             </button>

@@ -295,7 +295,34 @@ def test_runs_use_the_requested_project_binding_and_reject_versions_from_another
             now=NOW,
         )
 
+
+def test_scoped_run_children_reject_a_run_owned_by_another_project(tmp_path: Path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(db)
+    imported_one = service.import_project(copy_harness_project(tmp_path / "one"), now=NOW)
+    imported_two = service.import_project(copy_harness_project(tmp_path / "two"), now=NOW)
     run_one = service.create_run(imported_one["projectId"], title="one", now=NOW)
+
+    run_id = run_one.runId
+    project_one = imported_one["projectId"]
+    project_two = imported_two["projectId"]
+
+    assert service.get_scoped_run(project_one, run_id)["id"] == run_id
+    assert service.list_scoped_timeline(project_one, run_id)[0]["runId"] == run_id
+    assert service.list_scoped_agent_jobs(project_one, run_id) == []
+
+    for operation in (
+        lambda: service.get_scoped_run(project_two, run_id),
+        lambda: service.get_scoped_projection(project_two, run_id),
+        lambda: service.list_scoped_timeline(project_two, run_id),
+        lambda: service.list_scoped_agent_jobs(project_two, run_id),
+        lambda: service.get_scoped_recovery_diagnostics(project_two, run_id),
+    ):
+        with pytest.raises(RuntimeContractError) as error:
+            operation()
+        assert error.value.code == "RUN_NOT_FOUND_IN_PROJECT"
+
     run_two = service.create_run(imported_two["projectId"], title="two", now="2026-08-04T00:01:00Z")
     rows = db.execute("SELECT id, project_id FROM runs ORDER BY created_at").fetchall()
 
@@ -1921,6 +1948,7 @@ def test_runtime_service_injects_passed_upstream_artifacts_into_agent_prompt() -
             "promptTemplate": "审阅上游计划。",
             "context": {
                 "upstream": "direct",
+                "delivery": "summary",
                 "artifactTypes": ["plan"],
                 "maxArtifacts": 4,
                 "summaryCharsPerArtifact": 1000,

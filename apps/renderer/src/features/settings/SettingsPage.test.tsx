@@ -1,9 +1,31 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsPage } from "./SettingsPage";
 
+afterEach(cleanup);
+
 describe("SettingsPage", () => {
+  it("edits project concurrency within the supported one-to-ten range", async () => {
+    const onSaveProjectConcurrency = vi.fn().mockResolvedValue(undefined);
+    render(
+      <SettingsPage
+        apiBaseUrl="http://127.0.0.1:8765"
+        connection="connected"
+        onApiBaseUrlChange={vi.fn()}
+        onCheckConnection={vi.fn()}
+        projectConcurrency={{ maxActiveRuns: 3, maxActiveAgents: 2 }}
+        onSaveProjectConcurrency={onSaveProjectConcurrency}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("活动 Run 上限"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("每 Run 活动 Agent 上限"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并发限制" }));
+
+    expect(onSaveProjectConcurrency).toHaveBeenCalledWith({ maxActiveRuns: 5, maxActiveAgents: 4 });
+  });
+
   it("allows operators to update the Runtime address and trigger a connection check", () => {
     const onApiBaseUrlChange = vi.fn();
     const onCheckConnection = vi.fn();

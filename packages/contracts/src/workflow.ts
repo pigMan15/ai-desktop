@@ -33,6 +33,7 @@ export type NodeArtifactSpec = {
 
 export type AgentContextSpec = {
   upstream: "none" | "direct" | "ancestors";
+  delivery?: "path" | "hybrid" | "summary";
   artifactTypes?: string[];
   maxArtifacts: number;
   summaryCharsPerArtifact: number;

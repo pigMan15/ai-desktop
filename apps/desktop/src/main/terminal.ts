@@ -1,4 +1,5 @@
 import * as pty from "node-pty";
+import fs from "node:fs";
 import path from "node:path";
 
 export type TerminalKind = "shell" | "codex" | "claude";
@@ -15,6 +16,12 @@ export type TerminalSession = {
 export type TerminalOutput = {
   sequence: number;
   data: string;
+};
+
+export type TerminalLogExport = {
+  path: string;
+  firstSequence: number;
+  lastSequence: number;
 };
 
 export type TerminalCommandDecision =
@@ -37,6 +44,7 @@ export type TerminalCommandDecision =
     };
 
 export type TerminalCommandDecisionRecord = {
+  projectId: string;
   runId: string;
   runtimeSessionId: string;
   decision: "approved" | "rejected";
@@ -75,6 +83,7 @@ type ManagedSession = {
   projectRoot: string;
   pendingCommands: Map<string, PendingCommand>;
   runtimeBinding?: {
+    projectId: string;
     runId: string;
     runtimeSessionId: string;
   };
@@ -118,7 +127,8 @@ export class TerminalManager {
     const columns = options.columns ?? 80;
     const rows = options.rows ?? 24;
     const cwd = resolveProjectCwd(options.cwd, options.projectRoot);
-    const [command, args] = commandFor(options.kind, cwd, options.initialPrompt);
+    const [command, args] = commandFor(options.kind, cwd);
+    const initialPrompt = commandLinePrompt(options.initialPrompt);
     const process = this.spawnPty(command, args, {
       cwd,
       cols: columns,
@@ -136,6 +146,25 @@ export class TerminalManager {
     const output: TerminalOutput[] = [];
     const outputListeners = new Set<(event: TerminalOutput) => void>();
     let nextOutputSequence = 1;
+    let initialPromptSent = false;
+    let initialPromptTimer: ReturnType<typeof setTimeout> | undefined;
+    const sendInitialPrompt = () => {
+      initialPromptTimer = undefined;
+      if (initialPromptSent || options.kind === "shell" || !initialPrompt || !this.sessions.has(session.id)) {
+        return;
+      }
+      initialPromptSent = true;
+      process.write(`${initialPrompt}\r`);
+    };
+    const scheduleInitialPrompt = (delayMs: number) => {
+      if (initialPromptSent || options.kind === "shell" || !initialPrompt) {
+        return;
+      }
+      if (initialPromptTimer) {
+        clearTimeout(initialPromptTimer);
+      }
+      initialPromptTimer = setTimeout(sendInitialPrompt, delayMs);
+    };
     const disposable = process.onData((data) => {
       const event = { sequence: nextOutputSequence, data };
       output.push(event);
@@ -146,16 +175,23 @@ export class TerminalManager {
       for (const listener of outputListeners) {
         listener(event);
       }
+      scheduleInitialPrompt(250);
     });
     this.sessions.set(session.id, {
       session,
       process,
       output,
       outputListeners,
-      disposeOutput: () => disposable.dispose(),
+      disposeOutput: () => {
+        disposable.dispose();
+        if (initialPromptTimer) {
+          clearTimeout(initialPromptTimer);
+        }
+      },
       projectRoot: path.resolve(options.projectRoot),
       pendingCommands: new Map(),
     });
+    scheduleInitialPrompt(2_000);
     return { ...session };
   }
 
@@ -214,11 +250,11 @@ export class TerminalManager {
     managed.process.write(data);
   }
 
-  bindRuntimeSession(sessionId: string, runId: string, runtimeSessionId: string): void {
-    if (!runId.trim() || !runtimeSessionId.trim()) {
+  bindRuntimeSession(sessionId: string, projectId: string, runId: string, runtimeSessionId: string): void {
+    if (!projectId.trim() || !runId.trim() || !runtimeSessionId.trim()) {
       throw new Error("Runtime terminal session binding is required");
     }
-    this.get(sessionId).runtimeBinding = { runId, runtimeSessionId };
+    this.get(sessionId).runtimeBinding = { projectId, runId, runtimeSessionId };
   }
 
   async approveCommand(sessionId: string, approvalId: string): Promise<TerminalCommandDecision> {
@@ -271,6 +307,32 @@ export class TerminalManager {
     return this.get(sessionId).output.filter((event) => event.sequence > afterSequence);
   }
 
+  exportOutput(sessionId: string): TerminalLogExport {
+    const managed = this.get(sessionId);
+    if (managed.output.length === 0) {
+      throw new Error("Terminal session has no output");
+    }
+    const firstSequence = managed.output[0].sequence;
+    const lastSequence = managed.output.at(-1)!.sequence;
+    const projectRoot = path.resolve(managed.projectRoot);
+    const directory = path.resolve(projectRoot, ".workflow-platform", "terminal-logs");
+    const target = path.resolve(
+      directory,
+      `${managed.session.id}-${firstSequence}-${lastSequence}.log`,
+    );
+    const relative = path.relative(projectRoot, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Terminal log path must stay within project root");
+    }
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      target,
+      redactTerminalTranscript(managed.output.map((item) => item.data).join("")),
+      "utf8",
+    );
+    return { path: target, firstSequence, lastSequence };
+  }
+
   subscribeOutput(sessionId: string, listener: (event: TerminalOutput) => void): () => void {
     const managed = this.get(sessionId);
     managed.outputListeners.add(listener);
@@ -308,13 +370,11 @@ export class TerminalManager {
     decision: "approved" | "rejected",
     pendingCommand: PendingCommand,
   ): Promise<void> {
-    if (!this.recordCommandDecision) {
+    if (!this.recordCommandDecision || !managed.runtimeBinding) {
       return;
     }
-    if (!managed.runtimeBinding) {
-      throw new Error("Runtime 终端会话尚未绑定，不能执行危险命令。");
-    }
     await this.recordCommandDecision({
+      projectId: managed.runtimeBinding.projectId,
       runId: managed.runtimeBinding.runId,
       runtimeSessionId: managed.runtimeBinding.runtimeSessionId,
       decision,
@@ -325,8 +385,7 @@ export class TerminalManager {
   }
 }
 
-function commandFor(kind: TerminalKind, cwd: string, initialPrompt?: string): [string, string[]] {
-  const prompt = commandLinePrompt(initialPrompt);
+function commandFor(kind: TerminalKind, cwd: string): [string, string[]] {
   if (kind === "codex") {
     return [
       process.platform === "win32" ? "codex.cmd" : "codex",
@@ -337,16 +396,13 @@ function commandFor(kind: TerminalKind, cwd: string, initialPrompt?: string): [s
         "on-request",
         "--cd",
         cwd,
-        prompt ?? "",
-      ].filter(Boolean),
+      ],
     ];
   }
   if (kind === "claude") {
     return [
       process.platform === "win32" ? "claude.cmd" : "claude",
-      ["--ax-screen-reader", "--permission-mode", "acceptEdits", prompt ?? ""].filter(
-        Boolean,
-      ),
+      ["--ax-screen-reader", "--permission-mode", "acceptEdits"],
     ];
   }
   return [
@@ -578,4 +634,38 @@ function classifyCommandRisk(commandName: string, argumentsList: string[]): "nor
 function summarizeCommand(commandName: string, argumentsList: string[]): string {
   const visibleArguments = argumentsList.slice(0, 4).join(" ");
   return [commandName, visibleArguments].filter(Boolean).join(" ");
+}
+
+function redactTerminalTranscript(output: string): string {
+  let redacted = normalizeTerminalTranscript(output);
+  redacted = redacted.replace(
+    /(\b(?:[A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)|api[_-]?key|access[_-]?token|token|password|secret)\s*(?:=|:)\s*)[^\r\n\s&#]+/gi,
+    "$1[REDACTED]",
+  );
+  redacted = redacted.replace(
+    /^(\s*authorization\s*:\s*(?:bearer|basic)\s+)[^\r\n]+/gim,
+    "$1[REDACTED]",
+  );
+  redacted = redacted.replace(
+    /("(?:api[_-]?key|access[_-]?token|token|password|secret)"\s*:\s*")[^"]*(")/gi,
+    "$1[REDACTED]$2",
+  );
+  redacted = redacted.replace(
+    /([?&](?:api[_-]?key|access[_-]?token|token|password|secret)=)[^&#\s]+/gi,
+    "$1[REDACTED]",
+  );
+  redacted = redacted.replace(/\bbearer\s+[a-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
+  return redacted.replace(
+    /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g,
+    "[REDACTED]",
+  );
+}
+
+function normalizeTerminalTranscript(output: string): string {
+  return Array.from(output, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return character.length === 1 && codePoint >= 0xd800 && codePoint <= 0xdfff
+      ? "\ufffd"
+      : character;
+  }).join("");
 }

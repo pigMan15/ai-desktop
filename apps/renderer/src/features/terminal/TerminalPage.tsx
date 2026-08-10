@@ -2,8 +2,17 @@ import { useEffect, useRef, useState } from "react";
 
 import type { TerminalOutputEvent, TerminalSessionSummary } from "../../app/runtimeClient";
 import { TerminalViewport, type TerminalViewportOutput } from "./TerminalViewport";
+import {
+  filterTerminalRunOptions,
+  type TerminalRunOption,
+} from "./terminalRunModel";
 
 type TerminalKind = "shell" | "codex" | "claude";
+const EMPTY_HISTORY_SESSIONS: TerminalSessionSummary[] = [];
+
+export type { TerminalRunOption } from "./terminalRunModel";
+export type TerminalNodeOption = { id: string; name: string };
+type LegacyTerminalRunOption = { id: string; title: string };
 
 type TerminalSession = {
   id: string;
@@ -37,7 +46,12 @@ type TerminalBridge = {
     rows: number;
     initialPrompt?: string;
   }): Promise<TerminalSession>;
-  bindRuntimeSession(sessionId: string, runId: string, runtimeSessionId: string): Promise<void>;
+  bindRuntimeSession(sessionId: string, projectId: string, runId: string, runtimeSessionId: string): Promise<void>;
+  exportOutput(sessionId: string): Promise<{
+    path: string;
+    firstSequence: number;
+    lastSequence: number;
+  }>;
   requestCommand?(sessionId: string, command: string): Promise<TerminalCommandDecision>;
   submitShellLine?(sessionId: string, command: string): Promise<TerminalCommandDecision>;
   writeInput(sessionId: string, data: string): Promise<void>;
@@ -50,7 +64,14 @@ type TerminalBridge = {
 };
 
 type TerminalPageProps = {
+  projectId?: string;
   runId?: string | null;
+  runOptions?: Array<TerminalRunOption | LegacyTerminalRunOption>;
+  runOptionsLoading?: boolean;
+  runOptionsError?: string;
+  onRetryRunOptions?: () => void;
+  onLoadRunNodes?: (runId: string) => Promise<TerminalNodeOption[]>;
+  onLoadRunSessions?: (runId: string) => Promise<TerminalSessionSummary[]>;
   projectPath?: string;
   executionWorkspace?: string;
   nodeId?: string;
@@ -68,13 +89,20 @@ type TerminalPageProps = {
     stream: "stdout";
     data: string;
   }) => Promise<void>;
-  onExportEvidence?: (session: { runId: string; sessionId: string }) => Promise<void>;
+  onExportEvidence?: (session: { runId: string; sessionId: string }) => Promise<{ uri: string }>;
   historySessions?: TerminalSessionSummary[];
-  onLoadHistoryOutput?: (sessionId: string) => Promise<TerminalOutputEvent[]>;
+  onLoadHistoryOutput?: (runId: string, sessionId: string) => Promise<TerminalOutputEvent[]>;
 };
 
 export function TerminalPage({
+  projectId = "",
   runId = null,
+  runOptions = [],
+  runOptionsLoading = false,
+  runOptionsError = "",
+  onRetryRunOptions,
+  onLoadRunNodes,
+  onLoadRunSessions,
   projectPath = "",
   executionWorkspace = "",
   nodeId: initialNodeId = "",
@@ -82,12 +110,17 @@ export function TerminalPage({
   onStopSession,
   onAppendOutput,
   onExportEvidence,
-  historySessions = [],
+  historySessions = EMPTY_HISTORY_SESSIONS,
   onLoadHistoryOutput,
 }: TerminalPageProps) {
   const bridge = getTerminalBridge();
   const [projectRoot, setProjectRoot] = useState(executionWorkspace || projectPath);
-  const [nodeId, setNodeId] = useState(initialNodeId);
+  const [selectedRunId, setSelectedRunId] = useState(runId ?? "");
+  const [selectedNodeId, setSelectedNodeId] = useState(initialNodeId);
+  const [nodeOptions, setNodeOptions] = useState<TerminalNodeOption[]>(
+    initialNodeId ? [{ id: initialNodeId, name: initialNodeId }] : [],
+  );
+  const [binding, setBinding] = useState(false);
   const [kind, setKind] = useState<TerminalKind>("shell");
   const [initialPrompt, setInitialPrompt] = useState("");
   const [session, setSession] = useState<TerminalSession | null>(null);
@@ -98,17 +131,44 @@ export function TerminalPage({
   const [columns, setColumns] = useState(100);
   const [rows, setRows] = useState(30);
   const [historySessionId, setHistorySessionId] = useState("");
+  const [displayedHistorySessions, setDisplayedHistorySessions] = useState(historySessions);
+  const [runQuery, setRunQuery] = useState("");
+  const [showEndedRuns, setShowEndedRuns] = useState(false);
   const [message, setMessage] = useState(bridge ? "等待创建终端" : "桌面终端不可用");
+  const [exportStatus, setExportStatus] = useState("");
   const shellLineRef = useRef("");
   const lastResizedSessionRef = useRef<{ sessionId: string; columns: number; rows: number } | null>(null);
   const resizeInFlightRef = useRef(false);
+  const runLoadTokenRef = useRef(0);
   const latestSequence = output.reduce((latest, event) => Math.max(latest, event.sequence), 0);
+  const normalizedRunOptions = runOptions.map((candidate): TerminalRunOption => "status" in candidate
+    ? candidate
+    : {
+        ...candidate,
+        status: "CREATED",
+        workflowName: "",
+        workflowVersion: "",
+        createdAt: "",
+        bindable: true,
+      });
+  const selectedRun = normalizedRunOptions.find((candidate) => candidate.id === selectedRunId) ?? null;
+  const selectedRunBindable = !selectedRunId
+    || selectedRun?.bindable === true
+    || (selectedRunId === runId && !selectedRun);
+  const filteredRunOptions = filterTerminalRunOptions(normalizedRunOptions, runQuery, showEndedRuns);
+  const visibleRunOptions = selectedRun && !filteredRunOptions.some((candidate) => candidate.id === selectedRun.id)
+    ? [selectedRun, ...filteredRunOptions]
+    : filteredRunOptions;
   const selectedHistorySession =
-    historySessions.find((candidate) => candidate.id === historySessionId) ?? null;
+    displayedHistorySessions.find((candidate) => candidate.id === historySessionId) ?? null;
 
   useEffect(() => {
     if (!session) setProjectRoot(executionWorkspace || projectPath);
   }, [executionWorkspace, projectPath, session]);
+
+  useEffect(() => {
+    setDisplayedHistorySessions(historySessions);
+  }, [historySessions]);
 
   useEffect(() => {
     if (!bridge || !session) {
@@ -125,12 +185,12 @@ export function TerminalPage({
         }
         if (events.length > 0) {
           setOutput((current) => [...current, ...events].slice(-2_000));
-          if (runId && session.runtimeSessionId && onAppendOutput) {
+          if (selectedRunId && session.runtimeSessionId && onAppendOutput) {
             try {
               await Promise.all(
                 events.map((event) =>
                   onAppendOutput({
-                    runId,
+                    runId: selectedRunId,
                     sessionId: session.runtimeSessionId!,
                     stream: "stdout",
                     data: event.data,
@@ -160,14 +220,74 @@ export function TerminalPage({
         window.clearTimeout(timer);
       }
     };
-  }, [bridge, onAppendOutput, runId, session?.id, latestSequence]);
+  }, [bridge, onAppendOutput, selectedRunId, session?.id, session?.runtimeSessionId, latestSequence]);
+
+  async function selectRun(nextRunId: string) {
+    const loadToken = runLoadTokenRef.current + 1;
+    runLoadTokenRef.current = loadToken;
+    setSelectedRunId(nextRunId);
+    setSelectedNodeId("");
+    setNodeOptions([]);
+    setHistorySessionId("");
+    setDisplayedHistorySessions([]);
+    if (!nextRunId) {
+      return;
+    }
+    const nextRun = normalizedRunOptions.find((candidate) => candidate.id === nextRunId);
+    if (nextRun && !nextRun.bindable) {
+      setMessage("该 Run 已结束，仅支持查看终端历史");
+    }
+    try {
+      const [nodes, sessions] = await Promise.all([
+        onLoadRunNodes?.(nextRunId) ?? Promise.resolve([]),
+        onLoadRunSessions?.(nextRunId) ?? Promise.resolve([]),
+      ]);
+      if (runLoadTokenRef.current !== loadToken) {
+        return;
+      }
+      setNodeOptions(nodes);
+      setDisplayedHistorySessions(sessions);
+      if (nodes.length === 1 && (!nextRun || nextRun.bindable)) {
+        setSelectedNodeId(nodes[0].id);
+      }
+    } catch (error) {
+      if (runLoadTokenRef.current === loadToken) {
+        setMessage(`加载 Run 终端信息失败：${errorMessage(error)}`);
+      }
+    }
+  }
+
+  async function registerAndBind(nextSession: TerminalSession, existingOutput: TerminalViewportOutput[]) {
+    if (!selectedRunId || !selectedRunBindable || !selectedNodeId || !onRegisterSession || !bridge) {
+      return nextSession;
+    }
+    const registeredSession = await onRegisterSession({
+      runId: selectedRunId,
+      nodeId: selectedNodeId,
+      kind: nextSession.kind,
+      cwd: nextSession.cwd,
+      pid: nextSession.pid,
+    });
+    await bridge.bindRuntimeSession(nextSession.id, projectId, selectedRunId, registeredSession.id);
+    if (onAppendOutput) {
+      for (const event of existingOutput) {
+        await onAppendOutput({
+          runId: selectedRunId,
+          sessionId: registeredSession.id,
+          stream: "stdout",
+          data: event.data,
+        });
+      }
+    }
+    return { ...nextSession, runtimeSessionId: registeredSession.id };
+  }
 
   async function createTerminal() {
-    if (!bridge || !runId || !nodeId.trim() || !projectRoot.trim() || !onRegisterSession) {
+    if (!bridge || !projectRoot.trim()) {
       return;
     }
     try {
-      const nextSession = await bridge.create({
+      let nextSession = await bridge.create({
         kind,
         cwd: projectRoot.trim(),
         projectRoot: projectPath.trim() || projectRoot.trim(),
@@ -175,20 +295,7 @@ export function TerminalPage({
         rows,
         initialPrompt: initialPrompt.trim() || undefined,
       });
-      try {
-        const registeredSession = await onRegisterSession({
-          runId,
-          nodeId: nodeId.trim(),
-          kind: nextSession.kind,
-          cwd: nextSession.cwd,
-          pid: nextSession.pid,
-        });
-        nextSession.runtimeSessionId = registeredSession.id;
-        await bridge.bindRuntimeSession(nextSession.id, runId, registeredSession.id);
-      } catch (error) {
-        await bridge.stop(nextSession.id);
-        throw error;
-      }
+      nextSession = await registerAndBind(nextSession, []);
       setSession(nextSession);
       lastResizedSessionRef.current = {
         sessionId: nextSession.id,
@@ -208,12 +315,14 @@ export function TerminalPage({
 
   function selectHistorySession(sessionId: string) {
     setHistorySessionId(sessionId);
-    const historicalSession = historySessions.find((candidate) => candidate.id === sessionId);
+    const historicalSession = displayedHistorySessions.find((candidate) => candidate.id === sessionId);
     if (!historicalSession) {
       return;
     }
     setProjectRoot(historicalSession.cwd);
-    setNodeId(historicalSession.nodeId);
+    setSelectedRunId(historicalSession.runId);
+    setSelectedNodeId(historicalSession.nodeId);
+    setNodeOptions([{ id: historicalSession.nodeId, name: historicalSession.nodeId }]);
     setKind(historicalSession.kind as TerminalKind);
     setMessage(`已选择历史会话：${historicalSession.id}`);
   }
@@ -223,7 +332,10 @@ export function TerminalPage({
       return;
     }
     try {
-      const historyOutput = await onLoadHistoryOutput(selectedHistorySession.id);
+      const historyOutput = await onLoadHistoryOutput(
+        selectedHistorySession.runId,
+        selectedHistorySession.id,
+      );
       setSession(null);
       lastResizedSessionRef.current = null;
       setOutput(historyOutput.map(({ sequence, data }) => ({ sequence, data })));
@@ -246,22 +358,21 @@ export function TerminalPage({
       }
       return;
     }
-    if (data === "\r") {
-      const line = shellLineRef.current;
-      shellLineRef.current = "";
-      await submitShellLine(line);
-      return;
-    }
-    if (data === "\u0003") {
-      await interruptTerminal();
-      return;
-    }
-    if (data === "\u007f") {
-      shellLineRef.current = shellLineRef.current.slice(0, -1);
-      return;
-    }
-    if (!/[\r\n\u0000-\u001f\u007f]/.test(data)) {
-      shellLineRef.current += data;
+    const normalizedInput = stripTerminalControlSequences(data)
+      .replace(/\r\n/g, "\r")
+      .replace(/\n/g, "\r");
+    for (const character of normalizedInput) {
+      if (character === "\r") {
+        const line = shellLineRef.current;
+        shellLineRef.current = "";
+        await submitShellLine(line);
+      } else if (character === "\u0003") {
+        await interruptTerminal();
+      } else if (character === "\u007f") {
+        shellLineRef.current = shellLineRef.current.slice(0, -1);
+      } else if (!/[\u0000-\u001f]/.test(character)) {
+        shellLineRef.current += character;
+      }
     }
   }
 
@@ -340,8 +451,8 @@ export function TerminalPage({
     }
     try {
       await bridge.stop(session.id);
-      if (runId && session.runtimeSessionId && onStopSession) {
-        await onStopSession({ runId, sessionId: session.runtimeSessionId });
+      if (selectedRunId && session.runtimeSessionId && onStopSession) {
+        await onStopSession({ runId: selectedRunId, sessionId: session.runtimeSessionId });
       }
       setSession(null);
       shellLineRef.current = "";
@@ -406,14 +517,47 @@ export function TerminalPage({
   }
 
   async function exportEvidence() {
-    if (!session?.runtimeSessionId || !runId || !onExportEvidence) {
+    if (!session) {
+      return;
+    }
+    if (output.length === 0) {
+      setExportStatus("终端暂无可导出的输出");
       return;
     }
     try {
-      await onExportEvidence({ runId, sessionId: session.runtimeSessionId });
-      setMessage("已生成 Evidence");
+      if (session.runtimeSessionId && selectedRunId && onExportEvidence) {
+        const artifact = await onExportEvidence({ runId: selectedRunId, sessionId: session.runtimeSessionId });
+        setExportStatus(artifact.uri);
+        setMessage("已生成 Evidence");
+      } else {
+        const exported = await bridge!.exportOutput(session.id);
+        setExportStatus(exported.path);
+        setMessage("终端日志已导出");
+      }
     } catch (error) {
-      setMessage(`导出 Evidence 失败：${errorMessage(error)}`);
+      const detail = `导出失败：${errorMessage(error)}`;
+      setExportStatus(detail);
+      setMessage(detail);
+    }
+  }
+
+  async function bindCurrentSession() {
+    if (!session || session.runtimeSessionId || binding) {
+      return;
+    }
+    setBinding(true);
+    try {
+      const boundSession = await registerAndBind(session, output);
+      if (!boundSession.runtimeSessionId) {
+        setMessage("请选择 Run 和绑定节点");
+        return;
+      }
+      setSession(boundSession);
+      setMessage("已绑定到 Run");
+    } catch (error) {
+      setMessage(`绑定 Run 失败：${errorMessage(error)}`);
+    } finally {
+      setBinding(false);
     }
   }
 
@@ -426,7 +570,51 @@ export function TerminalPage({
         </div>
         <span className="status-pill">{message}</span>
       </div>
+      {runOptionsError ? (
+        <div role="alert" className="button-row">
+          <span>{runOptionsError}</span>
+          {onRetryRunOptions ? (
+            <button className="quiet-button" onClick={onRetryRunOptions}>重新加载 Run</button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="form-grid">
+        <label>
+          搜索 Run
+          <input
+            value={runQuery}
+            onChange={(event) => setRunQuery(event.target.value)}
+            placeholder="输入 Run 名称或 ID"
+          />
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showEndedRuns}
+            onChange={(event) => setShowEndedRuns(event.target.checked)}
+          />
+          显示已结束 Run
+        </label>
+        <label>
+          关联 Run
+          <select
+            value={selectedRunId}
+            onChange={(event) => void selectRun(event.target.value)}
+            disabled={runOptionsLoading || binding || Boolean(session?.runtimeSessionId)}
+          >
+            <option value="">不关联 Run</option>
+            {visibleRunOptions.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.workflowName
+                  ? `${candidate.title} · ${candidate.status} · ${candidate.workflowName} ${candidate.workflowVersion} · ${candidate.createdAt}`
+                  : candidate.title}
+              </option>
+            ))}
+            {selectedRunId && !normalizedRunOptions.some((candidate) => candidate.id === selectedRunId) ? (
+              <option value={selectedRunId}>{selectedRunId}</option>
+            ) : null}
+          </select>
+        </label>
         <label>
           历史终端会话
           <select
@@ -435,7 +623,7 @@ export function TerminalPage({
             disabled={Boolean(session)}
           >
             <option value="">选择已持久化的会话</option>
-            {historySessions.map((candidate) => (
+            {displayedHistorySessions.map((candidate) => (
               <option key={candidate.id} value={candidate.id}>
                 {candidate.nodeId} / {candidate.kind} / {candidate.status} / {candidate.createdAt}
               </option>
@@ -452,12 +640,16 @@ export function TerminalPage({
         </label>
         <label>
           绑定节点
-          <input
-            value={nodeId}
-            onChange={(event) => setNodeId(event.target.value)}
-            placeholder="例如 plan"
-            disabled={Boolean(session)}
-          />
+          <select
+            value={selectedNodeId}
+            onChange={(event) => setSelectedNodeId(event.target.value)}
+            disabled={binding || Boolean(session?.runtimeSessionId) || !selectedRunId || !selectedRunBindable}
+          >
+            <option value="">选择节点</option>
+            {nodeOptions.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>{candidate.name}</option>
+            ))}
+          </select>
         </label>
         <label>
           终端类型
@@ -506,14 +698,14 @@ export function TerminalPage({
         </button>
         <button
           className="quiet-button"
-          disabled={!bridge || !runId || !selectedHistorySession || !onRegisterSession}
+          disabled={!bridge || !selectedRunId || !selectedRunBindable || !selectedNodeId || !selectedHistorySession || !onRegisterSession}
           onClick={createTerminal}
         >
           基于此会话新建终端
         </button>
         <button
           className="quiet-button"
-          disabled={!bridge || !runId || !nodeId.trim() || !projectRoot.trim() || !onRegisterSession}
+          disabled={!bridge || !projectRoot.trim() || Boolean(selectedRunId && (!selectedRunBindable || !selectedNodeId))}
           onClick={createTerminal}
         >
           创建终端
@@ -527,13 +719,23 @@ export function TerminalPage({
         <button className="quiet-button" disabled={!session} onClick={resizeTerminal}>
           应用尺寸
         </button>
+        {session && !session.runtimeSessionId && selectedRunBindable ? (
+          <button
+            className="quiet-button"
+            disabled={binding || !selectedRunId || !selectedNodeId || !onRegisterSession}
+            onClick={bindCurrentSession}
+          >
+            绑定到 Run
+          </button>
+        ) : null}
         <button
           className="quiet-button"
-          disabled={!session || output.length === 0 || !runId || !onExportEvidence}
+          disabled={!session}
           onClick={exportEvidence}
         >
-          转为 Evidence
+          {session?.runtimeSessionId ? "导出终端证据" : "导出终端日志"}
         </button>
+        {exportStatus ? <p role="status">{exportStatus}</p> : null}
       </div>
       <TerminalViewport
         ariaLabel="ANSI 终端"
@@ -573,4 +775,11 @@ function getTerminalBridge(): TerminalBridge | null {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function stripTerminalControlSequences(data: string): string {
+  return data
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001bO./g, "")
+    .replace(/\u001b./g, "");
 }

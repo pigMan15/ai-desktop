@@ -1,17 +1,44 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { AuditRecord } from "../../app/runtimeClient";
+import { RuntimeClientError, type AuditRecord } from "../../app/runtimeClient";
+import { buildRunDetailHash, type RunContext } from "../../app/routes";
 
 type Props = {
-  records: AuditRecord[];
-  onFilter: (action: string) => void;
+  context?: RunContext;
+  client?: { listRunAuditRecords: (projectId: string, runId: string, action?: string, signal?: AbortSignal) => Promise<AuditRecord[]> };
+  records?: AuditRecord[];
+  onFilter?: (action: string) => void;
 };
 
-export function AuditPage({ records, onFilter }: Props) {
+export function AuditPage({ context, client, records: providedRecords = [], onFilter }: Props) {
   const [action, setAction] = useState("");
+  const [appliedAction, setAppliedAction] = useState("");
+  const [scopedRecords, setScopedRecords] = useState<AuditRecord[] | null>(null);
+  const [error, setError] = useState<RuntimeClientError | null>(null);
+  const records = scopedRecords ?? providedRecords;
+
+  useEffect(() => {
+    if (!context || !client) return;
+    const controller = new AbortController();
+    setError(null);
+    void client.listRunAuditRecords(context.projectId, context.runId, appliedAction, controller.signal)
+      .then((items) => { if (!controller.signal.aborted) setScopedRecords(items); })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) setError(failure instanceof RuntimeClientError ? failure : new RuntimeClientError(null, "RUNTIME_ERROR", failure instanceof Error ? failure.message : String(failure), undefined, null));
+      });
+    return () => controller.abort();
+  }, [appliedAction, client, context?.projectId, context?.runId]);
+
+  function applyFilter() {
+    const next = action.trim();
+    if (context && client) setAppliedAction(next);
+    else onFilter?.(next);
+  }
 
   return (
     <section id="audit" className="panel page-workspace page-audit" aria-labelledby="audit-title">
+      {context ? <div className="button-row"><a className="quiet-button" href={buildRunDetailHash(context.runId)}>返回 Run</a></div> : null}
+      {error ? <p role="alert" className="body-copy">{error.message}</p> : null}
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Governance</p>
@@ -26,7 +53,7 @@ export function AuditPage({ records, onFilter }: Props) {
         </label>
       </div>
       <div className="button-row">
-        <button className="quiet-button" onClick={() => onFilter(action.trim())}>
+        <button className="quiet-button" onClick={applyFilter}>
           查询审计
         </button>
       </div>

@@ -41,6 +41,19 @@ class ArchiveProjectRequest(BaseModel):
     now: str
 
 
+class ProjectConcurrencyRequest(BaseModel):
+    maxActiveRuns: int = Field(ge=1, le=10)
+    maxActiveAgents: int = Field(ge=1, le=10)
+    actor: dict[str, Any]
+    now: str
+
+
+class CreateProjectWorktreeRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    branchName: str = Field(min_length=1, max_length=120)
+    baseRef: str = "HEAD"
+
+
 class ScopedCreateRunRequest(BaseModel):
     workflowVersionId: str
     title: str = Field(min_length=1, max_length=120)
@@ -112,6 +125,7 @@ class SubmitArtifactRequest(BaseModel):
     artifactPath: str
     artifactType: str
     artifactSpecId: str | None = None
+    artifactStatus: str = "verified"
     actor: dict[str, Any]
     expectedRevision: str
     now: str
@@ -364,6 +378,35 @@ def create_app(
         request: Request, error: RuntimeContractError
     ) -> JSONResponse:
         return runtime_contract_response(request, error)
+
+    @application.exception_handler(KeyError)
+    async def key_error_handler(request: Request, error: KeyError) -> JSONResponse:
+        return runtime_contract_response(
+            request,
+            RuntimeContractError(
+                "RESOURCE_NOT_FOUND",
+                str(error),
+                status=404,
+            ),
+        )
+
+    @application.exception_handler(ValueError)
+    async def value_error_handler(request: Request, error: ValueError) -> JSONResponse:
+        code = str(error).split(":", 1)[0]
+        status_by_code = {
+            "REVISION_CONFLICT": 409,
+            "PERMISSION_DENIED": 403,
+            "ACTOR_NOT_TRUSTED": 403,
+            "PROJECT_ARCHIVED": 409,
+        }
+        return runtime_contract_response(
+            request,
+            RuntimeContractError(
+                code,
+                str(error),
+                status=status_by_code.get(code, 400),
+            ),
+        )
 
     @application.middleware("http")
     async def require_local_runtime_token(request: Request, call_next: Callable):
@@ -653,6 +696,46 @@ def create_app(
         service = _require_service(runtime_service)
         try:
             return service.archive_project(project_id, actor=request.actor, now=request.now)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/projects/{project_id}/concurrency")
+    def get_project_concurrency(project_id: str) -> dict[str, int]:
+        try:
+            return _require_service(runtime_service).get_project_concurrency(project_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.put("/projects/{project_id}/concurrency")
+    def update_project_concurrency(project_id: str, request: ProjectConcurrencyRequest) -> dict[str, int]:
+        try:
+            return _require_service(runtime_service).update_project_concurrency(
+                project_id,
+                max_active_runs=request.maxActiveRuns,
+                max_active_agents=request.maxActiveAgents,
+                actor=request.actor,
+                now=request.now,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise _http_error_from_value_error(error) from error
+
+    @application.get("/projects/{project_id}/workspaces")
+    def list_project_workspaces(project_id: str) -> list[dict[str, Any]]:
+        try:
+            return _require_service(runtime_service).list_project_workspaces(project_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @application.post("/projects/{project_id}/worktrees", status_code=201)
+    def create_project_worktree(project_id: str, request: CreateProjectWorktreeRequest) -> dict[str, Any]:
+        try:
+            return _require_service(runtime_service).create_project_worktree(
+                project_id, name=request.name, branch_name=request.branchName, base_ref=request.baseRef,
+            )
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
@@ -1030,697 +1113,236 @@ def create_app(
             now=request.now,
         )
 
-    @application.post("/runs/{run_id}/artifacts")
-    def submit_artifact(run_id: str, request: SubmitArtifactRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
+    @application.get("/projects/{project_id}/runs/{run_id}/agents")
+    def list_project_agent_jobs(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_agent_jobs(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/agents/{job_id}")
+    def get_project_agent_job(project_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_agent_job(project_id, run_id, job_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/agents/{job_id}/output")
+    def list_project_agent_output(project_id: str, run_id: str, job_id: str, afterSequence: int = 0) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_agent_output(project_id, run_id, job_id, after_sequence=afterSequence)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/cancel")
+    def cancel_project_agent_job(project_id: str, run_id: str, job_id: str, request: CancelAgentJobRequest | None = Body(default=None)) -> dict[str, Any]:
+        return _require_service(runtime_service).cancel_scoped_agent_job(
+            project_id, run_id, job_id,
+            actor=request.actor if request is not None else None,
+            now=request.now if request is not None else None,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session/start")
+    def start_project_interactive_agent_session(project_id: str, run_id: str, job_id: str, request: StartInteractiveAgentSessionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).start_scoped_interactive_agent_session(
+            project_id, run_id, job_id, desktop_session_id=request.desktopSessionId,
+            pid=request.pid, actor=request.actor, now=request.now,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session/input")
+    def record_project_interactive_agent_input(project_id: str, run_id: str, job_id: str, request: InteractiveAgentInputRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).record_scoped_interactive_agent_input(
+            project_id, run_id, job_id, content=request.content, actor=request.actor, now=request.now,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session/output")
+    def append_project_interactive_agent_output(project_id: str, run_id: str, job_id: str, request: InteractiveAgentOutputRequest) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).append_scoped_interactive_agent_output(
+            project_id, run_id, job_id, events=request.events, now=request.now,
+        )
+
+    @application.get("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session")
+    def get_project_interactive_agent_session(project_id: str, run_id: str, job_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_interactive_agent_session(project_id, run_id, job_id)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session/ended")
+    def finish_project_interactive_agent_session(project_id: str, run_id: str, job_id: str, request: FinishInteractiveAgentSessionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).finish_scoped_interactive_agent_session(
+            project_id, run_id, job_id, status=request.status, summary=request.summary,
+            error=request.error, actor=request.actor, now=request.now,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/interactive-session/continue")
+    def continue_project_interactive_agent_session(project_id: str, run_id: str, job_id: str, request: ContinueInteractiveAgentSessionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).continue_scoped_interactive_agent(
+            project_id, run_id, job_id, actor=request.actor, now=request.now,
+        )
+
+    @application.get("/projects/{project_id}/runs/{run_id}/agent-checkpoints")
+    def list_project_agent_checkpoints(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_agent_checkpoints(project_id, run_id)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agent-checkpoints/{checkpoint_id}/resume")
+    def resume_project_agent_checkpoint(project_id: str, run_id: str, checkpoint_id: str, request: ResumeAgentCheckpointRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).resume_scoped_agent_checkpoint(
+            project_id, run_id, checkpoint_id, actor=request.actor, now=request.now,
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/agent-checkpoints/{checkpoint_id}/discard")
+    def discard_project_agent_checkpoint(project_id: str, run_id: str, checkpoint_id: str, request: ResumeAgentCheckpointRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).discard_scoped_agent_checkpoint(
+            project_id, run_id, checkpoint_id, actor=request.actor, now=request.now,
+        )
+
+    @application.get("/projects/{project_id}/runs/{run_id}/terminals")
+    def list_project_terminal_sessions(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_terminal_sessions(project_id, run_id)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/terminals/{session_id}/stop")
+    def stop_project_terminal_session(project_id: str, run_id: str, session_id: str, request: StopTerminalSessionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).stop_scoped_terminal_session(project_id, run_id, session_id, now=request.now)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/terminals/{session_id}/output")
+    def list_project_terminal_output(project_id: str, run_id: str, session_id: str, afterSequence: int = 0) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_terminal_output(project_id, run_id, session_id, after_sequence=afterSequence)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/terminals/{session_id}/output")
+    def append_project_terminal_output(project_id: str, run_id: str, session_id: str, request: AppendTerminalOutputRequest) -> dict[str, bool]:
+        _require_service(runtime_service).append_scoped_terminal_output(project_id, run_id, session_id, stream=request.stream, data=request.data, now=request.now)
+        return {"accepted": True}
+
+    @application.post("/projects/{project_id}/runs/{run_id}/terminals/{session_id}/evidence")
+    def export_project_terminal_evidence(project_id: str, run_id: str, session_id: str, request: ExportTerminalEvidenceRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).export_scoped_terminal_evidence(project_id, run_id, session_id, actor=request.actor, now=request.now)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/terminals/{session_id}/command-decisions")
+    def record_project_terminal_command_decision(project_id: str, run_id: str, session_id: str, request: TerminalCommandDecisionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).record_scoped_terminal_command_decision(
+            project_id, run_id, session_id, decision=request.decision, risk_level=request.riskLevel,
+            command_summary=request.commandSummary, impact=request.impact, actor=request.actor, now=request.now,
+        )
+
+    @application.get("/projects/{project_id}/runs/{run_id}/deployments")
+    def list_project_deployments(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_deployments(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/deployments/{deployment_id}")
+    def get_project_deployment(project_id: str, run_id: str, deployment_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_deployment(project_id, run_id, deployment_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/deployments/{deployment_id}/output")
+    def list_project_deployment_output(project_id: str, run_id: str, deployment_id: str, afterSequence: int = 0) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_deployment_output(project_id, run_id, deployment_id, after_sequence=afterSequence)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/deployments/{deployment_id}/cancel")
+    def cancel_project_deployment(project_id: str, run_id: str, deployment_id: str, request: CancelDeploymentRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).cancel_scoped_deployment(project_id, run_id, deployment_id, actor=request.actor, now=request.now)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/recovery-diagnostics")
+    def get_project_recovery_diagnostics(project_id: str, run_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_recovery_diagnostics(project_id, run_id)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/recovery/cleanup-orphan-agents")
+    def cleanup_project_orphan_agents(project_id: str, run_id: str, request: CleanupOrphanAgentsRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).cleanup_scoped_orphan_agent_jobs(
+            project_id, run_id, now=request.now
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/recovery/cleanup-orphan-terminals")
+    def cleanup_project_orphan_terminals(project_id: str, run_id: str, request: CleanupOrphanAgentsRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).cleanup_scoped_orphan_terminal_sessions(
+            project_id, run_id, now=request.now
+        )
+
+    @application.post("/projects/{project_id}/runs/{run_id}/rebuild-projection")
+    def rebuild_project_projection(project_id: str, run_id: str, request: RebuildProjectionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).rebuild_scoped_projection(project_id, run_id, now=request.now).model_dump()
+
+    @application.get("/projects/{project_id}/runs/{run_id}/timeline")
+    def get_project_timeline(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_timeline(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/artifacts")
+    def get_project_artifacts(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_artifacts(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/approvals")
+    def get_project_approvals(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_approvals(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/gates")
+    def get_project_gates(project_id: str, run_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_gates(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/audit-records")
+    def get_project_audit_records(
+        project_id: str,
+        run_id: str,
+        action: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_audit_records(
+            project_id,
+            run_id,
+            action=action,
+            limit=limit,
+        )
+
+    @application.get("/projects/{project_id}/runs/{run_id}/artifacts/{artifact_id}/consumers")
+    def get_project_artifact_consumers(project_id: str, run_id: str, artifact_id: str) -> list[dict[str, Any]]:
+        return _require_service(runtime_service).list_scoped_artifact_consumers(project_id, run_id, artifact_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/artifacts/{artifact_id}/preview")
+    def preview_project_artifact(project_id: str, run_id: str, artifact_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).preview_scoped_artifact(project_id, run_id, artifact_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/evidence-package")
+    def get_project_evidence_package(project_id: str, run_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_evidence_package(project_id, run_id)
+
+    @application.get("/projects/{project_id}/runs/{run_id}/report")
+    def get_project_run_report(project_id: str, run_id: str) -> dict[str, Any]:
+        return _require_service(runtime_service).get_scoped_run_report(project_id, run_id)
+
+    @application.post("/projects/{project_id}/runs/{run_id}/artifacts")
+    def submit_project_artifact(project_id: str, run_id: str, request: SubmitArtifactRequest) -> dict[str, Any]:
         try:
-            projection = service.submit_artifact(
-                run_id,
-                node_id=request.nodeId,
-                artifact_path=Path(request.artifactPath),
-                artifact_type=request.artifactType,
-                artifact_spec_id=request.artifactSpecId,
-                actor=request.actor,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-            return projection.model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            return _require_service(runtime_service).submit_scoped_artifact(
+                project_id, run_id, node_id=request.nodeId, artifact_path=Path(request.artifactPath), artifact_type=request.artifactType,
+                artifact_spec_id=request.artifactSpecId, artifact_status=request.artifactStatus, actor=request.actor,
+                expected_revision=request.expectedRevision, now=request.now,
+            ).model_dump()
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise _http_error_from_value_error(error) from error
-        except sqlite3.IntegrityError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
 
-    @application.post("/runs/{run_id}/nodes/{node_id}/artifacts/scan")
-    def scan_node_artifacts(
-        run_id: str,
-        node_id: str,
-        request: ScanNodeArtifactsRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            result = service.scan_node_artifacts(
-                run_id,
-                node_id=node_id,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-            return {
-                **result,
-                "projection": result["projection"].model_dump(),
-            }
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-        except sqlite3.IntegrityError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+    @application.post("/projects/{project_id}/runs/{run_id}/nodes/{node_id}/artifacts/scan")
+    def scan_project_node_artifacts(project_id: str, run_id: str, node_id: str, request: ScanNodeArtifactsRequest) -> dict[str, Any]:
+        result = _require_service(runtime_service).scan_scoped_node_artifacts(project_id, run_id, node_id=node_id, expected_revision=request.expectedRevision, now=request.now)
+        return {**result, "projection": result["projection"].model_dump() if hasattr(result.get("projection"), "model_dump") else result.get("projection")}
 
-    @application.get("/runs/{run_id}/timeline")
-    def get_timeline(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.timeline(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+    @application.get("/projects/{project_id}/runs/{run_id}/nodes/{node_id}/artifact-requirements")
+    def get_project_node_artifact_requirements(project_id: str, run_id: str, node_id: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return _require_service(runtime_service).get_scoped_node_artifact_requirements(
+            project_id, run_id, node_id, now=now,
+        )
 
-    @application.get("/runs/{run_id}/artifacts")
-    def get_artifacts(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_artifacts(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+    @application.post("/projects/{project_id}/runs/{run_id}/artifacts/knowledge-syntheses")
+    def extract_project_artifact_knowledge_syntheses(project_id: str, run_id: str, request: ExtractArtifactKnowledgeSynthesisRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).extract_scoped_artifacts_to_knowledge_syntheses(
+            project_id, run_id, artifact_ids=request.artifactIds, provider=request.provider,
+            actor=request.actor, now=request.now,
+        )
 
-    @application.post("/runs/{run_id}/artifacts/knowledge-syntheses")
-    def extract_artifacts_to_knowledge_syntheses(
-        run_id: str,
-        request: ExtractArtifactKnowledgeSynthesisRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.extract_artifacts_to_knowledge_syntheses(
-                run_id,
-                artifact_ids=request.artifactIds,
-                provider=request.provider,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
+    @application.post("/projects/{project_id}/runs/{run_id}/nodes/{node_id}/complete")
+    def complete_project_node(project_id: str, run_id: str, node_id: str, request: CompleteNodeRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).complete_scoped_node(project_id, run_id, node_id=node_id, actor=request.actor, expected_revision=request.expectedRevision, now=request.now).model_dump()
 
-    @application.get("/runs/{run_id}/artifacts/{artifact_id}/consumers")
-    def get_artifact_consumers(run_id: str, artifact_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_artifact_consumers(run_id, artifact_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+    @application.post("/projects/{project_id}/runs/{run_id}/nodes/{node_id}/artifacts/{artifact_id}/confirm")
+    def confirm_project_artifact(project_id: str, run_id: str, node_id: str, artifact_id: str, request: ConfirmArtifactRequest) -> dict[str, Any]:
+        result = _require_service(runtime_service).confirm_scoped_artifact(project_id, run_id, node_id=node_id, artifact_id=artifact_id, actor=request.actor, expected_revision=request.expectedRevision, now=request.now)
+        return {**result, "projection": result["projection"].model_dump() if hasattr(result.get("projection"), "model_dump") else result.get("projection")}
 
-    @application.get("/runs/{run_id}/nodes/{node_id}/artifact-requirements")
-    def get_node_artifact_requirements(run_id: str, node_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_node_artifact_requirements(
-                run_id, node_id=node_id, now=datetime.now(timezone.utc).isoformat()
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
+    @application.post("/projects/{project_id}/runs/{run_id}/approvals/{node_id}/decide")
+    def decide_project_approval(project_id: str, run_id: str, node_id: str, request: ApprovalDecisionRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).decide_scoped_approval(project_id, run_id, node_id=node_id, decision=request.decision, actor=request.actor, comment=request.comment, expected_revision=request.expectedRevision, now=request.now).model_dump()
 
-    @application.get("/runs/{run_id}/nodes/{node_id}/context")
-    def get_node_context(run_id: str, node_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_node_context(run_id, node_id=node_id, now=datetime.now(timezone.utc).isoformat())
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/nodes/{node_id}/complete")
-    def complete_node(run_id: str, node_id: str, request: CompleteNodeRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.complete_node(
-                run_id,
-                node_id=node_id,
-                actor=request.actor,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            ).model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/nodes/{node_id}/artifacts/{artifact_id}/confirm")
-    def confirm_artifact(run_id: str, node_id: str, artifact_id: str, request: ConfirmArtifactRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.confirm_artifact(
-                run_id,
-                node_id=node_id,
-                artifact_id=artifact_id,
-                actor=request.actor,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/artifacts/{artifact_id}/preview")
-    def preview_artifact(run_id: str, artifact_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.preview_artifact(run_id, artifact_id)
-        except (KeyError, FileNotFoundError) as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/evidence-package")
-    def get_evidence_package(run_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_evidence_package(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/report")
-    def get_run_report(run_id: str) -> dict[str, str]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_run_report(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/approvals")
-    def get_approvals(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_approvals(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/approvals/{node_id}/decide")
-    def decide_approval(
-        run_id: str,
-        node_id: str,
-        request: ApprovalDecisionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            projection = service.decide_approval(
-                run_id,
-                node_id=node_id,
-                decision=request.decision,
-                actor=request.actor,
-                comment=request.comment,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-            return projection.model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/gates")
-    def get_gates(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_gate_results(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/gates")
-    def submit_gate_result(run_id: str, request: GateResultRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            projection = service.submit_gate_result(
-                run_id,
-                node_id=request.nodeId,
-                gate_id=request.gateId,
-                status=request.status,
-                evidence=request.evidence,
-                waiver_reason=request.waiverReason,
-                failure_reason=request.failureReason,
-                actor=request.actor,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-            return projection.model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/terminals")
-    def register_terminal_session(
-        run_id: str,
-        request: RegisterTerminalSessionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.register_terminal_session(
-                run_id,
-                node_id=request.nodeId,
-                kind=request.kind,
-                cwd=Path(request.cwd),
-                pid=request.pid,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/terminals")
-    def list_terminal_sessions(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_terminal_sessions(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/terminals/{session_id}/stop")
-    def stop_terminal_session(
-        run_id: str,
-        session_id: str,
-        request: StopTerminalSessionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.stop_terminal_session(run_id, session_id, now=request.now)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/terminals/{session_id}/command-decisions")
-    def record_terminal_command_decision(
-        run_id: str,
-        session_id: str,
-        request: TerminalCommandDecisionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.record_terminal_command_decision(
-                run_id,
-                session_id,
-                decision=request.decision,
-                risk_level=request.riskLevel,
-                command_summary=request.commandSummary,
-                impact=request.impact,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/terminals/{session_id}/output")
-    def append_terminal_output(
-        run_id: str,
-        session_id: str,
-        request: AppendTerminalOutputRequest,
-    ) -> dict[str, bool]:
-        service = _require_service(runtime_service)
-        try:
-            service.append_terminal_output(
-                run_id,
-                session_id,
-                stream=request.stream,
-                data=request.data,
-                now=request.now,
-            )
-            return {"accepted": True}
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/terminals/{session_id}/output")
-    def list_terminal_output(
-        run_id: str,
-        session_id: str,
-        afterSequence: int = 0,
-    ) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_terminal_output(
-                run_id,
-                session_id,
-                after_sequence=afterSequence,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/terminals/{session_id}/evidence")
-    def export_terminal_output_as_evidence(
-        run_id: str,
-        session_id: str,
-        request: ExportTerminalEvidenceRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.export_terminal_output_as_evidence(
-                run_id,
-                session_id,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/rebuild-projection")
-    def rebuild_run_projection(
-        run_id: str,
-        request: RebuildProjectionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.rebuild_projection(run_id, now=request.now).model_dump()
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/recovery-diagnostics")
-    def get_recovery_diagnostics(run_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_recovery_diagnostics(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/recovery/cleanup-orphan-agents")
-    def cleanup_orphan_agents(
-        run_id: str,
-        request: CleanupOrphanAgentsRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.cleanup_orphan_agent_jobs(run_id, now=request.now)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/recovery/cleanup-orphan-terminals")
-    def cleanup_orphan_terminals(
-        run_id: str,
-        request: CleanupOrphanAgentsRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.cleanup_orphan_terminal_sessions(run_id, now=request.now)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/agents")
-    def start_agent_job(run_id: str, request: StartAgentJobRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.start_agent_job(
-                run_id,
-                node_id=request.nodeId,
-                provider=request.provider,
-                prompt=request.prompt,
-                cwd=request.cwd,
-                actor=request.actor,
-                allowed_tools=request.allowedTools,
-                timeout_seconds=request.timeoutSeconds,
-                max_output_bytes=request.maxOutputBytes,
-                mode=request.mode,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/deployments")
-    def start_deployment(run_id: str, request: StartDeploymentRequest) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.start_deployment(
-                run_id,
-                node_id=request.nodeId,
-                actor=request.actor,
-                expected_revision=request.expectedRevision,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/deployments")
-    def list_deployments(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_deployments(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/deployments/{deployment_id}")
-    def get_deployment(run_id: str, deployment_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_deployment(run_id, deployment_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/deployments/{deployment_id}/output")
-    def list_deployment_output(
-        run_id: str,
-        deployment_id: str,
-        afterSequence: int = 0,
-    ) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_deployment_output(
-                run_id,
-                deployment_id,
-                after_sequence=afterSequence,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/deployments/{deployment_id}/cancel")
-    def cancel_deployment(
-        run_id: str,
-        deployment_id: str,
-        request: CancelDeploymentRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.cancel_deployment(
-                run_id,
-                deployment_id,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/agents")
-    def list_agent_jobs(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_agent_jobs(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/agent-checkpoints")
-    def list_agent_checkpoints(run_id: str) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.list_agent_checkpoints(run_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.post("/runs/{run_id}/agent-checkpoints/{checkpoint_id}/resume")
-    def resume_agent_checkpoint(
-        run_id: str,
-        checkpoint_id: str,
-        request: ResumeAgentCheckpointRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.resume_agent_checkpoint(
-                run_id,
-                checkpoint_id,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agent-checkpoints/{checkpoint_id}/discard")
-    def discard_agent_checkpoint(
-        run_id: str,
-        checkpoint_id: str,
-        request: ResumeAgentCheckpointRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.discard_agent_checkpoint(
-                run_id,
-                checkpoint_id,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.get("/runs/{run_id}/agents/{job_id}")
-    def get_agent_job(run_id: str, job_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_agent_job(run_id, job_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/agents/{job_id}/output")
-    def list_agent_output(
-        run_id: str,
-        job_id: str,
-        afterSequence: int = 0,
-    ) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            service.get_agent_job(run_id, job_id)
-            return service.list_agent_output(job_id, after_sequence=afterSequence)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-
-    @application.get("/runs/{run_id}/agents/{job_id}/interactive-session")
-    def get_interactive_agent_session(run_id: str, job_id: str) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.get_interactive_agent_session(run_id, job_id)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/start")
-    def start_interactive_agent_session(
-        run_id: str,
-        job_id: str,
-        request: StartInteractiveAgentSessionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.start_interactive_agent_session(
-                run_id,
-                job_id,
-                desktop_session_id=request.desktopSessionId,
-                pid=request.pid,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/input")
-    def record_interactive_agent_input(
-        run_id: str,
-        job_id: str,
-        request: InteractiveAgentInputRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.record_interactive_agent_input(
-                run_id,
-                job_id,
-                content=request.content,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/output")
-    def append_interactive_agent_output(
-        run_id: str,
-        job_id: str,
-        request: InteractiveAgentOutputRequest,
-    ) -> list[dict[str, Any]]:
-        service = _require_service(runtime_service)
-        try:
-            return service.append_interactive_agent_output(
-                run_id,
-                job_id,
-                events=request.events,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/ended")
-    def finish_interactive_agent_session(
-        run_id: str,
-        job_id: str,
-        request: FinishInteractiveAgentSessionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.finish_interactive_agent_session(
-                run_id,
-                job_id,
-                status=request.status,
-                summary=request.summary,
-                error=request.error,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agents/{job_id}/interactive-session/continue")
-    def continue_interactive_agent_session(
-        run_id: str,
-        job_id: str,
-        request: ContinueInteractiveAgentSessionRequest,
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.continue_interactive_agent(
-                run_id,
-                job_id,
-                actor=request.actor,
-                now=request.now,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
-
-    @application.post("/runs/{run_id}/agents/{job_id}/cancel")
-    def cancel_agent_job(
-        run_id: str,
-        job_id: str,
-        request: CancelAgentJobRequest | None = Body(default=None),
-    ) -> dict[str, Any]:
-        service = _require_service(runtime_service)
-        try:
-            return service.cancel_agent_job(
-                run_id,
-                job_id,
-                actor=request.actor if request is not None else None,
-                now=request.now if request is not None else None,
-            )
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except ValueError as error:
-            raise _http_error_from_value_error(error) from error
+    @application.post("/projects/{project_id}/runs/{run_id}/gates")
+    def submit_project_gate(project_id: str, run_id: str, request: GateResultRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).submit_scoped_gate(project_id, run_id, node_id=request.nodeId, gate_id=request.gateId, status=request.status, evidence=request.evidence, waiver_reason=request.waiverReason, failure_reason=request.failureReason, actor=request.actor, expected_revision=request.expectedRevision, now=request.now).model_dump()
 
     return application
 

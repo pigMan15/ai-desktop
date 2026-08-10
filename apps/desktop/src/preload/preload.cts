@@ -5,7 +5,12 @@ import type {
   RuntimeRequestOptions,
   RuntimeStatus,
 } from "../main/runtime.js";
-import type { TerminalCommandDecision, TerminalOutput, TerminalSession } from "../main/terminal.js";
+import type {
+  TerminalCommandDecision,
+  TerminalLogExport,
+  TerminalOutput,
+  TerminalSession,
+} from "../main/terminal.js";
 import type {
   GitWorkspaceStatus,
   GitWorktree,
@@ -38,8 +43,8 @@ contextBridge.exposeInMainWorld("workflowTerminal", {
     initialPrompt?: string;
   }): Promise<TerminalSession> =>
     ipcRenderer.invoke("terminal:create", request) as Promise<TerminalSession>,
-  bindRuntimeSession: (sessionId: string, runId: string, runtimeSessionId: string): Promise<void> =>
-    ipcRenderer.invoke("terminal:bind-runtime-session", sessionId, runId, runtimeSessionId) as Promise<void>,
+  bindRuntimeSession: (sessionId: string, projectId: string, runId: string, runtimeSessionId: string): Promise<void> =>
+    ipcRenderer.invoke("terminal:bind-runtime-session", sessionId, projectId, runId, runtimeSessionId) as Promise<void>,
   requestCommand: (sessionId: string, command: string): Promise<TerminalCommandDecision> =>
     ipcRenderer.invoke("terminal:command", sessionId, command) as Promise<TerminalCommandDecision>,
   submitShellLine: (sessionId: string, command: string): Promise<TerminalCommandDecision> =>
@@ -65,6 +70,8 @@ contextBridge.exposeInMainWorld("workflowTerminal", {
     ipcRenderer.invoke("terminal:resize", sessionId, columns, rows) as Promise<TerminalSession>,
   interrupt: (sessionId: string): Promise<void> =>
     ipcRenderer.invoke("terminal:interrupt", sessionId) as Promise<void>,
+  exportOutput: (sessionId: string): Promise<TerminalLogExport> =>
+    ipcRenderer.invoke("terminal:export-output", sessionId) as Promise<TerminalLogExport>,
   stop: (sessionId: string): Promise<void> =>
     ipcRenderer.invoke("terminal:stop", sessionId) as Promise<void>,
 });

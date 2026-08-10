@@ -6,6 +6,44 @@ import { ArtifactsPage } from "./ArtifactsPage";
 afterEach(cleanup);
 
 describe("ArtifactsPage", () => {
+  it("loads artifacts from the URL-owned Run context", async () => {
+    const artifact = { id: "artifact-scoped", runId: "run-1", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test", status: "verified" as const };
+    const client = {
+      listArtifacts: vi.fn(async () => [artifact]),
+      previewArtifact: vi.fn(),
+      listArtifactConsumers: vi.fn(async () => []),
+    };
+    render(<ArtifactsPage state={null} context={{ projectId: "project-1", runId: "run-1" }} client={client} />);
+    expect(await screen.findByText("artifact-scoped")).toBeInTheDocument();
+    expect(client.listArtifacts).toHaveBeenCalledWith("project-1", "run-1", expect.any(AbortSignal));
+    expect(screen.getByRole("link", { name: "返回 Run" })).toHaveAttribute("href", "#/runs/run-1");
+  });
+
+  it("renders a preview loaded from the URL-owned Run context", async () => {
+    const artifact = { id: "artifact-scoped", runId: "run-1", type: "plan", uri: "file:///plan.md", contentHash: "sha256:test", status: "verified" as const };
+    const client = {
+      listArtifacts: vi.fn(async () => [artifact]),
+      previewArtifact: vi.fn(async () => ({
+        id: artifact.id,
+        uri: artifact.uri,
+        contentHash: artifact.contentHash,
+        currentHash: artifact.contentHash,
+        integrity: "verified" as const,
+        mediaType: "text/markdown",
+        sizeBytes: 12,
+        truncated: false,
+        content: "scoped preview",
+      })),
+      listArtifactConsumers: vi.fn(async () => []),
+    };
+    render(<ArtifactsPage state={null} context={{ projectId: "project-1", runId: "run-1" }} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "查看内容" }));
+
+    expect(await screen.findByText("scoped preview")).toBeInTheDocument();
+    expect(client.previewArtifact).toHaveBeenCalledWith("project-1", "run-1", "artifact-scoped");
+  });
+
   it("allows an artifact preview to be closed", () => {
     const onClosePreview = vi.fn();
     render(

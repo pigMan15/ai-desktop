@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GatesPage } from "./GatesPage";
@@ -6,6 +6,28 @@ import { GatesPage } from "./GatesPage";
 afterEach(cleanup);
 
 describe("GatesPage", () => {
+  it("loads and waives a gate through the URL-owned Run context", async () => {
+    const projection = {
+      runId: "run-1", status: "BLOCKED" as const, currentNodeIds: ["plan"], nodeStates: { plan: "BLOCKED" as const },
+      allowedActions: [{ id: "waive:plan", label: "提交 Gate 豁免", eventType: "GATE_WAIVED" as const, nodeId: "plan", risk: "high" as const }],
+      blockingReasons: [], revision: "5", updatedAt: "2026-08-06T00:00:00Z",
+    };
+    const gate = { id: "gate-1", nodeId: "plan", gateId: "plan-ready", status: "failed" as const, evidence: ["failed"] };
+    const client = {
+      getProjectRunOverview: vi.fn(async () => ({ projection })),
+      listGates: vi.fn(async () => [gate]),
+      submitGate: vi.fn(async () => projection),
+    };
+    render(<GatesPage state={null} context={{ projectId: "project-1", runId: "run-1" }} client={client} />);
+
+    fireEvent.change(await screen.findByLabelText("Gate 豁免理由：plan-ready"), { target: { value: "approved exception" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交 Gate 豁免" }));
+
+    await waitFor(() => expect(client.submitGate).toHaveBeenCalledWith(
+      "project-1", "run-1", "plan", "plan-ready", "waived", ["failed"], "approved exception", "5", expect.any(String),
+    ));
+    expect(client.listGates).toHaveBeenCalledWith("project-1", "run-1", expect.any(AbortSignal));
+  });
   it("显示 Gate 证据、授权豁免理由和执行者，并允许下载 Gate 报告", () => {
     const onDownloadGateReport = vi.fn();
     render(

@@ -140,6 +140,25 @@ describe("runDetailReducer", () => {
     expect(refreshed.selectedNodeId).toBeNull();
   });
 
+  it("keeps the cached workflow when a refresh response is temporarily incomplete", () => {
+    const current = readyState();
+    const incomplete = { ...overview(), workflow: undefined } as unknown as RunOverview;
+
+    const refreshed = runDetailReducer(
+      { ...current, phase: "refreshing" as const, generation: 6 },
+      {
+        type: "request-succeeded",
+        kind: "refresh",
+        generation: 6,
+        overview: incomplete,
+        refreshedAt: "2026-08-06T10:01:00Z",
+      },
+    );
+
+    expect(refreshed.phase).toBe("ready");
+    expect(refreshed.overview?.workflow).toBe(current.overview?.workflow);
+  });
+
   it("returns the identical state for a stale generation", () => {
     const state = { ...readyState(), phase: "refreshing" as const, generation: 8 };
 

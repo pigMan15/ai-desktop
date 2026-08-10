@@ -49,6 +49,8 @@ EXPECTED_COLUMNS = {
         ("archived_at", "TEXT", False, False),
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
+        ("max_active_runs", "INTEGER", True, False),
+        ("max_active_agents", "INTEGER", True, False),
     ],
     "workflow_versions": [
         ("id", "TEXT", False, True),

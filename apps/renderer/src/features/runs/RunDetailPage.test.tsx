@@ -8,8 +8,26 @@ import type {
   RunOverview,
   WorkflowDefinition,
 } from "@workflow-platform/contracts";
-import { RuntimeClientError } from "../../app/runtimeClient";
+import {
+  RuntimeClientError,
+  type AgentJobSummary,
+  type AgentOutputSummary,
+} from "../../app/runtimeClient";
 import { RunDetailPage } from "./RunDetailPage";
+
+vi.mock("../terminal/TerminalViewport", () => ({
+  TerminalViewport: ({ ariaLabel, output, writable, onInput }: {
+    ariaLabel: string;
+    output: Array<{ sequence: number; data: string }>;
+    writable?: boolean;
+    onInput?: (data: string) => void | Promise<void>;
+  }) => (
+    <section aria-label={ariaLabel} data-writable={String(Boolean(writable))}>
+      <pre>{output.map((event) => event.data).join("")}</pre>
+      <button type="button" onClick={() => onInput?.("继续\r")}>输入 Agent</button>
+    </section>
+  ),
+}));
 
 vi.mock("./RunProgressMap", () => ({
   RunProgressMap: ({ onSelectNode }: { onSelectNode(nodeId: string): void }) => (
@@ -40,9 +58,171 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  window.sessionStorage.clear();
 });
 
 describe("RunDetailPage", () => {
+  it("organizes the Run as a progress-and-control console followed by resource tabs", async () => {
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+    const consoleRegion = screen.getByRole("region", { name: "运行进度与控制" });
+    const graph = within(consoleRegion).getByLabelText("运行进度图");
+    const workspace = graph.closest(".run-console-workspace");
+    const executor = within(consoleRegion).getByRole("region", { name: "Agent 执行器" });
+    const controls = within(consoleRegion).getByRole("region", { name: "当前节点控制" });
+    expect(workspace).not.toBeNull();
+    expect(graph.compareDocumentPosition(executor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(workspace!.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const resources = screen.getByRole("navigation", { name: "Run 资源" });
+    expect(within(resources).getByRole("tab", { name: "上下文", selected: true })).toBeInTheDocument();
+    expect(within(resources).getByRole("link", { name: "产物" })).toHaveAttribute(
+      "href",
+      "#/artifacts?projectId=project%2Fone&runId=run%2Fone",
+    );
+  });
+
+  it("shows Agent launch controls for the running Agent node", async () => {
+    const startedJob = agentJob("job-new", "RUNNING");
+    const onStartAgent = vi.fn().mockResolvedValue(startedJob);
+    const agentWorkflow = workflowDefinition();
+    agentWorkflow.roles = [{
+      id: "developer",
+      name: "Developer",
+      provider: "codex",
+      allowedTools: ["read", "edit"],
+    }];
+    window.location.hash = "#/runs/run%2Fone";
+    const view = renderPage({
+      overview: overview({ workflow: agentWorkflow }),
+      agentJobs: [],
+      onStartAgent,
+      providerDiagnostics: [
+        { id: "codex", executable: "codex", available: true, path: "C:\\bin\\codex.exe", version: "1.0", message: "available" },
+        { id: "claude", executable: "claude", available: false, path: null, version: null, message: "unavailable" },
+      ],
+    });
+
+    expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+    const agentRegion = screen.getByRole("region", { name: "Agent 执行" });
+    const mode = within(agentRegion).getByRole("radiogroup", { name: "Agent 模式" });
+    expect(within(mode).getByRole("radio", { name: "交互式终端" })).toBeChecked();
+    expect(within(mode).getByRole("radio", { name: "自动执行" })).not.toBeChecked();
+    expect(within(agentRegion).queryByRole("textbox", { name: "执行工作区" })).not.toBeInTheDocument();
+    expect(within(agentRegion).getByText("G:\\project\\release")).toBeInTheDocument();
+    expect(within(agentRegion).getByText("Developer")).toBeInTheDocument();
+    expect(within(agentRegion).getByText("read, edit")).toBeInTheDocument();
+    expect(within(agentRegion).getByText("Codex CLI 可用")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Agent 提示词"), { target: { value: "继续开发" } });
+    const startButton = screen.getByRole("button", { name: "启动 Agent" });
+    expect(startButton.querySelector(".lucide-play")).toBeInTheDocument();
+    fireEvent.click(startButton);
+
+    await waitFor(() => expect(onStartAgent).toHaveBeenCalledWith({
+      nodeId: "implement",
+      provider: "codex",
+      prompt: "继续开发",
+      mode: "interactive",
+      allowedTools: ["read", "edit"],
+      cwd: "G:\\project\\release",
+    }));
+    expect(window.location.hash).toBe("#/runs/run%2Fone");
+    view.rerender(page({
+      overview: overview({ workflow: agentWorkflow }),
+      agentJobs: [startedJob],
+      onStartAgent,
+    }));
+    expect(screen.getByRole("tab", { name: /job-new.*codex.*RUNNING/i })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByRole("link", { name: /打开 Agent 终端/ })).not.toBeInTheDocument();
+  });
+
+  it("switches Agent Job tabs and forwards input to the selected Job", async () => {
+    const onAgentInput = vi.fn();
+    const runningJob = agentJob("job-running", "RUNNING");
+    const completedJob = agentJob("job-completed", "COMPLETED");
+    renderPage({
+      agentJobs: [runningJob, completedJob],
+      agentLiveOutput: {
+        "job-running": [{ sequence: 1, data: "running output" }],
+      },
+      agentOutput: [agentOutput("job-completed", "completed output")],
+      agentSessionState: {
+        "job-running": { writable: true },
+      },
+      onAgentInput,
+    });
+
+    expect(await screen.findByText("running output")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /job-complete.*codex.*COMPLETED/i }));
+    expect(screen.getByText("completed output")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /job-running.*codex.*RUNNING/i }));
+    fireEvent.click(screen.getByRole("button", { name: "输入 Agent" }));
+    expect(onAgentInput).toHaveBeenCalledWith("job-running", "继续\r");
+  });
+
+  it("does not show Agent launch controls before the Agent node starts or for a non-Agent node", async () => {
+    const readyOverview = overview({
+      projection: {
+        ...overview().projection,
+        nodeStates: { implement: "READY", verify: "PENDING", review: "PENDING" },
+      },
+    });
+    const { rerender } = renderPage({ overview: readyOverview });
+    expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Agent 执行" })).not.toBeInTheDocument();
+
+    const taskWorkflow = workflowDefinition();
+    taskWorkflow.nodes = taskWorkflow.nodes.map((node) => node.id === "implement" ? { ...node, kind: "task" } : node);
+    rerender(page({ overview: overview({ workflow: taskWorkflow }) }));
+    expect(screen.queryByRole("region", { name: "Agent 执行" })).not.toBeInTheDocument();
+  });
+
+  it("starts a governed deployment from a ready deploy node", async () => {
+    const onStartDeployment = vi.fn().mockResolvedValue(undefined);
+    const deployWorkflow = workflowDefinition();
+    deployWorkflow.nodes = deployWorkflow.nodes.map((node) =>
+      node.id === "implement" ? { ...node, kind: "deploy", agent: undefined } : node,
+    );
+    renderPage({
+      overview: overview({
+        workflow: deployWorkflow,
+        projection: {
+          ...overview().projection,
+          nodeStates: { implement: "READY", verify: "PENDING", review: "PENDING" },
+          allowedActions: [{
+            id: "start:implement",
+            label: "Start node",
+            eventType: "NODE_STARTED",
+            nodeId: "implement",
+            risk: "low",
+          }],
+        },
+      }),
+      onStartDeployment,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "启动本地部署" }));
+
+    await waitFor(() => expect(onStartDeployment).toHaveBeenCalledWith("implement", "11"));
+  });
+
+  it("keeps Agent launch read-only for an archived Run", async () => {
+    renderPage({
+      overview: overview({
+        run: { ...overview().run, status: "ARCHIVED" },
+        projection: { ...overview().projection, status: "ARCHIVED" },
+      }),
+      onStartAgent: vi.fn(),
+    });
+
+    expect(await screen.findByRole("button", { name: "启动 Agent" })).toBeDisabled();
+    expect(screen.getByLabelText("Agent 提示词")).toBeDisabled();
+  });
+
   it("renders the scoped overview in graph, current, next, action source order", async () => {
     renderPage();
 
@@ -72,23 +252,20 @@ describe("RunDetailPage", () => {
     expect(next).toHaveTextContent("tests pass");
     expect(next).toHaveTextContent("Manual review");
 
-    expect(screen.getByText("Immutable release workflow")).toBeInTheDocument();
-    expect(screen.getByText("版本 7")).toBeInTheDocument();
+    expect(screen.getByText(/Immutable release workflow v7/)).toBeInTheDocument();
     expect(screen.getByText(/"dryRun": true/)).toBeInTheDocument();
     expect(screen.getAllByText("G:\\project\\release").length).toBeGreaterThan(0);
     expect(screen.getAllByText("1 个活跃 Agent").length).toBeGreaterThan(0);
     expect(screen.getByText("2 个活跃部署")).toBeInTheDocument();
     expect(screen.getByText(/租约 active/)).toBeInTheDocument();
     expect(screen.getByText(/最近刷新/)).toBeInTheDocument();
-    expect(screen.getByText("部署历史与输出")).toBeInTheDocument();
-    expect(screen.getByText("Runtime 时间线")).toBeInTheDocument();
-
-    for (const route of ["artifacts", "terminal", "gates", "approvals", "audit", "recovery"]) {
+    for (const route of ["artifacts", "gates", "approvals", "deployment", "audit", "recovery"]) {
       expect(screen.getByRole("link", { name: secondaryLabel(route) })).toHaveAttribute(
         "href",
         `#/${route}?projectId=project%2Fone&runId=run%2Fone`,
       );
     }
+    expect(await screen.findByRole("region", { name: "Agent 执行器" })).toBeInTheDocument();
   });
 
   it("renders only allowed actions and sends the exact action id, revision, actor, and payload", async () => {
@@ -343,6 +520,105 @@ describe("RunDetailPage", () => {
     });
   });
 
+  it("scans declared node artifacts without requiring manual path input", async () => {
+    const refreshed = deferred<RunOverview>();
+    const loadOverview = vi.fn()
+      .mockResolvedValueOnce(overview())
+      .mockImplementationOnce(() => refreshed.promise);
+    const scanNodeArtifacts = vi.fn().mockResolvedValue({
+      runId: "run/one",
+      nodeId: "implement",
+      registered: ["bundle"],
+      unchanged: ["notes"],
+      missing: [],
+      invalid: [],
+      projection: {
+        ...actionResponse("12").projection,
+        allowedActions: [{
+          id: "complete-implement",
+          label: "完成当前节点",
+          eventType: "NODE_COMPLETED",
+          nodeId: "implement",
+          risk: "low",
+        }],
+        blockingReasons: [],
+      },
+    });
+    const executeAction = vi.fn();
+    renderPage({ loadOverview, scanNodeArtifacts, executeAction });
+
+    const action = await screen.findByRole("button", { name: "扫描并提交所需产物" });
+    expect(screen.getByLabelText("产物路径")).toHaveValue("docs/release.md");
+    expect(screen.getByLabelText("产物类型")).toHaveValue("document");
+    expect(action).toBeEnabled();
+    fireEvent.click(action);
+
+    await waitFor(() => expect(scanNodeArtifacts).toHaveBeenCalledWith(
+      "implement",
+      "11",
+      expect.any(String),
+      expect.any(AbortSignal),
+    ));
+    expect(executeAction).not.toHaveBeenCalled();
+    const feedback = await screen.findByRole("status", { name: "产物检查结果" });
+    expect(feedback).toHaveTextContent("已满足 2/2");
+    expect(feedback).toHaveTextContent("本次提交1");
+    expect(feedback).toHaveTextContent("已存在1");
+    expect(feedback).toHaveTextContent("可以完成当前节点");
+    expect(executeAction).not.toHaveBeenCalled();
+    await waitFor(() => expect(loadOverview).toHaveBeenCalledTimes(2));
+    refreshed.resolve(overview({
+      projection: {
+        ...overview().projection,
+        revision: "12",
+        allowedActions: [{
+          id: "complete-implement",
+          label: "完成当前节点",
+          eventType: "NODE_COMPLETED",
+          nodeId: "implement",
+          risk: "low",
+        }],
+        blockingReasons: [],
+      },
+    }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "完成当前节点" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "选择验证" }));
+    expect(screen.queryByRole("status", { name: "产物检查结果" })).not.toBeInTheDocument();
+  });
+
+  it("shows artifact scan failures in the artifact result area", async () => {
+    const scanNodeArtifacts = vi.fn().mockRejectedValue(
+      runtimeError(422, "ARTIFACT_SCAN_FAILED", "Cannot read output"),
+    );
+    renderPage({ scanNodeArtifacts });
+
+    fireEvent.click(await screen.findByRole("button", { name: "扫描并提交所需产物" }));
+
+    expect(await screen.findByRole("status", { name: "产物检查结果" }))
+      .toHaveTextContent("Cannot read output");
+  });
+
+  it("restores the latest artifact scan result after returning to the Run page", async () => {
+    const scanNodeArtifacts = vi.fn().mockResolvedValue({
+      runId: "run/one",
+      nodeId: "implement",
+      registered: ["bundle"],
+      unchanged: ["notes"],
+      missing: [],
+      invalid: [],
+      projection: overview().projection,
+    });
+    const firstPage = renderPage({ scanNodeArtifacts });
+
+    fireEvent.click(await screen.findByRole("button", { name: "扫描并提交所需产物" }));
+    expect(await screen.findByRole("status", { name: "产物检查结果" })).toHaveTextContent("已满足 2/2");
+
+    firstPage.unmount();
+    renderPage();
+
+    expect(await screen.findByRole("status", { name: "产物检查结果" })).toHaveTextContent("已满足 2/2");
+  });
+
   it("disables actions while a refresh request is pending", async () => {
     const refresh = deferred<RunOverview>();
     const loadOverview = vi.fn().mockResolvedValueOnce(overview()).mockImplementationOnce(() => refresh.promise);
@@ -381,6 +657,40 @@ describe("RunDetailPage", () => {
     await waitFor(() => expect(screen.getByText(/运行中/)).toHaveTextContent("修订 12"));
   });
 
+  it("retries an uncached transient load failure while the page remains visible", async () => {
+    vi.useFakeTimers();
+    const loadOverview = vi.fn()
+      .mockRejectedValueOnce(runtimeError(null, "NETWORK_ERROR", "offline"))
+      .mockResolvedValueOnce(overview());
+    renderPage({ loadOverview });
+
+    await act(async () => Promise.resolve());
+    expect(loadOverview).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(loadOverview).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+  });
+
+  it("keeps the Run page alive while the initial workflow snapshot is temporarily unavailable", async () => {
+    const incomplete = { ...overview(), workflow: undefined } as unknown as RunOverview;
+    renderPage({ overview: incomplete });
+
+    expect(await screen.findByRole("status")).toHaveTextContent("工作流加载中");
+    expect(screen.queryByLabelText("运行进度图")).not.toBeInTheDocument();
+  });
+
+  it("restores the last workflow snapshot after returning while the overview is incomplete", async () => {
+    const firstPage = renderPage();
+    expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+    firstPage.unmount();
+
+    const incomplete = { ...overview(), workflow: undefined } as unknown as RunOverview;
+    renderPage({ overview: incomplete });
+
+    expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+    expect(screen.getByLabelText("运行进度图")).toBeInTheDocument();
+  });
+
   it.each([
     [404, "RUN_NOT_FOUND_IN_PROJECT", "此项目中不存在该 Run", "返回 Run 列表"],
     [503, "RUN_REARCHITECTURE_MAINTENANCE", "Run 服务维护中", "重试"],
@@ -408,10 +718,48 @@ function page(options: Partial<React.ComponentProps<typeof RunDetailPage>> & { o
       actor={options.actor ?? actor}
       gateActor={options.gateActor ?? gateActor}
       loadOverview={options.loadOverview ?? vi.fn().mockResolvedValue(value)}
+      agentJobs={options.agentJobs ?? [agentJob("job ?7", "RUNNING")]}
+      agentOutput={options.agentOutput ?? []}
+      agentLiveOutput={options.agentLiveOutput ?? {}}
+      agentSessionState={options.agentSessionState ?? {}}
+      providerDiagnostics={options.providerDiagnostics}
+      onStartAgent={options.onStartAgent}
+      onStartDeployment={options.onStartDeployment}
+      onAgentInput={options.onAgentInput ?? vi.fn()}
+      onAgentInterrupt={options.onAgentInterrupt ?? vi.fn()}
+      onAgentResize={options.onAgentResize ?? vi.fn()}
+      onStopAgent={options.onStopAgent ?? vi.fn()}
+      scanNodeArtifacts={options.scanNodeArtifacts}
       executeAction={options.executeAction ?? vi.fn().mockResolvedValue(actionResponse("12"))}
       onReturnToList={options.onReturnToList ?? vi.fn()}
     />
   );
+}
+
+function agentJob(id: string, status: AgentJobSummary["status"]): AgentJobSummary {
+  return {
+    id,
+    runId: "run/one",
+    nodeId: "implement",
+    provider: "codex",
+    status,
+    mode: "interactive",
+    command: ["codex"],
+    cwd: "G:\\project\\release",
+    createdAt: "2026-08-06T00:00:00Z",
+    updatedAt: "2026-08-06T00:01:00Z",
+  };
+}
+
+function agentOutput(jobId: string, data: string): AgentOutputSummary {
+  return {
+    id: `output-${jobId}`,
+    jobId,
+    sequence: 1,
+    kind: "stdout",
+    payload: { data },
+    createdAt: "2026-08-06T00:01:00Z",
+  };
 }
 
 function overview(overrides: Partial<RunOverview> = {}): RunOverview {
@@ -502,7 +850,7 @@ function actionResponse(revision: string, status: RunOverview["projection"]["sta
   return { projection: { ...overview().projection, revision, status }, emittedEvents: [] };
 }
 
-function runtimeError(status: number, code: string, message: string) {
+function runtimeError(status: number | null, code: string, message: string) {
   return new RuntimeClientError(status, code, message, undefined, `corr-${code}`);
 }
 
@@ -518,6 +866,7 @@ function secondaryLabel(route: string): string {
     terminal: "终端",
     gates: "检查关卡",
     approvals: "审批",
+    deployment: "部署",
     audit: "审计",
     recovery: "恢复",
   }[route] ?? route;

@@ -30,13 +30,13 @@ export default defineConfig({
           url: `${runtimeApiBaseUrl}/health`,
           env: {
             PYTHONPATH: path.resolve("runtime/src"),
-            WORKFLOW_PLATFORM_RUNTIME_DB: path.resolve(".workflow-platform/e2e-runtime.db"),
+            WORKFLOW_PLATFORM_RUNTIME_DB: path.resolve(`.workflow-platform/e2e-runtime-${runtimePort}.db`),
           },
           reuseExistingServer,
           timeout: 120_000,
         },
         {
-          command: `npm run dev:renderer -- --port ${rendererPort}`,
+          command: `npm --workspace apps/renderer run dev -- --port ${rendererPort}`,
           url: rendererBaseUrl,
           env: {
             VITE_RUNTIME_API_BASE_URL: runtimeApiBaseUrl,

@@ -2,6 +2,7 @@ import type {
   CreateRunRequest,
   ExecuteRunActionRequest,
   ExecuteRunActionResponse,
+  ProjectConcurrencySettings,
   RunListQuery,
   RunListResponse,
   RunOverview,
@@ -28,6 +29,22 @@ export type ScopedCreateRunResponse = {
   };
   projection: RunProjection;
   workspace: WorkspaceLease;
+};
+
+export type ProjectWorkspaceCandidate = {
+  path: string;
+  label: string;
+  occupiedByRunId: string | null;
+  leaseMode: WorkspaceMode | null;
+  leaseStatus: "active" | "released" | "expired" | null;
+  recommended: boolean;
+};
+
+export type ProjectWorktree = {
+  path: string;
+  branch: string;
+  head: string | null;
+  bare: boolean;
 };
 
 export class RuntimeClientError extends Error {
@@ -102,7 +119,7 @@ export type RuntimeWorkbenchState = {
 };
 
 type RuntimeImportResult = {
-  projectId: string;
+  projectId?: string;
   workflowVersionId: string | null;
   workflowId?: string | null;
   workflowName?: string | null;
@@ -123,7 +140,7 @@ export type WorkflowLibraryItem = {
 };
 
 export type ProjectWorkflowBinding = {
-  projectId: string;
+  projectId?: string;
   workflowId: string;
   workflowVersionId: string;
   actor: Record<string, unknown>;
@@ -173,7 +190,7 @@ export type AgentStartResult = AgentJobSummary & {
     type: string;
     path: string;
     contentHash?: string | null;
-    summary: string;
+    summary?: string | null;
   }>;
   expectedArtifacts: Array<{
     id: string;
@@ -316,6 +333,7 @@ export type WorkflowDefinitionSummary = {
       promptTemplate?: string;
       context?: {
         upstream: "none" | "direct" | "ancestors";
+        delivery?: "path" | "hybrid" | "summary";
         artifactTypes?: string[];
         maxArtifacts?: number;
         summaryCharsPerArtifact?: number;
@@ -432,6 +450,7 @@ export type RecoveryDiagnostics = {
   orphanAgentJobIds: string[];
   orphanTerminalSessionIds: string[];
   recoverableAgentCheckpointIds: string[];
+  workspaceLease?: WorkspaceLease | null;
   rebuildAvailable: boolean;
 };
 
@@ -575,6 +594,7 @@ export type AuditRecord = {
 
 export type SavedWorkspaceContext = {
   apiBaseUrl: string;
+  projectId: string;
   projectPath: string;
   projectName: string;
   workflowName: string;
@@ -609,27 +629,17 @@ export async function restoreWorkbenchState(
 ): Promise<RuntimeWorkbenchState> {
   const client = createRuntimeClient(context.apiBaseUrl);
   await client.health();
-
-  const [projection, timeline, artifacts, approvals, gates, agentJobs] = await Promise.all([
-    client.getProjection(context.runId),
-    client.getTimeline(context.runId),
-    client.listArtifacts(context.runId),
-    client.listApprovals(context.runId),
-    client.listGates(context.runId),
-    client.listAgentJobs(context.runId),
-  ]);
-
   return {
     connection: "connected",
     workspaceStatus: "ready",
     projectName: context.projectName,
     workflowName: context.workflowName,
-    projection,
-    timeline,
-    artifacts,
-    approvals,
-    gates,
-    agentJobs,
+    projection: null,
+    timeline: [],
+    artifacts: [],
+    approvals: [],
+    gates: [],
+    agentJobs: [],
     agentOutput: [],
   };
 }
@@ -838,6 +848,22 @@ export function createRuntimeClient(apiBaseUrl: string) {
         actor: HUMAN_ACTOR,
         now,
       }),
+    getProjectConcurrency: (projectId: string, signal?: AbortSignal) =>
+      request<ProjectConcurrencySettings>(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/concurrency`, { signal }),
+    updateProjectConcurrency: (projectId: string, settings: ProjectConcurrencySettings, now: string, signal?: AbortSignal) =>
+      request<ProjectConcurrencySettings>(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/concurrency`, {
+        method: "PUT",
+        body: { ...settings, actor: HUMAN_ACTOR, now },
+        signal,
+      }),
+    listProjectWorkspaces: (projectId: string, signal?: AbortSignal) =>
+      request<ProjectWorkspaceCandidate[]>(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/workspaces`, { signal }),
+    createProjectWorktree: (projectId: string, name: string, branchName: string, baseRef = "HEAD", signal?: AbortSignal) =>
+      request<ProjectWorktree>(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/worktrees`, {
+        method: "POST",
+        body: { name, branchName, baseRef },
+        signal,
+      }),
     listWorkflows: () => request<WorkflowLibraryItem[]>(apiBaseUrl, "/workflows"),
     listRoleAssets: () => request<RoleAssetSummary[]>(apiBaseUrl, "/roles"),
     saveRoleAsset: (definition: WorkflowRoleSummary, now: string) =>
@@ -907,85 +933,71 @@ export function createRuntimeClient(apiBaseUrl: string) {
         apiBaseUrl,
         `/workflow-versions/${encodeURIComponent(workflowVersionId)}/runs`,
       ),
-    startDeployment: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
-      request<DeploymentSummary>(apiBaseUrl, `/runs/${runId}/deployments`, {
-        nodeId,
-        actor: HUMAN_ACTOR,
-        expectedRevision,
-        now,
+    startDeployment: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
+      request<DeploymentSummary>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/deployments`, {
+        body: { nodeId, actor: HUMAN_ACTOR, expectedRevision, now }, signal,
       }),
-    listDeployments: (runId: string) =>
-      request<DeploymentSummary[]>(apiBaseUrl, `/runs/${runId}/deployments`),
-    listDeploymentOutput: (runId: string, deploymentId: string, afterSequence = 0) =>
+    listDeployments: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<DeploymentSummary[]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/deployments`, { method: "GET", signal }),
+    getDeployment: (projectId: string, runId: string, deploymentId: string, signal?: AbortSignal) =>
+      request<DeploymentSummary>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/deployments/${encodeURIComponent(deploymentId)}`, { method: "GET", signal }),
+    listDeploymentOutput: (projectId: string, runId: string, deploymentId: string, afterSequence = 0, signal?: AbortSignal) =>
       request<DeploymentOutputEvent[]>(
         apiBaseUrl,
-        `/runs/${runId}/deployments/${deploymentId}/output?afterSequence=${afterSequence}`,
+        `${scopedRunPath(projectId, runId)}/deployments/${encodeURIComponent(deploymentId)}/output?afterSequence=${afterSequence}`,
+        { method: "GET", signal },
       ),
-    cancelDeployment: (runId: string, deploymentId: string, now: string) =>
-      request<DeploymentSummary>(apiBaseUrl, `/runs/${runId}/deployments/${deploymentId}/cancel`, {
-        actor: HUMAN_ACTOR,
-        now,
+    cancelDeployment: (projectId: string, runId: string, deploymentId: string, now: string, signal?: AbortSignal) =>
+      request<DeploymentSummary>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/deployments/${encodeURIComponent(deploymentId)}/cancel`, {
+        body: { actor: HUMAN_ACTOR, now }, signal,
       }),
-    startNode: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/transition`, {
-        eventType: "NODE_STARTED",
-        nodeId,
-        actor: AGENT_ACTOR,
-        expectedRevision,
-        now,
+    startNode: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/transition`, {
+        body: { eventType: "NODE_STARTED", nodeId, actor: AGENT_ACTOR, expectedRevision, now }, signal,
       }),
-    retryGate: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/transition`, {
-        eventType: "NODE_RETRIED",
-        nodeId,
-        actor: VERIFIER_ACTOR,
-        expectedRevision,
-        now,
+    retryGate: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/transition`, {
+        body: { eventType: "NODE_RETRIED", nodeId, actor: VERIFIER_ACTOR, expectedRevision, now }, signal,
       }),
     controlRun: (
+      projectId: string,
       runId: string,
       eventType: "RUN_PAUSED" | "RUN_RESUMED" | "RUN_ARCHIVED",
       expectedRevision: string,
       now: string,
+      signal?: AbortSignal,
     ) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/transition`, {
-        eventType,
-        actor: HUMAN_ACTOR,
-        expectedRevision,
-        now,
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/transition`, {
+        body: { eventType, actor: HUMAN_ACTOR, expectedRevision, now }, signal,
       }),
     submitArtifact: (
+      projectId: string,
       runId: string,
       nodeId: string,
       artifactPath: string,
       artifactType: string,
       expectedRevision: string,
       now: string,
+      signal?: AbortSignal,
     ) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/artifacts`, {
-        nodeId,
-        artifactPath,
-        artifactType,
-        actor: AGENT_ACTOR,
-        expectedRevision,
-        now,
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/artifacts`, {
+        body: { nodeId, artifactPath, artifactType, actor: AGENT_ACTOR, expectedRevision, now }, signal,
       }),
     decideApproval: (
+      projectId: string,
       runId: string,
       nodeId: string,
       decision: "approved" | "rejected" | "deferred",
       comment: string,
       expectedRevision: string,
       now: string,
+      signal?: AbortSignal,
     ) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/approvals/${nodeId}/decide`, {
-        decision,
-        actor: HUMAN_ACTOR,
-        comment,
-        expectedRevision,
-        now,
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/approvals/${encodeURIComponent(nodeId)}/decide`, {
+        body: { decision, actor: HUMAN_ACTOR, comment, expectedRevision, now }, signal,
       }),
     submitGate: (
+      projectId: string,
       runId: string,
       nodeId: string,
       gateId: string,
@@ -994,22 +1006,17 @@ export function createRuntimeClient(apiBaseUrl: string) {
       waiverReason: string | null,
       expectedRevision: string,
       now: string,
+      signal?: AbortSignal,
     ) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/gates`, {
-        nodeId,
-        gateId,
-        status,
-        evidence,
-        waiverReason,
-        actor: VERIFIER_ACTOR,
-        expectedRevision,
-        now,
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/gates`, {
+        body: { nodeId, gateId, status, evidence, waiverReason, actor: VERIFIER_ACTOR, expectedRevision, now }, signal,
       }),
-    getTimeline: (runId: string) =>
-      request<RuntimeWorkbenchState["timeline"]>(apiBaseUrl, `/runs/${runId}/timeline`),
-    listArtifacts: (runId: string) =>
-      request<RuntimeWorkbenchState["artifacts"]>(apiBaseUrl, `/runs/${runId}/artifacts`),
+    getTimeline: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<RuntimeWorkbenchState["timeline"]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/timeline`, { method: "GET", signal }),
+    listArtifacts: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<RuntimeWorkbenchState["artifacts"]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/artifacts`, { method: "GET", signal }),
     extractArtifactsToKnowledgeSyntheses: (
+      projectId: string,
       runId: string,
       artifactIds: string[],
       provider: KnowledgeSynthesis["provider"],
@@ -1017,116 +1024,127 @@ export function createRuntimeClient(apiBaseUrl: string) {
     ) =>
       request<{ runId: string; items: Array<{ artifactId: string; candidateId: string; synthesisId: string; status: KnowledgeSynthesis["status"] }> }>(
         apiBaseUrl,
-        `/runs/${runId}/artifacts/knowledge-syntheses`,
-        { artifactIds, provider, actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/artifacts/knowledge-syntheses`,
+        { body: { artifactIds, provider, actor: HUMAN_ACTOR, now } },
       ),
-    getNodeArtifactRequirements: (runId: string, nodeId: string) =>
+    getNodeArtifactRequirements: (projectId: string, runId: string, nodeId: string, signal?: AbortSignal) =>
       request<NodeArtifactRequirements>(
         apiBaseUrl,
-        `/runs/${runId}/nodes/${nodeId}/artifact-requirements`,
+        `${scopedRunPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/artifact-requirements`,
+        { method: "GET", signal },
       ),
-    getNodeContext: (runId: string, nodeId: string) =>
-      request<NodeContextPreview>(apiBaseUrl, `/runs/${runId}/nodes/${nodeId}/context`),
-    completeNode: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/nodes/${nodeId}/complete`, {
-        actor: HUMAN_ACTOR,
-        expectedRevision,
-        now,
+    getNodeContext: (projectId: string, runId: string, nodeId: string, signal?: AbortSignal) =>
+      request<NodeContextPreview>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/context`, { method: "GET", signal }),
+    completeNode: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/complete`, {
+        body: { actor: HUMAN_ACTOR, expectedRevision, now }, signal,
       }),
-    confirmArtifact: (runId: string, nodeId: string, artifactId: string, expectedRevision: string, now: string) =>
+    confirmArtifact: (projectId: string, runId: string, nodeId: string, artifactId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
       request<{ artifact: RuntimeWorkbenchState["artifacts"][number]; projection: RunProjection }>(
         apiBaseUrl,
-        `/runs/${runId}/nodes/${nodeId}/artifacts/${artifactId}/confirm`,
-        { actor: HUMAN_ACTOR, expectedRevision, now },
+        `${scopedRunPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/artifacts/${encodeURIComponent(artifactId)}/confirm`,
+        { body: { actor: HUMAN_ACTOR, expectedRevision, now }, signal },
       ),
-    listArtifactConsumers: (runId: string, artifactId: string) =>
-      request<ArtifactConsumer[]>(apiBaseUrl, `/runs/${runId}/artifacts/${artifactId}/consumers`),
-    previewArtifact: (runId: string, artifactId: string) =>
-      request<ArtifactPreview>(apiBaseUrl, `/runs/${runId}/artifacts/${artifactId}/preview`),
-    getEvidencePackage: (runId: string) =>
-      request<EvidencePackage>(apiBaseUrl, `/runs/${runId}/evidence-package`),
-    getRunReport: (runId: string) =>
-      request<RuntimeReport>(apiBaseUrl, `/runs/${runId}/report`),
+    listArtifactConsumers: (projectId: string, runId: string, artifactId: string, signal?: AbortSignal) =>
+      request<ArtifactConsumer[]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/artifacts/${encodeURIComponent(artifactId)}/consumers`, { method: "GET", signal }),
+    previewArtifact: (projectId: string, runId: string, artifactId: string, signal?: AbortSignal) =>
+      request<ArtifactPreview>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/artifacts/${encodeURIComponent(artifactId)}/preview`, { method: "GET", signal }),
+    getEvidencePackage: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<EvidencePackage>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/evidence-package`, { method: "GET", signal }),
+    getRunReport: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<RuntimeReport>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/report`, { method: "GET", signal }),
     getDiagnosticSupportBundle: () =>
       request<DiagnosticSupportBundle>(apiBaseUrl, "/diagnostics/support-bundle"),
     registerTerminalSession: (
+      projectId: string,
       runId: string,
       nodeId: string,
       kind: TerminalSessionSummary["kind"],
       cwd: string,
       pid: number,
       now: string,
+      signal?: AbortSignal,
     ) =>
       request<TerminalSessionSummary>(
         apiBaseUrl,
-        `/runs/${runId}/terminals`,
-        { nodeId, kind, cwd, pid, now },
+        `${scopedRunPath(projectId, runId)}/terminals`,
+        { body: { nodeId, kind, cwd, pid, now }, signal },
       ),
-    listTerminalSessions: (runId: string) =>
-      request<TerminalSessionSummary[]>(apiBaseUrl, `/runs/${runId}/terminals`),
-    listTerminalOutput: (runId: string, sessionId: string, afterSequence = 0) =>
+    listTerminalSessions: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<TerminalSessionSummary[]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/terminals`, { method: "GET", signal }),
+    listTerminalOutput: (projectId: string, runId: string, sessionId: string, afterSequence = 0, signal?: AbortSignal) =>
       request<TerminalOutputEvent[]>(
         apiBaseUrl,
-        `/runs/${runId}/terminals/${sessionId}/output?afterSequence=${afterSequence}`,
+        `${scopedRunPath(projectId, runId)}/terminals/${encodeURIComponent(sessionId)}/output?afterSequence=${afterSequence}`,
+        { method: "GET", signal },
       ),
-    stopTerminalSession: (runId: string, sessionId: string, now: string) =>
+    stopTerminalSession: (projectId: string, runId: string, sessionId: string, now: string, signal?: AbortSignal) =>
       request<{ id: string; status: string }>(
         apiBaseUrl,
-        `/runs/${runId}/terminals/${sessionId}/stop`,
-        { now },
+        `${scopedRunPath(projectId, runId)}/terminals/${encodeURIComponent(sessionId)}/stop`,
+        { body: { now }, signal },
       ),
     appendTerminalOutput: (
+      projectId: string,
       runId: string,
       sessionId: string,
       stream: "stdout" | "stderr",
       data: string,
       now: string,
+      signal?: AbortSignal,
     ) =>
       request<{ accepted: boolean }>(
         apiBaseUrl,
-        `/runs/${runId}/terminals/${sessionId}/output`,
-        { stream, data, now },
+        `${scopedRunPath(projectId, runId)}/terminals/${encodeURIComponent(sessionId)}/output`,
+        { body: { stream, data, now }, signal },
       ),
-    exportTerminalEvidence: (runId: string, sessionId: string, now: string) =>
+    exportTerminalEvidence: (projectId: string, runId: string, sessionId: string, now: string, signal?: AbortSignal) =>
       request<RuntimeWorkbenchState["artifacts"][number]>(
         apiBaseUrl,
-        `/runs/${runId}/terminals/${sessionId}/evidence`,
-        { actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/terminals/${encodeURIComponent(sessionId)}/evidence`,
+        { body: { actor: HUMAN_ACTOR, now }, signal },
       ),
-    listApprovals: (runId: string) =>
-      request<RuntimeWorkbenchState["approvals"]>(apiBaseUrl, `/runs/${runId}/approvals`),
-    listGates: (runId: string) =>
-      request<RuntimeWorkbenchState["gates"]>(apiBaseUrl, `/runs/${runId}/gates`),
-    rebuildProjection: (runId: string, now: string) =>
-      request<RunProjection>(apiBaseUrl, `/runs/${runId}/rebuild-projection`, { now }),
-    getRecoveryDiagnostics: (runId: string) =>
-      request<RecoveryDiagnostics>(apiBaseUrl, `/runs/${runId}/recovery-diagnostics`),
-    cleanupOrphanAgentJobs: (runId: string, now: string) =>
+    listApprovals: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<RuntimeWorkbenchState["approvals"]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/approvals`, { method: "GET", signal }),
+    listGates: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<RuntimeWorkbenchState["gates"]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/gates`, { method: "GET", signal }),
+    listRunAuditRecords: (projectId: string, runId: string, action = "", signal?: AbortSignal) => {
+      const query = new URLSearchParams();
+      if (action) query.set("action", action);
+      const suffix = query.size ? `?${query.toString()}` : "";
+      return request<AuditRecord[]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/audit-records${suffix}`, { method: "GET", signal });
+    },
+    rebuildProjection: (projectId: string, runId: string, now: string, signal?: AbortSignal) =>
+      request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/rebuild-projection`, { body: { now }, signal }),
+    getRecoveryDiagnostics: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<RecoveryDiagnostics>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/recovery-diagnostics`, { method: "GET", signal }),
+    cleanupOrphanAgentJobs: (projectId: string, runId: string, now: string, signal?: AbortSignal) =>
       request<{ runId: string; cleanedJobIds: string[] }>(
         apiBaseUrl,
-        `/runs/${runId}/recovery/cleanup-orphan-agents`,
-        { now },
+        `${scopedRunPath(projectId, runId)}/recovery/cleanup-orphan-agents`,
+        { body: { now }, signal },
       ),
-    cleanupOrphanTerminalSessions: (runId: string, now: string) =>
+    cleanupOrphanTerminalSessions: (projectId: string, runId: string, now: string, signal?: AbortSignal) =>
       request<{ runId: string; cleanedSessionIds: string[] }>(
         apiBaseUrl,
-        `/runs/${runId}/recovery/cleanup-orphan-terminals`,
-        { now },
+        `${scopedRunPath(projectId, runId)}/recovery/cleanup-orphan-terminals`,
+        { body: { now }, signal },
       ),
-    resumeAgentCheckpoint: (runId: string, checkpointId: string, now: string) =>
+    resumeAgentCheckpoint: (projectId: string, runId: string, checkpointId: string, now: string, signal?: AbortSignal) =>
       request<AgentJobSummary>(
         apiBaseUrl,
-        `/runs/${runId}/agent-checkpoints/${checkpointId}/resume`,
-        { actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/agent-checkpoints/${encodeURIComponent(checkpointId)}/resume`,
+        { body: { actor: HUMAN_ACTOR, now }, signal },
       ),
-    discardAgentCheckpoint: (runId: string, checkpointId: string, now: string) =>
+    discardAgentCheckpoint: (projectId: string, runId: string, checkpointId: string, now: string, signal?: AbortSignal) =>
       request<{ id: string; status: string }>(
         apiBaseUrl,
-        `/runs/${runId}/agent-checkpoints/${checkpointId}/discard`,
-        { actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/agent-checkpoints/${encodeURIComponent(checkpointId)}/discard`,
+        { body: { actor: HUMAN_ACTOR, now }, signal },
       ),
-    getProjection: (runId: string) => request<RunProjection>(apiBaseUrl, `/runs/${runId}/projection`),
+    getProjection: (projectId: string, runId: string, signal?: AbortSignal) => request<RunProjection>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/projection`, { method: "GET", signal }),
     startAgentJob: (
+      projectId: string,
       runId: string,
       nodeId: string,
       provider: AgentJobSummary["provider"],
@@ -1135,86 +1153,86 @@ export function createRuntimeClient(apiBaseUrl: string) {
       mode: "automatic" | "interactive" = "automatic",
       allowedTools: string[] = [],
       cwd?: string,
+      signal?: AbortSignal,
     ) =>
-      request<AgentStartResult>(apiBaseUrl, `/runs/${runId}/agents`, {
-        nodeId,
-        provider,
-        prompt,
-        actor: mode === "interactive" ? HUMAN_ACTOR : AGENT_ACTOR,
-        allowedTools,
-        cwd,
-        timeoutSeconds: 300,
-        maxOutputBytes: 1_000_000,
-        mode,
-        now,
+      request<AgentStartResult>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/agents`, {
+        body: { nodeId, provider, prompt, actor: mode === "interactive" ? HUMAN_ACTOR : AGENT_ACTOR, allowedTools, cwd, timeoutSeconds: 300, maxOutputBytes: 1_000_000, mode, now }, signal,
       }),
-    scanNodeArtifacts: (runId: string, nodeId: string, expectedRevision: string, now: string) =>
-      request<NodeArtifactScan>(apiBaseUrl, `/runs/${runId}/nodes/${nodeId}/artifacts/scan`, {
-        expectedRevision,
-        now,
+    scanNodeArtifacts: (projectId: string, runId: string, nodeId: string, expectedRevision: string, now: string, signal?: AbortSignal) =>
+      request<NodeArtifactScan>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/nodes/${encodeURIComponent(nodeId)}/artifacts/scan`, {
+        body: { expectedRevision, now }, signal,
       }),
     startInteractiveAgentSession: (
+      projectId: string,
       runId: string,
       jobId: string,
       desktopSessionId: string,
       pid: number,
       now: string,
+      signal?: AbortSignal,
     ) =>
       request<AgentSessionSummary>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/interactive-session/start`,
-        { desktopSessionId, pid, actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/interactive-session/start`,
+        { body: { desktopSessionId, pid, actor: HUMAN_ACTOR, now }, signal },
       ),
-    recordInteractiveAgentInput: (runId: string, jobId: string, content: string, now: string) =>
+    recordInteractiveAgentInput: (projectId: string, runId: string, jobId: string, content: string, now: string, signal?: AbortSignal) =>
       request<{ id: string; sessionId: string; sequence: number; kind: string; content: string; createdAt: string }>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/interactive-session/input`,
-        { content, actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/interactive-session/input`,
+        { body: { content, actor: HUMAN_ACTOR, now }, signal },
       ),
     appendInteractiveAgentOutput: (
+      projectId: string,
       runId: string,
       jobId: string,
       events: InteractiveAgentOutputInput[],
       now: string,
+      signal?: AbortSignal,
     ) =>
       request<AgentOutputSummary[]>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/interactive-session/output`,
-        { events, now },
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/interactive-session/output`,
+        { body: { events, now }, signal },
       ),
     finishInteractiveAgentSession: (
+      projectId: string,
       runId: string,
       jobId: string,
       status: AgentSessionSummary["status"],
       summary: string | null,
       error: string | null,
       now: string,
+      signal?: AbortSignal,
     ) =>
       request<AgentSessionSummary>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/interactive-session/ended`,
-        { status, summary, error, actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/interactive-session/ended`,
+        { body: { status, summary, error, actor: HUMAN_ACTOR, now }, signal },
       ),
-    getInteractiveAgentSession: (runId: string, jobId: string) =>
-      request<AgentSessionSummary>(apiBaseUrl, `/runs/${runId}/agents/${jobId}/interactive-session`),
-    continueInteractiveAgent: (runId: string, jobId: string, now: string) =>
+    getInteractiveAgentSession: (projectId: string, runId: string, jobId: string, signal?: AbortSignal) =>
+      request<AgentSessionSummary>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/interactive-session`, { method: "GET", signal }),
+    continueInteractiveAgent: (projectId: string, runId: string, jobId: string, now: string, signal?: AbortSignal) =>
       request<AgentJobSummary>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/interactive-session/continue`,
-        { actor: HUMAN_ACTOR, now },
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/interactive-session/continue`,
+        { body: { actor: HUMAN_ACTOR, now }, signal },
       ),
-    listAgentJobs: (runId: string) =>
-      request<AgentJobSummary[]>(apiBaseUrl, `/runs/${runId}/agents`),
-    listAgentOutput: (runId: string, jobId: string, afterSequence: number) =>
+    listAgentJobs: (projectId: string, runId: string, signal?: AbortSignal) =>
+      request<AgentJobSummary[]>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/agents`, { method: "GET", signal }),
+    getAgentJob: (projectId: string, runId: string, jobId: string, signal?: AbortSignal) =>
+      request<AgentJobSummary>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}`, { method: "GET", signal }),
+    listAgentOutput: (projectId: string, runId: string, jobId: string, afterSequence: number, signal?: AbortSignal) =>
       request<AgentOutputSummary[]>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/output?afterSequence=${afterSequence}`,
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/output?afterSequence=${afterSequence}`,
+        { method: "GET", signal },
       ),
-    cancelAgentJob: (runId: string, jobId: string, now?: string) =>
+    cancelAgentJob: (projectId: string, runId: string, jobId: string, now?: string, signal?: AbortSignal) =>
       request<AgentJobSummary>(
         apiBaseUrl,
-        `/runs/${runId}/agents/${jobId}/cancel`,
-        now ? { actor: HUMAN_ACTOR, now } : {},
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/cancel`,
+        now ? { body: { actor: HUMAN_ACTOR, now }, signal } : { method: "POST", signal },
       ),
   };
 }
@@ -1233,6 +1251,9 @@ type RuntimeRequestOptions = {
   headers?: Record<string, string>;
   signal?: AbortSignal;
 };
+
+const scopedRunPath = (projectId: string, runId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`;
 
 const RUNTIME_IPC_PROTOCOL = "workflow-platform.runtime-ipc.v1#7f8c2a61";
 

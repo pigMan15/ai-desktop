@@ -4,7 +4,12 @@ import type {
   RuntimeRequestOptions,
   RuntimeStatus,
 } from "../main/runtime.js";
-import type { TerminalCommandDecision, TerminalOutput, TerminalSession } from "../main/terminal.js";
+import type {
+  TerminalCommandDecision,
+  TerminalLogExport,
+  TerminalOutput,
+  TerminalSession,
+} from "../main/terminal.js";
 import type {
   GitWorkspaceStatus,
   GitWorktree,
@@ -30,7 +35,7 @@ declare global {
         rows: number;
         initialPrompt?: string;
       }): Promise<TerminalSession>;
-      bindRuntimeSession(sessionId: string, runId: string, runtimeSessionId: string): Promise<void>;
+      bindRuntimeSession(sessionId: string, projectId: string, runId: string, runtimeSessionId: string): Promise<void>;
       requestCommand(sessionId: string, command: string): Promise<TerminalCommandDecision>;
       submitShellLine(sessionId: string, command: string): Promise<TerminalCommandDecision>;
       writeInput(sessionId: string, data: string): Promise<void>;
@@ -39,6 +44,7 @@ declare global {
       read(sessionId: string, afterSequence: number): Promise<TerminalOutput[]>;
       resize(sessionId: string, columns: number, rows: number): Promise<TerminalSession>;
       interrupt(sessionId: string): Promise<void>;
+      exportOutput(sessionId: string): Promise<TerminalLogExport>;
       stop(sessionId: string): Promise<void>;
     };
     workflowGit: {

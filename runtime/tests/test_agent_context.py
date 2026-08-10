@@ -29,6 +29,7 @@ def test_agent_context_builder_includes_only_passed_ancestor_artifacts_with_limi
                     agent={
                         "context": {
                             "upstream": "ancestors",
+                            "delivery": "summary",
                             "artifactTypes": ["requirement", "plan"],
                             "maxArtifacts": 2,
                             "summaryCharsPerArtifact": 12,
@@ -64,5 +65,57 @@ def test_agent_context_builder_includes_only_passed_ancestor_artifacts_with_limi
         assert "plan.md" in result.prompt
         assert "debug" not in result.prompt
         assert "已截断" in result.prompt
+    finally:
+        rmtree(workspace, ignore_errors=True)
+
+
+def test_agent_context_builder_path_delivery_omits_artifact_body() -> None:
+    workspace = Path(__file__).parent / ".agent_context_path_tmp"
+    rmtree(workspace, ignore_errors=True)
+    workspace.mkdir(parents=True)
+    try:
+        artifact_path = workspace / "report.md"
+        artifact_path.write_text("CONFIDENTIAL FULL REPORT BODY", encoding="utf-8")
+        workflow = WorkflowDefinition(
+            id="workflow-path",
+            name="Path context",
+            version="1",
+            sourceAdapter="fixture",
+            nodes=[
+                WorkflowNode(id="source", name="Source", kind="task"),
+                WorkflowNode(
+                    id="review",
+                    name="Review",
+                    kind="agent",
+                    agent={"context": {"upstream": "direct", "delivery": "path"}},
+                ),
+            ],
+            edges=[WorkflowEdge(id="source-review", from_="source", to="review")],
+            roles=[],
+            gates=[],
+            policies={},
+            metadata={},
+        )
+
+        result = AgentContextBuilder().build(
+            workflow=workflow,
+            node_id="review",
+            node_states={"source": "PASSED"},
+            artifacts=[
+                {
+                    "id": "artifact-report",
+                    "nodeId": "source",
+                    "type": "report",
+                    "uri": artifact_path.as_uri(),
+                    "contentHash": "sha256:report",
+                }
+            ],
+            project_root=workspace,
+        )
+
+        assert "report.md" in result.prompt
+        assert "CONFIDENTIAL FULL REPORT BODY" not in result.prompt
+        assert result.artifacts[0]["path"] == "report.md"
+        assert result.artifacts[0]["summary"] is None
     finally:
         rmtree(workspace, ignore_errors=True)

@@ -1,6 +1,8 @@
 import hashlib
 import json
 import sqlite3
+import re
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock, Thread
@@ -362,6 +364,21 @@ class WorkflowRuntimeService:
 
         if self._projects.is_archived(project_id):
             raise ValueError("PROJECT_ARCHIVED: 项目已归档，无法创建新的 Run")
+        concurrency = self._projects.concurrency(project_id)
+        active_run_count = int(self._db.execute(
+            """
+            SELECT COUNT(*) AS count FROM runs
+            WHERE project_id = ? AND status IN ('CREATED','IN_PROGRESS','REVIEWING','BLOCKED','PAUSED')
+            """,
+            (project_id,),
+        ).fetchone()["count"])
+        if active_run_count >= concurrency["maxActiveRuns"]:
+            raise RuntimeContractError(
+                "RUN_CONCURRENCY_LIMIT",
+                "Project active Run limit reached",
+                status=409,
+                details={"limit": concurrency["maxActiveRuns"], "activeCount": active_run_count},
+            )
         self._runs.save(
             id=run_id,
             project_id=project_id,
@@ -419,6 +436,196 @@ class WorkflowRuntimeService:
                 status=404,
             )
         return run
+
+    def _validate_project_scope(self, project_id: str | None, run_id: str) -> None:
+        """Validate the project -> run ownership chain for scoped child APIs."""
+        if project_id is not None:
+            self.get_scoped_run(project_id, run_id)
+
+    def list_scoped_agent_jobs(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_agent_jobs(run_id)
+
+    def get_scoped_agent_job(self, project_id: str, run_id: str, job_id: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_agent_job(run_id, job_id)
+
+    def list_scoped_agent_output(self, project_id: str, run_id: str, job_id: str, *, after_sequence: int = 0) -> list[dict]:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.list_agent_output(job_id, after_sequence=after_sequence)
+
+    def cancel_scoped_agent_job(self, project_id: str, run_id: str, job_id: str, *, actor: dict | None = None, now: str | None = None) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.cancel_agent_job(run_id, job_id, actor=actor, now=now)
+
+    def start_scoped_interactive_agent_session(self, project_id: str, run_id: str, job_id: str, **kwargs) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.start_interactive_agent_session(run_id, job_id, **kwargs)
+
+    def record_scoped_interactive_agent_input(self, project_id: str, run_id: str, job_id: str, **kwargs) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.record_interactive_agent_input(run_id, job_id, **kwargs)
+
+    def append_scoped_interactive_agent_output(self, project_id: str, run_id: str, job_id: str, **kwargs) -> list[dict]:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.append_interactive_agent_output(run_id, job_id, **kwargs)
+
+    def finish_scoped_interactive_agent_session(self, project_id: str, run_id: str, job_id: str, **kwargs) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.finish_interactive_agent_session(run_id, job_id, **kwargs)
+
+    def continue_scoped_interactive_agent(self, project_id: str, run_id: str, job_id: str, **kwargs) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.continue_interactive_agent(run_id, job_id, project_id=project_id, **kwargs)
+
+    def get_scoped_interactive_agent_session(self, project_id: str, run_id: str, job_id: str) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.get_interactive_agent_session(run_id, job_id)
+
+    def list_scoped_agent_checkpoints(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_agent_checkpoints(run_id)
+
+    def resume_scoped_agent_checkpoint(self, project_id: str, run_id: str, checkpoint_id: str, **kwargs) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.resume_agent_checkpoint(run_id, checkpoint_id, project_id=project_id, **kwargs)
+
+    def discard_scoped_agent_checkpoint(self, project_id: str, run_id: str, checkpoint_id: str, **kwargs) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.discard_agent_checkpoint(run_id, checkpoint_id, **kwargs)
+
+    def list_scoped_terminal_sessions(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_terminal_sessions(run_id)
+
+    def stop_scoped_terminal_session(self, project_id: str, run_id: str, session_id: str, *, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.stop_terminal_session(run_id, session_id, now=now)
+
+    def list_scoped_terminal_output(self, project_id: str, run_id: str, session_id: str, *, after_sequence: int = 0) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_terminal_output(run_id, session_id, after_sequence=after_sequence)
+
+    def append_scoped_terminal_output(self, project_id: str, run_id: str, session_id: str, *, stream: str, data: str, now: str) -> None:
+        self.get_scoped_run(project_id, run_id)
+        return self.append_terminal_output(run_id, session_id, stream=stream, data=data, now=now)
+
+    def export_scoped_terminal_evidence(self, project_id: str, run_id: str, session_id: str, *, actor: dict, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.export_terminal_output_as_evidence(run_id, session_id, actor=actor, now=now)
+
+    def record_scoped_terminal_command_decision(self, project_id: str, run_id: str, session_id: str, **kwargs) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.record_terminal_command_decision(run_id, session_id, **kwargs)
+
+    def list_scoped_deployments(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_deployments(run_id)
+
+    def get_scoped_deployment(self, project_id: str, run_id: str, deployment_id: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_deployment(run_id, deployment_id)
+
+    def list_scoped_deployment_output(self, project_id: str, run_id: str, deployment_id: str, *, after_sequence: int = 0) -> list[dict]:
+        self.get_scoped_deployment(project_id, run_id, deployment_id)
+        return self.list_deployment_output(run_id, deployment_id, after_sequence=after_sequence)
+
+    def cancel_scoped_deployment(self, project_id: str, run_id: str, deployment_id: str, *, actor: dict, now: str) -> dict:
+        self.get_scoped_deployment(project_id, run_id, deployment_id)
+        return self.cancel_deployment(run_id, deployment_id, actor=actor, now=now)
+
+    def get_scoped_recovery_diagnostics(self, project_id: str, run_id: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_recovery_diagnostics(run_id)
+
+    def cleanup_scoped_orphan_agent_jobs(self, project_id: str, run_id: str, *, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.cleanup_orphan_agent_jobs(run_id, now=now)
+
+    def cleanup_scoped_orphan_terminal_sessions(self, project_id: str, run_id: str, *, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.cleanup_orphan_terminal_sessions(run_id, now=now)
+
+    def rebuild_scoped_projection(self, project_id: str, run_id: str, *, now: str) -> RunProjection:
+        self.get_scoped_run(project_id, run_id)
+        return self.rebuild_projection(run_id, now=now)
+
+    def list_scoped_timeline(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.timeline(run_id)
+
+    def list_scoped_artifacts(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_artifacts(run_id)
+
+    def get_scoped_node_artifact_requirements(self, project_id: str, run_id: str, node_id: str, *, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_node_artifact_requirements(run_id, node_id=node_id, now=now)
+
+    def extract_scoped_artifacts_to_knowledge_syntheses(self, project_id: str, run_id: str, **kwargs) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.extract_artifacts_to_knowledge_syntheses(run_id, **kwargs)
+
+    def list_scoped_approvals(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_approvals(run_id)
+
+    def list_scoped_gates(self, project_id: str, run_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_gate_results(run_id)
+
+    def list_scoped_audit_records(
+        self,
+        project_id: str,
+        run_id: str,
+        *,
+        action: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        if not 1 <= limit <= 200:
+            raise ValueError("AUDIT_LIMIT_INVALID: limit must be between 1 and 200")
+        return self._audit.list(action=action, run_id=run_id, limit=limit)
+
+    def list_scoped_artifact_consumers(self, project_id: str, run_id: str, artifact_id: str) -> list[dict]:
+        self.get_scoped_run(project_id, run_id)
+        return self.list_artifact_consumers(run_id, artifact_id)
+
+    def preview_scoped_artifact(self, project_id: str, run_id: str, artifact_id: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.preview_artifact(run_id, artifact_id)
+
+    def get_scoped_evidence_package(self, project_id: str, run_id: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_evidence_package(run_id)
+
+    def get_scoped_run_report(self, project_id: str, run_id: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.get_run_report(run_id)
+
+    def decide_scoped_approval(self, project_id: str, run_id: str, *, node_id: str, decision: str, actor: dict, comment: str | None, expected_revision: str, now: str) -> RunProjection:
+        self.get_scoped_run(project_id, run_id)
+        return self.decide_approval(run_id, node_id=node_id, decision=decision, actor=actor, comment=comment, expected_revision=expected_revision, now=now)
+
+    def submit_scoped_gate(self, project_id: str, run_id: str, *, node_id: str, gate_id: str, status: str, evidence: list[str], waiver_reason: str | None, failure_reason: str | None, actor: dict, expected_revision: str, now: str) -> RunProjection:
+        self.get_scoped_run(project_id, run_id)
+        return self.submit_gate_result(run_id, node_id=node_id, gate_id=gate_id, status=status, evidence=evidence, waiver_reason=waiver_reason, failure_reason=failure_reason, actor=actor, expected_revision=expected_revision, now=now)
+
+    def submit_scoped_artifact(self, project_id: str, run_id: str, **kwargs: object) -> RunProjection:
+        self.get_scoped_run(project_id, run_id)
+        return self.submit_artifact(run_id, project_id=project_id, **kwargs)  # type: ignore[arg-type]
+
+    def scan_scoped_node_artifacts(self, project_id: str, run_id: str, *, node_id: str, expected_revision: str, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.scan_node_artifacts(run_id, project_id=project_id, node_id=node_id, expected_revision=expected_revision, now=now)
+
+    def complete_scoped_node(self, project_id: str, run_id: str, *, node_id: str, actor: dict, expected_revision: str, now: str) -> RunProjection:
+        self.get_scoped_run(project_id, run_id)
+        return self.complete_node(run_id, node_id=node_id, actor=actor, expected_revision=expected_revision, now=now)
+
+    def confirm_scoped_artifact(self, project_id: str, run_id: str, *, node_id: str, artifact_id: str, actor: dict, expected_revision: str, now: str) -> dict:
+        self.get_scoped_run(project_id, run_id)
+        return self.confirm_artifact(run_id, node_id=node_id, artifact_id=artifact_id, actor=actor, expected_revision=expected_revision, now=now)
 
     def _require_execution_lease(
         self, project_id: str, run_id: str, *, write_required: bool
@@ -1044,6 +1251,75 @@ class WorkflowRuntimeService:
                 raise
         return self.get_project_workflow_binding(project_id) or {}
 
+    def get_project_concurrency(self, project_id: str) -> dict[str, int]:
+        return self._projects.concurrency(project_id)
+
+    def update_project_concurrency(
+        self, project_id: str, *, max_active_runs: int, max_active_agents: int, now: str, actor: dict
+    ) -> dict[str, int]:
+        require_trusted_human(actor, operation="更新项目并发限制")
+        if self._projects.is_archived(project_id):
+            raise ValueError("PROJECT_ARCHIVED: archived projects are read-only")
+        with self._lock, self._db:
+            return self._projects.update_concurrency(
+                project_id,
+                max_active_runs=max_active_runs,
+                max_active_agents=max_active_agents,
+                now=now,
+            )
+
+    def list_project_workspaces(self, project_id: str) -> list[dict]:
+        row = self._db.execute("SELECT root_path FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Project not found: {project_id}")
+        leases = self._workspace_leases.list_for_project(project_id)
+        by_path = {lease["workspacePath"]: lease for lease in leases}
+        root = str(row["root_path"])
+        if root not in by_path:
+            by_path[root] = None
+        return [
+            {
+                "path": path,
+                "label": Path(path).name or path,
+                "occupiedByRunId": lease["runId"] if lease and lease["status"] == "active" else None,
+                "leaseMode": lease["mode"] if lease else None,
+                "leaseStatus": lease["status"] if lease else None,
+                "recommended": lease is None or lease["status"] != "active",
+            }
+            for path, lease in sorted(by_path.items())
+        ]
+
+    def create_project_worktree(self, project_id: str, *, name: str, branch_name: str, base_ref: str = "HEAD") -> dict:
+        row = self._db.execute("SELECT root_path FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Project not found: {project_id}")
+        if self._projects.is_archived(project_id):
+            raise ValueError("PROJECT_ARCHIVED: archived projects are read-only")
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", name) or name in {".", ".."} or ".." in name.split("/"):
+            raise ValueError("WORKTREE_NAME_INVALID: invalid worktree name")
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch_name) or branch_name.startswith("/") or ".." in branch_name.split("/"):
+            raise ValueError("WORKTREE_BRANCH_INVALID: invalid branch name")
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref) or base_ref.startswith("/") or ".." in base_ref.split("/"):
+            raise ValueError("WORKTREE_BASE_INVALID: invalid base ref")
+        root = Path(str(row["root_path"])).resolve()
+        worktree_path = (root / ".workflow-platform" / "worktrees" / name).resolve()
+        managed_root = (root / ".workflow-platform" / "worktrees").resolve()
+        if managed_root not in worktree_path.parents:
+            raise ValueError("WORKTREE_PATH_INVALID: worktree must be managed by the project")
+        if worktree_path.exists():
+            raise ValueError("WORKTREE_EXISTS: worktree path already exists")
+        try:
+            completed = subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path), base_ref],
+                cwd=root, capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError("WORKTREE_CREATE_FAILED: unable to execute git worktree") from error
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "git worktree failed").strip()
+            raise ValueError(f"WORKTREE_CREATE_FAILED: {detail}")
+        return {"path": str(worktree_path), "branch": branch_name, "head": None, "bare": False}
+
     def archive_project(self, project_id: str, *, actor: dict, now: str) -> dict:
         archivist = require_trusted_human(actor, operation="归档项目")
         with self._lock:
@@ -1258,6 +1534,7 @@ class WorkflowRuntimeService:
         self,
         run_id: str,
         *,
+        project_id: str | None = None,
         node_id: str,
         artifact_path: Path,
         artifact_type: str,
@@ -1267,6 +1544,7 @@ class WorkflowRuntimeService:
         expected_revision: str,
         now: str,
     ) -> RunProjection:
+        self._validate_project_scope(project_id, run_id)
         self._assert_run_project_active(run_id)
         if artifact_status not in {"verified", "provisional"}:
             raise ValueError(f"ARTIFACT_STATUS_INVALID: unsupported artifact status {artifact_status}")
@@ -1369,12 +1647,14 @@ class WorkflowRuntimeService:
         self,
         run_id: str,
         *,
+        project_id: str | None = None,
         node_id: str,
         expected_revision: str,
         now: str,
         artifact_status: str = "verified",
     ) -> dict:
         """Register declared artifact files without creating duplicate revisions for unchanged content."""
+        self._validate_project_scope(project_id, run_id)
         self._assert_run_project_active(run_id)
         workflow = self._runs.workflow_for_run(run_id)
         node = next((candidate for candidate in workflow.nodes if candidate.id == node_id), None)
@@ -1430,6 +1710,7 @@ class WorkflowRuntimeService:
 
             projection = self.submit_artifact(
                 run_id,
+                project_id=project_id,
                 node_id=node_id,
                 artifact_path=target,
                 artifact_type=output.type,
@@ -2593,6 +2874,8 @@ class WorkflowRuntimeService:
                 self._db.commit()
 
         with self._lock, self._db:
+            if project_id is not None:
+                self._assert_agent_concurrency(project_id, run_id)
             self._agent_jobs.create(
                 id=job_id,
                 run_id=run_id,
@@ -3011,6 +3294,7 @@ class WorkflowRuntimeService:
         run_id: str,
         job_id: str,
         *,
+        project_id: str | None = None,
         actor: dict,
         now: str,
     ) -> dict:
@@ -3032,6 +3316,7 @@ class WorkflowRuntimeService:
         )
         return self.start_agent_job(
             run_id,
+            project_id=project_id,
             node_id=job["nodeId"],
             provider=job["provider"],
             prompt="历史交互记录：\n" + "\n".join(history_lines),
@@ -3099,6 +3384,7 @@ class WorkflowRuntimeService:
         run_id: str,
         checkpoint_id: str,
         *,
+        project_id: str | None = None,
         actor: dict,
         now: str,
     ) -> dict:
@@ -3125,6 +3411,7 @@ class WorkflowRuntimeService:
 
         return self.start_agent_job(
             run_id,
+            project_id=project_id,
             node_id=checkpoint["nodeId"],
             provider=checkpoint["provider"],
             prompt=checkpoint["prompt"],
@@ -3517,6 +3804,14 @@ class WorkflowRuntimeService:
             jobs = self._agent_jobs.list_for_run(run_id)
             terminal_sessions = self._terminals.list_for_run(run_id)
             checkpoints = self._agent_checkpoints.list_for_run(run_id)
+            lease = self._workspace_leases.get_for_run(run_id)
+            if lease is not None and lease["status"] == "active":
+                self._workspace_leases.verify(
+                    run_id,
+                    verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                )
+                self._db.commit()
+                lease = self._workspace_leases.get_for_run(run_id)
             orphan_agent_job_ids = [
                 job["id"]
                 for job in jobs
@@ -3546,6 +3841,7 @@ class WorkflowRuntimeService:
                     for checkpoint in checkpoints
                     if checkpoint["status"] == "recoverable"
                 ],
+                "workspaceLease": lease,
                 "rebuildAvailable": True,
             }
 
@@ -3695,6 +3991,20 @@ class WorkflowRuntimeService:
                 if self._db.in_transaction:
                     self._db.rollback()
                 raise
+
+    def _assert_agent_concurrency(self, project_id: str, run_id: str) -> None:
+        concurrency = self._projects.concurrency(project_id)
+        active_agent_count = sum(
+            1 for job in self._agent_jobs.list_for_run(run_id)
+            if job["status"] in {"QUEUED", "RUNNING"}
+        )
+        if active_agent_count >= concurrency["maxActiveAgents"]:
+            raise RuntimeContractError(
+                "AGENT_CONCURRENCY_LIMIT",
+                "Run active Agent limit reached",
+                status=409,
+                details={"limit": concurrency["maxActiveAgents"], "activeCount": active_agent_count},
+            )
 
     def _assert_run_project_active(self, run_id: str) -> None:
         project_id = self._runs.project_id_for_run(run_id)

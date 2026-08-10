@@ -173,9 +173,10 @@ export function registerTerminalHandlers(
   });
   ipcMainLike.handle(
     "terminal:bind-runtime-session",
-    (_event, sessionId: unknown, runId: unknown, runtimeSessionId: unknown) => {
+    (_event, sessionId: unknown, projectId: unknown, runId: unknown, runtimeSessionId: unknown) => {
       terminalManager.bindRuntimeSession(
         requireString(sessionId, "Terminal session ID"),
+        requireString(projectId, "Project ID"),
         requireString(runId, "Run ID"),
         requireString(runtimeSessionId, "Runtime terminal session ID"),
       );
@@ -229,6 +230,9 @@ export function registerTerminalHandlers(
   ipcMainLike.handle("terminal:interrupt", (_event, sessionId: unknown) => {
     terminalManager.interrupt(requireString(sessionId, "Terminal session ID"));
   });
+  ipcMainLike.handle("terminal:export-output", (_event, sessionId: unknown) =>
+    terminalManager.exportOutput(requireString(sessionId, "Terminal session ID")),
+  );
   ipcMainLike.handle("terminal:stop", (_event, sessionId: unknown) => {
     terminalManager.stop(requireString(sessionId, "Terminal session ID"));
   });
@@ -313,7 +317,7 @@ async function recordTerminalCommandDecision(
     throw new Error("Runtime 未就绪，无法记录危险命令审批。");
   }
   await defaultRuntimeManager.request({
-    path: `/runs/${encodeURIComponent(decision.runId)}/terminals/${encodeURIComponent(decision.runtimeSessionId)}/command-decisions`,
+    path: `/projects/${encodeURIComponent(decision.projectId)}/runs/${encodeURIComponent(decision.runId)}/terminals/${encodeURIComponent(decision.runtimeSessionId)}/command-decisions`,
     body: {
       decision: decision.decision,
       riskLevel: decision.riskLevel,

@@ -6,13 +6,21 @@ import { RuntimeClientError, type ScopedCreateRunResponse } from "../../app/runt
 type NewRunPageProps = {
   project: { id: string; name: string };
   binding: { workflowVersionId: string; workflowName: string } | null;
-  workspaces: Array<{ path: string; branch: string; isMain: boolean }>;
+  workspaces: Array<{
+    path: string;
+    branch: string;
+    isMain: boolean;
+    occupiedByRunId?: string | null;
+    leaseStatus?: "active" | "released" | "expired";
+    recommended?: boolean;
+  }>;
   actor: Actor;
   createIdempotencyKey?: () => string;
   onCreate(input: {
     idempotencyKey: string;
     request: CreateRunRequest;
   }): Promise<ScopedCreateRunResponse>;
+  onCreateWorkspace?: (branch: string) => Promise<{ path: string; branch: string }>;
   onCreated(runId: string): void;
   onCancel(): void;
   onOpenWorkflowLibrary(): void;
@@ -27,6 +35,7 @@ export function NewRunPage({
   actor,
   createIdempotencyKey = defaultIdempotencyKey,
   onCreate,
+  onCreateWorkspace,
   onCreated,
   onCancel,
   onOpenWorkflowLibrary,
@@ -35,16 +44,23 @@ export function NewRunPage({
   const [taskGoal, setTaskGoal] = useState("");
   const [parametersText, setParametersText] = useState("{}");
   const [workspacePath, setWorkspacePath] = useState(workspaces[0]?.path ?? "");
+  const [workspaceOptions, setWorkspaceOptions] = useState(workspaces);
+  const [workspacePending, setWorkspacePending] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("write");
   const [pending, setPending] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<FormError | null>(null);
   const idempotencyRef = useRef<{ fingerprint: string; key: string } | null>(null);
 
+  useEffect(() => setWorkspaceOptions(workspaces), [workspaces]);
+
   useEffect(() => {
-    if (workspaces.some((workspace) => workspace.path === workspacePath)) return;
-    setWorkspacePath(workspaces[0]?.path ?? "");
-  }, [workspaces, workspacePath]);
+    const selected = workspaceOptions.find((workspace) => workspace.path === workspacePath);
+    if (selected && !(workspaceMode === "write" && selected.occupiedByRunId && selected.leaseStatus === "active")) return;
+    const recommended = workspaceOptions.find((workspace) => workspace.recommended && !workspace.occupiedByRunId);
+    const available = workspaceOptions.find((workspace) => !workspace.occupiedByRunId || workspace.leaseStatus !== "active");
+    setWorkspacePath(recommended?.path ?? available?.path ?? "");
+  }, [workspaceOptions, workspaceMode, workspacePath]);
 
   if (!binding) {
     return (
@@ -72,6 +88,11 @@ export function NewRunPage({
     const parsed = validateForm(title, parametersText, workspacePath);
     if ("error" in parsed) {
       setError({ message: parsed.error });
+      return;
+    }
+    const selectedWorkspace = workspaceOptions.find((workspace) => workspace.path === workspacePath);
+    if (workspaceMode === "write" && selectedWorkspace?.occupiedByRunId && selectedWorkspace.leaseStatus === "active") {
+      setError({ message: `工作区已被活动 Run ${selectedWorkspace.occupiedByRunId} 占用，请选择推荐工作区或只读模式。` });
       return;
     }
 
@@ -133,7 +154,7 @@ export function NewRunPage({
         <div><dt>工作流版本</dt><dd>{binding.workflowName} · {binding.workflowVersionId}</dd></div>
       </dl>
 
-      {workspaces.length === 0 ? (
+      {workspaceOptions.length === 0 ? (
         <p className="new-run-workspace-warning" role="status">
           没有可用的执行工作区，请先在项目页创建或发现 Git worktree。
         </p>
@@ -166,17 +187,48 @@ export function NewRunPage({
           执行工作区
           <select
             value={workspacePath}
-            disabled={workspaces.length === 0}
+            disabled={workspaceOptions.length === 0}
             onChange={(event) => setWorkspacePath(event.target.value)}
           >
-            {workspaces.length === 0 ? <option value="">无可用工作区</option> : null}
-            {workspaces.map((workspace) => (
-              <option key={workspace.path} value={workspace.path}>
+            {workspaceOptions.length === 0 ? <option value="">无可用工作区</option> : null}
+            {workspaceOptions.map((workspace) => (
+              <option
+                key={workspace.path}
+                value={workspace.path}
+                disabled={workspaceMode === "write" && workspace.occupiedByRunId != null && workspace.leaseStatus === "active"}
+              >
                 {workspace.isMain ? "main" : workspace.branch} · {workspace.path}
+                {workspace.occupiedByRunId && workspace.leaseStatus === "active" ? `（已被 ${workspace.occupiedByRunId} 占用）` : workspace.recommended ? "（推荐）" : ""}
               </option>
             ))}
           </select>
         </label>
+        {onCreateWorkspace ? (
+          <button
+            className="quiet-button"
+            type="button"
+            disabled={pending || workspacePending}
+            onClick={async () => {
+              setWorkspacePending(true);
+              setError(null);
+              try {
+                const branch = `run/${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+                const created = await onCreateWorkspace(branch);
+                setWorkspaceOptions((current) => [
+                  ...current.filter((item) => item.path !== created.path),
+                  { path: created.path, branch: created.branch, isMain: false, recommended: true },
+                ]);
+                setWorkspacePath(created.path);
+              } catch (caught: unknown) {
+                setError({ message: caught instanceof Error ? caught.message : "创建 Worktree 失败" });
+              } finally {
+                setWorkspacePending(false);
+              }
+            }}
+          >
+            {workspacePending ? "正在创建 Worktree..." : "创建 Worktree"}
+          </button>
+        ) : null}
         <fieldset className="new-run-mode">
           <legend>工作区模式</legend>
           <label>
@@ -209,7 +261,7 @@ export function NewRunPage({
         ) : null}
 
         <div className="new-run-actions">
-          <button className="run-next-action-primary-button" type="submit" disabled={pending || workspaces.length === 0}>
+          <button className="run-next-action-primary-button" type="submit" disabled={pending || workspaceOptions.length === 0}>
             {pending ? "正在创建..." : submitted ? "重试创建" : "创建 Run"}
           </button>
           <button className="quiet-button" type="button" disabled={pending} onClick={onCancel}>取消</button>

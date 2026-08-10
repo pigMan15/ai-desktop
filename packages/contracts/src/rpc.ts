@@ -35,6 +35,11 @@ export type TransitionResult = {
   emittedEvents: RunEvent[];
 };
 
+export type ProjectConcurrencySettings = {
+  maxActiveRuns: number;
+  maxActiveAgents: number;
+};
+
 export type WorkspaceMode = "write" | "read";
 export type WorkspaceLeaseStatus = "active" | "released" | "expired";
 

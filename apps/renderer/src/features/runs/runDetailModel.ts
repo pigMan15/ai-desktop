@@ -86,13 +86,14 @@ export function runDetailReducer(
   }
 
   if (action.type === "request-succeeded") {
+    const overview = mergeOverview(state.overview, action.overview);
     return {
       ...state,
-      overview: action.overview,
+      overview,
       phase: "ready",
       selectedNodeId: selectedNodeInOverview(
         state.selectedNodeId,
-        action.overview,
+        overview,
       ),
       lastRefreshedAt: action.refreshedAt,
       error: null,
@@ -115,6 +116,20 @@ export function runDetailReducer(
     phase: failurePhase(state.overview, action.error),
     error: action.error,
   };
+}
+
+function mergeOverview(
+  previous: RunOverview | null,
+  incoming: RunOverview,
+): RunOverview {
+  if (previous && !isWorkflowSnapshot(incoming.workflow)) {
+    return { ...incoming, workflow: previous.workflow };
+  }
+  return incoming;
+}
+
+function isWorkflowSnapshot(value: RunOverview["workflow"]): boolean {
+  return Boolean(value && Array.isArray(value.nodes) && Array.isArray(value.edges));
 }
 
 export function detailPollInterval(status: RunStatus | undefined): 2000 | 10000 {

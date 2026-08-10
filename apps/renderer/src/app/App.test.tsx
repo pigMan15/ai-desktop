@@ -2,12 +2,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../features/terminal/TerminalViewport", () => ({
-  TerminalViewport: ({ ariaLabel, output, writable, onInput, onInterrupt }: {
+  TerminalViewport: ({ ariaLabel, output, writable, onInput, onInterrupt, onResize }: {
     ariaLabel: string;
     output: Array<{ sequence: number; data: string }>;
     writable?: boolean;
     onInput?: (data: string) => void | Promise<void>;
     onInterrupt?: () => void;
+    onResize?: (columns: number, rows: number) => void;
   }) => (
     <section aria-label={ariaLabel} className="terminal-viewport" data-writable={String(Boolean(writable))}>
       {output.map((event) => (
@@ -15,6 +16,7 @@ vi.mock("../features/terminal/TerminalViewport", () => ({
       ))}
       <button type="button" onClick={() => onInput?.("继续\r")}>在 Agent 终端回复</button>
       <button type="button" onClick={onInterrupt}>中断 Agent 终端</button>
+      <button type="button" onClick={() => onResize?.(120, 40)}>调整 Agent 尺寸</button>
     </section>
   ),
 }));
@@ -235,6 +237,137 @@ describe("App", () => {
     });
   });
 
+  it("runs an interactive Agent inside Run and targets one desktop PTY", async () => {
+    window.location.hash = "#/runs/run-one";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "saved-run",
+    });
+    const scopedOverview = runOverview("run-one");
+    scopedOverview.run.status = "IN_PROGRESS";
+    scopedOverview.workflow.nodes[0]!.kind = "agent";
+    scopedOverview.projection = {
+      ...projection("run-one", "2", "IN_PROGRESS"),
+      allowedActions: [
+        { id: "complete:plan", label: "Complete plan", eventType: "NODE_COMPLETED", nodeId: "plan", risk: "low" },
+      ],
+    };
+    const terminalBridge = {
+      create: vi.fn(async () => ({
+        id: "desktop-agent-1",
+        kind: "codex" as const,
+        cwd: "G:\\Project\\demo",
+        pid: 4321,
+        columns: 100,
+        rows: 30,
+      })),
+      read: vi.fn(async () => []),
+      resize: vi.fn(async (_sessionId: string, columns: number, rows: number) => ({ columns, rows })),
+      onOutput: vi.fn(() => () => undefined),
+      writeInput: vi.fn(async () => undefined),
+      interrupt: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+    };
+    Object.defineProperty(window, "workflowTerminal", {
+      configurable: true,
+      value: terminalBridge,
+    });
+    let agentRequest: RequestInit | undefined;
+    let agentListCalls = 0;
+    const job = {
+      id: "agent-job-1",
+      runId: "run-one",
+      nodeId: "plan",
+      provider: "codex",
+      status: "QUEUED",
+      mode: "interactive",
+      command: ["codex"],
+      cwd: "G:\\Project\\demo",
+      createdAt: "2026-08-06T00:00:00Z",
+      updatedAt: "2026-08-06T00:00:00Z",
+    };
+    const secondJob = { ...job, id: "agent-job-2", status: "COMPLETED", mode: "automatic" };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") {
+        return jsonResponse([{ id: "codex", executable: "codex", available: true, path: "C:\\bin\\codex.exe", version: "1.0", message: "available" }]);
+      }
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/projects/project-1/runs/run-one/overview") return jsonResponse(scopedOverview);
+      if (url.pathname === "/projects/project-1/runs/run-one/agents" && init?.method === "POST") {
+        agentRequest = init;
+        return jsonResponse({ ...job, job, effectivePrompt: "继续开发", contextArtifacts: [], expectedArtifacts: [] });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-one/agents") {
+        agentListCalls += 1;
+        return jsonResponse(agentRequest ? [{ ...job, status: "RUNNING" }, secondJob] : []);
+      }
+      if (url.pathname === "/projects/project-1/runs/run-one/agents/agent-job-1/interactive-session/start") {
+        return jsonResponse({
+          id: "runtime-session-1",
+          runId: "run-one",
+          jobId: "agent-job-1",
+          provider: "codex",
+          status: "RUNNING",
+          desktopSessionId: "desktop-agent-1",
+          pid: 4321,
+          cwd: "G:\\Project\\demo",
+          maxOutputBytes: 1_000_000,
+          createdAt: "2026-08-06T00:00:00Z",
+          updatedAt: "2026-08-06T00:00:00Z",
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-one/agents/agent-job-1/interactive-session/input") {
+        return jsonResponse({ id: "input-1", sessionId: "runtime-session-1", sequence: 1, kind: "input", content: "继续", createdAt: "2026-08-06T00:00:00Z" });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-one/agents/agent-job-1/cancel") {
+        return jsonResponse({ ...job, status: "CANCELLED" });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-one/agents/agent-job-1/output") return jsonResponse([]);
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(agentListCalls).toBeGreaterThan(0));
+    fireEvent.change(await screen.findByLabelText("Agent 提示词"), { target: { value: "继续开发" } });
+    fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
+
+    await waitFor(() => expect(agentRequest).toBeDefined());
+    expect(agentRequest?.method).toBe("POST");
+    expect(JSON.parse(String(agentRequest?.body))).toMatchObject({
+      nodeId: "plan",
+      provider: "codex",
+      prompt: "继续开发",
+      mode: "interactive",
+      allowedTools: [],
+      cwd: "G:\\Project\\demo",
+    });
+    const viewport = await screen.findByLabelText("Agent 执行器 agent-job-1");
+    expect(viewport).toHaveAttribute("data-writable", "true");
+    expect(window.location.hash).toBe("#/runs/run-one");
+
+    fireEvent.click(screen.getByRole("link", { name: "全屏执行器" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/runs/run-one/agents/agent-job-1"));
+    const fullScreenViewport = await screen.findByLabelText("Agent 执行器 agent-job-1");
+    fireEvent.click(within(fullScreenViewport).getByRole("button", { name: "在 Agent 终端回复" }));
+    fireEvent.click(within(fullScreenViewport).getByRole("button", { name: "中断 Agent 终端" }));
+    fireEvent.click(within(fullScreenViewport).getByRole("button", { name: "调整 Agent 尺寸" }));
+    fireEvent.click(screen.getByRole("button", { name: "停止 Agent" }));
+
+    await waitFor(() => expect(terminalBridge.writeInput).toHaveBeenCalledWith("desktop-agent-1", "继续\r"));
+    expect(terminalBridge.interrupt).toHaveBeenCalledWith("desktop-agent-1");
+    expect(terminalBridge.resize).toHaveBeenCalledWith("desktop-agent-1", 120, 40);
+    expect(terminalBridge.stop).toHaveBeenCalledWith("desktop-agent-1");
+    fireEvent.click(screen.getByRole("tab", { name: /agent-job-2.*codex.*COMPLETED/i }));
+    await waitFor(() => expect(window.location.hash).toBe("#/runs/run-one/agents/agent-job-2"));
+  });
+
   it("posts Gate detail actions with the canonical verifier actor", async () => {
     window.location.hash = "#/runs/run-one";
     saveWorkspaceSession({
@@ -397,6 +530,209 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "工作流视图" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "项目工作区" })).not.toBeInTheDocument();
+  });
+
+  it("binds a terminal to the selected Run and displays the exported Evidence URI", async () => {
+    window.location.hash = "#/terminal";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-1",
+      projectName: "Demo project",
+      workflowName: "Demo workflow",
+      runId: "run-1",
+    });
+    const evidenceUri = "file:///G:/Project/demo/.workflow-platform/evidence/terminal.log";
+    const requests: Array<{ path: string; method: string }> = [];
+    let readCount = 0;
+    Object.defineProperty(window, "workflowTerminal", {
+      configurable: true,
+      value: {
+        create: vi.fn(async () => ({
+          id: "desktop-terminal-1",
+          kind: "shell",
+          cwd: "G:\\Project\\demo",
+          pid: 4321,
+          columns: 100,
+          rows: 30,
+        })),
+        bindRuntimeSession: vi.fn(async () => undefined),
+        exportOutput: vi.fn(async () => ({ path: "unused.log", firstSequence: 1, lastSequence: 1 })),
+        submitShellLine: vi.fn(async () => ({ status: "executed", commandSummary: "" })),
+        writeInput: vi.fn(async () => undefined),
+        approveCommand: vi.fn(async () => ({ status: "executed", commandSummary: "" })),
+        rejectCommand: vi.fn(async () => ({ status: "blocked", reason: "cancelled" })),
+        read: vi.fn(async () => readCount++ === 0 ? [{ sequence: 1, data: "verified\r\n" }] : []),
+        resize: vi.fn(async () => ({
+          id: "desktop-terminal-1",
+          kind: "shell",
+          cwd: "G:\\Project\\demo",
+          pid: 4321,
+          columns: 100,
+          rows: 30,
+        })),
+        interrupt: vi.fn(async () => undefined),
+        stop: vi.fn(async () => undefined),
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      requests.push({ path: url.pathname, method });
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/workflow-versions/workflow-version-1/runs") {
+        return jsonResponse([
+          { ...runSummary(), id: "run-1", title: "主流程" },
+          { ...runSummary(), id: "run-2", title: "发布流程" },
+        ]);
+      }
+      if (url.pathname === "/projects/project-1/runs") {
+        return jsonResponse({
+          items: [
+            { ...runSummary(), id: "run-1", title: "主流程" },
+            { ...runSummary(), id: "run-2", title: "发布流程" },
+          ],
+          nextCursor: null,
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-2/overview") {
+        const overview = runOverview("run-2");
+        overview.workflow.nodes = [
+          { id: "plan", name: "计划", kind: "task" },
+          { id: "verify", name: "验证", kind: "task" },
+        ];
+        return jsonResponse(overview);
+      }
+      if (url.pathname === "/projects/project-1/runs/run-2/terminals" && method === "POST") {
+        return jsonResponse({ id: "runtime-terminal-2" });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-2/terminals") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/runs/run-2/terminals/runtime-terminal-2/output") {
+        return jsonResponse({ accepted: true });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-2/terminals/runtime-terminal-2/evidence") {
+        return jsonResponse({
+          id: "terminal-evidence-1",
+          runId: "run-2",
+          type: "evidence",
+          uri: evidenceUri,
+          contentHash: "sha256:evidence",
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-2/artifacts") return jsonResponse([]);
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("关联 Run"), { target: { value: "run-2" } });
+    await screen.findByRole("option", { name: "验证" });
+    fireEvent.change(screen.getByLabelText("绑定节点"), { target: { value: "verify" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建终端" }));
+    await screen.findByText("verified");
+    fireEvent.click(screen.getByRole("button", { name: "导出终端证据" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(evidenceUri);
+    expect(requests).toContainEqual({ path: "/projects/project-1/runs/run-2/terminals", method: "POST" });
+    expect(requests).toContainEqual({
+      path: "/projects/project-1/runs/run-2/terminals/runtime-terminal-2/evidence",
+      method: "POST",
+    });
+  });
+
+  it("loads every project Run page and reveals ended Runs from older workflow versions", async () => {
+    window.location.hash = "#/terminal";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      projectId: "project-1",
+      workflowVersionId: "workflow-version-2",
+      projectName: "Demo project",
+      workflowName: "Current workflow",
+      runId: "run-current",
+    });
+    const requests: string[] = [];
+    const postRequests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      requests.push(`${url.pathname}${url.search}`);
+      if (init?.method === "POST") postRequests.push(url.pathname);
+      if (url.pathname === "/health") return jsonResponse({ status: "ok" });
+      if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
+      if (url.pathname === "/workflow-versions/workflow-version-2/runs") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/runs" && url.searchParams.get("cursor") === "older") {
+        return jsonResponse({
+          items: [{
+            ...runSummary(),
+            id: "run-old",
+            title: "旧 Run",
+            status: "DONE",
+            workflowVersionId: "workflow-version-1",
+            workflowName: "旧工作流",
+            workflowVersion: "1",
+            createdAt: "2026-08-01T00:00:00Z",
+          }],
+          nextCursor: null,
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs") {
+        return jsonResponse({
+          items: [{
+            ...runSummary(),
+            id: "run-current",
+            title: "当前 Run",
+            status: "IN_PROGRESS",
+            workflowVersionId: "workflow-version-2",
+            workflowName: "Current workflow",
+            workflowVersion: "2",
+          }],
+          nextCursor: "older",
+        });
+      }
+      if (url.pathname === "/projects/project-1/runs/run-current/terminals") return jsonResponse([]);
+      if (url.pathname === "/projects/project-1/runs/run-old/overview") return jsonResponse(runOverview("run-old"));
+      if (url.pathname === "/projects/project-1/runs/run-old/terminals") {
+        return jsonResponse([{
+          id: "history-old",
+          runId: "run-old",
+          nodeId: "plan",
+          kind: "shell",
+          status: "stopped",
+          cwd: "G:\\Project\\old",
+          pid: null,
+          createdAt: "2026-08-01T00:00:00Z",
+          updatedAt: "2026-08-01T00:01:00Z",
+        }]);
+      }
+      if (url.pathname === "/projects/project-1/runs/run-old/terminals/history-old/output") {
+        return jsonResponse([{
+          sequence: 1,
+          stream: "stdout",
+          data: "old Run output",
+          createdAt: "2026-08-01T00:00:00Z",
+        }]);
+      }
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByRole("option", { name: /当前 Run.*IN_PROGRESS.*Current workflow 2/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("显示已结束 Run"));
+    expect(await screen.findByRole("option", { name: /旧 Run.*DONE.*旧工作流 1/ })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("关联 Run"), { target: { value: "run-old" } });
+    const oldSession = await screen.findByRole("option", { name: /plan.*shell.*stopped/ });
+    fireEvent.change(screen.getByLabelText("历史终端会话"), { target: { value: oldSession.getAttribute("value") } });
+    fireEvent.click(screen.getByRole("button", { name: "查看历史输出" }));
+    expect(await screen.findByText("old Run output")).toBeInTheDocument();
+    expect(requests).toContain("/projects/project-1/runs?limit=100");
+    expect(requests).toContain("/projects/project-1/runs?cursor=older&limit=100");
+    expect(requests).toContain("/projects/project-1/runs/run-old/terminals");
+    expect(requests).toContain("/projects/project-1/runs/run-old/terminals/history-old/output?afterSequence=0");
+    expect(postRequests).not.toContain("/projects/project-1/runs/run-old/terminals");
   });
 
   it("renders one matching module for every declared route", () => {
@@ -736,34 +1072,19 @@ describe("App", () => {
       workflowName: "Demo Workflow",
       runId: "run-demo",
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = new URL(String(input));
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
-        if (url.pathname === "/runs/run-demo/projection") return jsonResponse(projection("run-demo", "3", "REVIEWING"));
-        if (url.pathname === "/runs/run-demo/timeline") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/artifacts") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/approvals") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/gates") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/agents") return jsonResponse([]);
-        if (url.pathname === "/agents/providers") {
-          return jsonResponse([{
-            id: "codex",
-            executable: "codex.cmd",
-            available: true,
-            path: "C:\\Tools\\codex.cmd",
-            version: "1.0.0",
-            message: "已检测到 Codex CLI。",
-          }]);
-        }
+        if (url.pathname === "/agents/providers") return jsonResponse([]);
         return jsonResponse([]);
-      }),
-    );
+      });
+    vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
 
-    expect((await screen.findAllByText("REVIEWING")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("连接状态：已连接")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname))
+      .not.toContain("/runs/run-demo/projection");
   });
 
   it("keeps the Runtime connected when restoring a stale saved Run fails", async () => {
@@ -794,14 +1115,40 @@ describe("App", () => {
     expect(await screen.findByText("连接状态：已连接")).toBeInTheDocument();
   });
 
-  it("cleans orphan terminal sessions from Recovery and refreshes the diagnostic result", async () => {
-    window.location.hash = "#/recovery";
+  it("renders invalid Run context without requesting Run children", async () => {
+    window.location.hash = "#/artifacts?projectId=project-1";
     saveWorkspaceSession({
       apiBaseUrl: "http://127.0.0.1:8765",
       projectPath: "G:\\Project\\demo",
       workflowVersionId: "workflow-version-demo",
       projectName: "demo",
       workflowName: "Demo Workflow",
+      projectId: "project-1",
+      runId: "run-demo",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      calls.push(path);
+      if (path === "/health") return jsonResponse({ status: "ok" });
+      return jsonResponse([]);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Run 链接无效" })).toBeInTheDocument();
+    expect(calls.filter((path) => path.includes("/runs/"))).toEqual([]);
+  });
+
+  it("cleans orphan terminal sessions from Recovery and refreshes the diagnostic result", async () => {
+    window.location.hash = "#/recovery?projectId=project-1&runId=run-demo";
+    saveWorkspaceSession({
+      apiBaseUrl: "http://127.0.0.1:8765",
+      projectPath: "G:\\Project\\demo",
+      workflowVersionId: "workflow-version-demo",
+      projectName: "demo",
+      workflowName: "Demo Workflow",
+      projectId: "project-1",
       runId: "run-demo",
     });
     const calls: string[] = [];
@@ -818,7 +1165,7 @@ describe("App", () => {
         if (url.pathname === "/runs/run-demo/approvals") return jsonResponse([]);
         if (url.pathname === "/runs/run-demo/gates") return jsonResponse([]);
         if (url.pathname === "/runs/run-demo/agents") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/recovery-diagnostics") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/recovery-diagnostics") {
           return jsonResponse({
             runId: "run-demo",
             eventCount: 7,
@@ -828,7 +1175,7 @@ describe("App", () => {
             rebuildAvailable: true,
           });
         }
-        if (url.pathname === "/runs/run-demo/recovery/cleanup-orphan-terminals") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/recovery/cleanup-orphan-terminals") {
           cleaned = true;
           return jsonResponse({ runId: "run-demo", cleanedSessionIds: ["terminal-orphan"] });
         }
@@ -842,7 +1189,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "清理遗留终端" }));
 
     expect(await screen.findByText("已清理遗留终端：1 个")).toBeInTheDocument();
-    expect(calls).toContain("/runs/run-demo/recovery/cleanup-orphan-terminals");
+    expect(calls).toContain("/projects/project-1/runs/run-demo/recovery/cleanup-orphan-terminals");
     expect(screen.queryByRole("button", { name: "清理遗留终端" })).not.toBeInTheDocument();
   });
 
@@ -1165,7 +1512,7 @@ describe("App", () => {
   });
 
   it("loads two Runtime-backed text previews before showing an artifact comparison", async () => {
-    window.location.hash = "#/artifacts";
+    window.location.hash = "#/artifacts?projectId=project-1&runId=run-demo";
     const calls: string[] = [];
     const originalCreateObjectUrl = URL.createObjectURL;
     const originalRevokeObjectUrl = URL.revokeObjectURL;
@@ -1184,6 +1531,7 @@ describe("App", () => {
       workflowVersionId: "workflow-version-demo",
       projectName: "demo",
       workflowName: "Demo Workflow",
+      projectId: "project-1",
       runId: "run-demo",
     });
     vi.stubGlobal(
@@ -1197,13 +1545,13 @@ describe("App", () => {
         }
         if (url.pathname === "/runs/run-demo/projection") return jsonResponse(projection("run-demo", "1", "CREATED"));
         if (url.pathname === "/runs/run-demo/timeline") return jsonResponse([]);
-        if (url.pathname === "/runs/run-demo/artifacts") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/artifacts") {
           return jsonResponse([
             { id: "artifact-1", runId: "run-demo", type: "plan", uri: "file:///plan.md", contentHash: "sha256:plan" },
             { id: "artifact-2", runId: "run-demo", type: "report", uri: "file:///report.md", contentHash: "sha256:report" },
           ]);
         }
-        if (url.pathname === "/runs/run-demo/artifacts/artifact-1/preview") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/artifacts/artifact-1/preview") {
           return jsonResponse({
             id: "artifact-1",
             uri: "file:///plan.md",
@@ -1216,7 +1564,7 @@ describe("App", () => {
             content: "计划\n旧步骤\n",
           });
         }
-        if (url.pathname === "/runs/run-demo/artifacts/artifact-2/preview") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/artifacts/artifact-2/preview") {
           return jsonResponse({
             id: "artifact-2",
             uri: "file:///report.md",
@@ -1229,10 +1577,10 @@ describe("App", () => {
             content: "计划\n新步骤\n",
           });
         }
-        if (url.pathname === "/runs/run-demo/evidence-package") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/evidence-package") {
           return jsonResponse({ schemaVersion: 1, runId: "run-demo", projection: projection("run-demo", "1", "CREATED"), timeline: [], artifacts: [], approvals: [], gates: [] });
         }
-        if (url.pathname === "/runs/run-demo/report") {
+        if (url.pathname === "/projects/project-1/runs/run-demo/report") {
           return jsonResponse({
             fileName: "run-demo-evidence-report.md",
             mediaType: "text/markdown",
@@ -1249,6 +1597,7 @@ describe("App", () => {
 
     render(<App />);
 
+    await screen.findByText("artifact-1");
     fireEvent.change(await screen.findByLabelText("基准产物"), { target: { value: "artifact-1" } });
     fireEvent.change(screen.getByLabelText("对比产物"), { target: { value: "artifact-2" } });
     const compareButton = screen.getByRole("button", { name: "比较产物" });
@@ -1256,8 +1605,8 @@ describe("App", () => {
     fireEvent.click(compareButton);
 
     expect((await screen.findByLabelText("产物差异内容")).textContent).toContain("- 旧步骤");
-    expect(calls).toContain("/runs/run-demo/artifacts/artifact-1/preview");
-    expect(calls).toContain("/runs/run-demo/artifacts/artifact-2/preview");
+    expect(calls).toContain("/projects/project-1/runs/run-demo/artifacts/artifact-1/preview");
+    expect(calls).toContain("/projects/project-1/runs/run-demo/artifacts/artifact-2/preview");
 
     fireEvent.click(screen.getByRole("button", { name: "下载证据包" }));
     fireEvent.click(screen.getByRole("button", { name: "下载运行报告" }));
@@ -1266,8 +1615,8 @@ describe("App", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(calls).toContain("/runs/run-demo/evidence-package");
-    expect(calls).toContain("/runs/run-demo/report");
+    expect(calls).toContain("/projects/project-1/runs/run-demo/evidence-package");
+    expect(calls).toContain("/projects/project-1/runs/run-demo/report");
     expect(anchorClick).toHaveBeenCalledTimes(2);
     anchorClick.mockRestore();
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectUrl });

@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { ProjectConcurrencySettings } from "@workflow-platform/contracts";
 import type { AgentProviderDiagnostic } from "../../app/runtimeClient";
 
 type Props = {
@@ -12,6 +14,8 @@ type Props = {
   operationMessage?: string;
   providerDiagnostics?: AgentProviderDiagnostic[];
   onRefreshProviderDiagnostics?: () => void;
+  projectConcurrency?: ProjectConcurrencySettings | null;
+  onSaveProjectConcurrency?: (settings: ProjectConcurrencySettings) => Promise<void>;
 };
 
 export type ManagedRuntimeStatus = {
@@ -41,8 +45,14 @@ export function SettingsPage({
   operationMessage,
   providerDiagnostics,
   onRefreshProviderDiagnostics,
+  projectConcurrency,
+  onSaveProjectConcurrency,
 }: Props) {
   const connected = connection === "connected";
+  const [concurrencyDraft, setConcurrencyDraft] = useState(projectConcurrency);
+  const [savingConcurrency, setSavingConcurrency] = useState(false);
+
+  useEffect(() => setConcurrencyDraft(projectConcurrency), [projectConcurrency]);
 
   return (
     <section id="settings" className="panel page-workspace page-settings" aria-labelledby="settings-title">
@@ -73,6 +83,42 @@ export function SettingsPage({
         <p className="status-line" aria-live="polite">
           {operationMessage}
         </p>
+      ) : null}
+      {concurrencyDraft && onSaveProjectConcurrency ? (
+        <fieldset className="settings-concurrency">
+          <legend>项目并发限制</legend>
+          <label>
+            活动 Run 上限
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={concurrencyDraft.maxActiveRuns}
+              onChange={(event) => setConcurrencyDraft({ ...concurrencyDraft, maxActiveRuns: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            每 Run 活动 Agent 上限
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={concurrencyDraft.maxActiveAgents}
+              onChange={(event) => setConcurrencyDraft({ ...concurrencyDraft, maxActiveAgents: Number(event.target.value) })}
+            />
+          </label>
+          <button
+            className="quiet-button"
+            type="button"
+            disabled={savingConcurrency || !validConcurrency(concurrencyDraft)}
+            onClick={() => {
+              setSavingConcurrency(true);
+              void onSaveProjectConcurrency(concurrencyDraft).finally(() => setSavingConcurrency(false));
+            }}
+          >
+            {savingConcurrency ? "正在保存..." : "保存并发限制"}
+          </button>
+        </fieldset>
       ) : null}
       {managedRuntime ? (
         <>
@@ -158,6 +204,15 @@ export function SettingsPage({
       ) : null}
     </section>
   );
+}
+
+function validConcurrency(settings: ProjectConcurrencySettings): boolean {
+  return Number.isInteger(settings.maxActiveRuns)
+    && Number.isInteger(settings.maxActiveAgents)
+    && settings.maxActiveRuns >= 1
+    && settings.maxActiveRuns <= 10
+    && settings.maxActiveAgents >= 1
+    && settings.maxActiveAgents <= 10;
 }
 
 function providerLabel(provider: AgentProviderDiagnostic["id"]): string {

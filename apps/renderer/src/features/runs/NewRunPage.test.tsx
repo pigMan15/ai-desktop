@@ -49,7 +49,14 @@ function createdRun(id = "run-created"): ScopedCreateRunResponse {
 
 function renderPage(options: {
   binding?: { workflowVersionId: string; workflowName: string } | null;
-  workspaces?: Array<{ path: string; branch: string; isMain: boolean }>;
+  workspaces?: Array<{
+    path: string;
+    branch: string;
+    isMain: boolean;
+    occupiedByRunId?: string | null;
+    leaseStatus?: "active" | "released" | "expired";
+    recommended?: boolean;
+  }>;
   onCreate?: ReturnType<typeof vi.fn>;
   onCreated?: ReturnType<typeof vi.fn>;
   onCancel?: ReturnType<typeof vi.fn>;
@@ -79,6 +86,20 @@ function renderPage(options: {
 afterEach(cleanup);
 
 describe("NewRunPage", () => {
+  it("selects a recommended workspace and disables an actively leased write workspace", () => {
+    renderPage({
+      workspaces: [
+        { path: "G:\\project", branch: "main", isMain: true, occupiedByRunId: "run-active", leaseStatus: "active" },
+        { path: "G:\\project\\release", branch: "release", isMain: false, recommended: true },
+      ],
+    });
+
+    const select = screen.getByLabelText("执行工作区");
+    expect(select).toHaveValue("G:\\project\\release");
+    expect(screen.getByRole("option", { name: /run-active/ })).toBeDisabled();
+    expect(screen.getByRole("option", { name: /推荐/ })).toBeInTheDocument();
+  });
+
   it("validates title, length, and object-only JSON without submitting", async () => {
     const { onCreate } = renderPage();
     fireEvent.click(screen.getByRole("button", { name: "创建 Run" }));

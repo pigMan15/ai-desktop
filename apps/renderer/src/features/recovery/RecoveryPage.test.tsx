@@ -1,9 +1,21 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { RecoveryPage } from "./RecoveryPage";
 
+afterEach(cleanup);
+
 describe("RecoveryPage", () => {
+  it("rebuilds through the URL-owned Run context", async () => {
+    const diagnostics = { runId: "run-1", eventCount: 1, projectionStatus: "CREATED", orphanAgentJobIds: [], orphanTerminalSessionIds: [], recoverableAgentCheckpointIds: [], rebuildAvailable: true };
+    const client = {
+      getRecoveryDiagnostics: vi.fn(async () => diagnostics),
+      rebuildProjection: vi.fn(async () => ({})),
+    };
+    render(<RecoveryPage state={null} context={{ projectId: "project-1", runId: "run-1" }} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "重建投影" }));
+    await waitFor(() => expect(client.rebuildProjection).toHaveBeenCalledWith("project-1", "run-1", expect.any(String)));
+  });
   it("allows operators to request a Runtime projection rebuild for the current Run", () => {
     const onRebuild = vi.fn();
 

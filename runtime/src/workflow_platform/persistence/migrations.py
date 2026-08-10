@@ -456,6 +456,10 @@ def _migrate_schema(db: sqlite3.Connection) -> None:
     }
     if "archived_at" not in project_columns:
         db.execute("ALTER TABLE projects ADD COLUMN archived_at TEXT")
+    if "max_active_runs" not in project_columns:
+        db.execute("ALTER TABLE projects ADD COLUMN max_active_runs INTEGER NOT NULL DEFAULT 3")
+    if "max_active_agents" not in project_columns:
+        db.execute("ALTER TABLE projects ADD COLUMN max_active_agents INTEGER NOT NULL DEFAULT 2")
 
     workflow_version_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(workflow_versions)").fetchall()

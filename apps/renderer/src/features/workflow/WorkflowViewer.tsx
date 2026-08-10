@@ -370,6 +370,8 @@ export function WorkflowViewer({
                       className="quiet-button"
                       aria-expanded={activeCanvasPanel === "roles"}
                       aria-controls="workflow-role-library"
+                      hidden
+                      style={{ display: "none" }}
                       onClick={() => setActiveCanvasPanel((panel) => panel === "roles" ? null : "roles")}
                     >
                       角色库
@@ -527,11 +529,11 @@ export function WorkflowViewer({
                       </label>
                       <label>
                         单产物摘要上限
-                        <input type="number" min="1" aria-label={`${node.id} 单产物摘要上限`} value={node.agent?.context?.summaryCharsPerArtifact ?? 2000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, maxTotalChars: 8000 }), summaryCharsPerArtifact: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                        <input type="number" min="1" aria-label={`${node.id} 单产物摘要上限`} value={node.agent?.context?.summaryCharsPerArtifact ?? 2000} disabled={(node.agent?.context?.delivery ?? "path") === "path"} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, maxTotalChars: 8000 }), summaryCharsPerArtifact: Math.max(1, Number(event.target.value) || 1) } } }))} />
                       </label>
                       <label>
                         上下文总长度上限
-                        <input type="number" min="1" aria-label={`${node.id} 上下文总长度上限`} value={node.agent?.context?.maxTotalChars ?? 8000} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000 }), maxTotalChars: Math.max(1, Number(event.target.value) || 1) } } }))} />
+                        <input type="number" min="1" aria-label={`${node.id} 上下文总长度上限`} value={node.agent?.context?.maxTotalChars ?? 8000} disabled={(node.agent?.context?.delivery ?? "path") === "path"} onChange={(event) => updateNode(node.id, (current) => ({ ...current, agent: { ...current.agent, promptTemplate: current.agent?.promptTemplate, context: { ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000 }), maxTotalChars: Math.max(1, Number(event.target.value) || 1) } } }))} />
                       </label>
                       <label>
                         上游上下文范围
@@ -550,6 +552,28 @@ export function WorkflowViewer({
                           <option value="none">不注入</option>
                           <option value="direct">直接上游</option>
                           <option value="ancestors">全部上游</option>
+                        </select>
+                      </label>
+                      <label>
+                        上游产物传递方式
+                        <select
+                          aria-label={`${node.id} 上游产物传递方式`}
+                          value={node.agent?.context?.delivery ?? "path"}
+                          onChange={(event) => updateNode(node.id, (current) => ({
+                            ...current,
+                            agent: {
+                              ...current.agent,
+                              promptTemplate: current.agent?.promptTemplate,
+                              context: {
+                                ...(current.agent?.context ?? { upstream: "none", maxArtifacts: 8, summaryCharsPerArtifact: 2000, maxTotalChars: 8000 }),
+                                delivery: event.target.value as "path" | "hybrid" | "summary",
+                              },
+                            },
+                          }))}
+                        >
+                          <option value="path">按路径读取</option>
+                          <option value="hybrid">路径和摘要</option>
+                          <option value="summary">仅传摘要</option>
                         </select>
                       </label>
                         </>
