@@ -218,6 +218,7 @@ EXPECTED_COLUMNS = {
         ("created_at", "TEXT", True, False),
         ("updated_at", "TEXT", True, False),
         ("ended_at", "TEXT", False, False),
+        ("kind", "TEXT", True, False),
     ],
     "agent_input_events": [
         ("id", "TEXT", False, True),
