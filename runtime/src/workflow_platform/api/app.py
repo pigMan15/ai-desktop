@@ -215,6 +215,7 @@ class StartAgentJobRequest(BaseModel):
     cwd: str | None = None
     actor: dict[str, Any]
     mode: str = "automatic"
+    transport: str = "auto"
     allowedTools: list[str] = Field(default_factory=list)
     timeoutSeconds: float = 300
     maxOutputBytes: int = 1_000_000
@@ -1081,6 +1082,7 @@ def create_app(
             timeout_seconds=request.timeoutSeconds,
             max_output_bytes=request.maxOutputBytes,
             mode=request.mode,
+            transport=request.transport,
             now=request.now,
         )
 

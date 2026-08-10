@@ -7,7 +7,8 @@ import subprocess
 from threading import RLock, Thread
 from typing import Any, Callable
 
-from workflow_platform.execution.providers import CliProvider
+from workflow_platform.execution.acp import AcpSession, acp_event_to_agent_output
+from workflow_platform.execution.providers import AcpProvider, CliProvider
 
 
 ALLOWED_ENVIRONMENT_KEYS = {
@@ -177,6 +178,143 @@ class CliAgentExecutor:
             if process is None:
                 return True
         _terminate_process(process)
+        return True
+
+    def _allowed_environment(self) -> dict[str, str]:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() in ALLOWED_ENVIRONMENT_KEYS
+        }
+        environment.update(self._extra_environment)
+        return environment
+
+    def _is_cancelled(self, job_id: str) -> bool:
+        with self._lock:
+            return job_id in self._cancelled
+
+
+class AcpAgentExecutor:
+    """ACP 自动模式执行器：与 CliAgentExecutor 同形状（构造注入 + run 返回结果）。"""
+
+    def __init__(
+        self,
+        *,
+        provider: AcpProvider,
+        on_output: Callable[[dict[str, Any]], None] | None = None,
+        on_started: Callable[[int], None] | None = None,
+        extra_environment: dict[str, str] | None = None,
+    ) -> None:
+        self._provider = provider
+        self._on_output = on_output
+        self._on_started = on_started
+        self._extra_environment = extra_environment or {}
+        self._sessions: dict[str, AcpSession] = {}
+        self._cancelled: set[str] = set()
+        self._lock = RLock()
+
+    def run(
+        self,
+        *,
+        job_id: str,
+        prompt: str,
+        cwd: Path,
+        project_root: Path,
+        timeout_seconds: float,
+        max_output_bytes: int,
+        allowed_tools: list[str] | None = None,
+        conversational: bool = False,
+    ) -> CliExecutionResult:
+        del max_output_bytes, conversational
+        resolved_cwd = _resolve_safe_cwd(cwd, project_root)
+        command = self._provider.build_acp_command(cwd=resolved_cwd)
+        session = AcpSession(
+            command.executable,
+            command.args,
+            cwd=command.cwd,
+            env=self._allowed_environment(),
+        )
+        events: list[dict[str, Any]] = []
+        import threading
+
+        completed = threading.Event()
+
+        def handle_event(event: dict[str, Any]) -> None:
+            events.append(event)
+            if event.get("method") in {"turn/completed", "session/finished", "error"}:
+                completed.set()
+            if self._on_output is not None:
+                self._on_output(acp_event_to_agent_output(event))
+
+        session.set_event_callback(handle_event)
+        with self._lock:
+            self._sessions[job_id] = session
+            cancelled_before_start = job_id in self._cancelled
+        session.start()
+        if self._on_started is not None and session.pid() is not None:
+            self._on_started(session.pid() or 0)
+        if cancelled_before_start:
+            session.close()
+            with self._lock:
+                self._sessions.pop(job_id, None)
+            return CliExecutionResult(
+                status="CANCELLED",
+                summary=None,
+                error="AGENT_CANCELLED: ACP session was cancelled before start",
+                exit_code=None,
+            )
+        try:
+            session_id = session.new_session({"mode": "auto"})
+            session.send_turn(prompt, session_id=session_id)
+            if not completed.wait(timeout=timeout_seconds):
+                return CliExecutionResult(
+                    status="FAILED",
+                    summary=None,
+                    error=f"AGENT_TIMEOUT: ACP turn exceeded {timeout_seconds} seconds",
+                    exit_code=None,
+                )
+            if self._is_cancelled(job_id):
+                return CliExecutionResult(
+                    status="CANCELLED",
+                    summary=None,
+                    error="AGENT_CANCELLED: ACP session was cancelled",
+                    exit_code=None,
+                )
+            error_events = [event for event in events if event.get("method") == "error"]
+            if error_events:
+                params = error_events[-1].get("params") or {}
+                return CliExecutionResult(
+                    status="FAILED",
+                    summary=None,
+                    error=str(params.get("text") or params.get("message") or "ACP error"),
+                    exit_code=None,
+                )
+            last_text: str | None = None
+            for event in reversed(events):
+                if event.get("method") == "message":
+                    text = (event.get("params") or {}).get("text")
+                    if isinstance(text, str) and text:
+                        last_text = text
+                        break
+            return CliExecutionResult(
+                status="COMPLETED",
+                summary=last_text,
+                error=None,
+                exit_code=0,
+            )
+        finally:
+            session.close()
+            with self._lock:
+                self._sessions.pop(job_id, None)
+                self._cancelled.discard(job_id)
+
+    def cancel(self, job_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(job_id)
+            self._cancelled.add(job_id)
+            if session is None:
+                return True
+        session.close()
         return True
 
     def _allowed_environment(self) -> dict[str, str]:

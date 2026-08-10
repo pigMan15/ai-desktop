@@ -2385,3 +2385,58 @@ def test_runtime_api_cancel_missing_agent_job_maps_404(tmp_path) -> None:
     response = client.post(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/agent-job-missing/cancel")
 
     assert response.status_code == 404
+
+
+def test_runtime_api_acp_transport_unsupported_provider_returns_422(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(
+        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
+    )
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    response = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "codex",
+            "prompt": "x",
+            "transport": "acp",
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "AGENT_ACP_UNAVAILABLE"
+
+
+def test_runtime_api_acp_transport_fake_completes_with_output(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    client = TestClient(
+        create_app(WorkflowRuntimeService(db, agent_provider_factory=lambda _provider: FakeProvider()))
+    )
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    started = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "fake",
+            "prompt": "hello acp",
+            "transport": "acp",
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    completed = started
+    for _ in range(200):
+        completed = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}")
+        if completed.json()["status"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        sleep(0.02)
+    assert completed.json()["status"] == "COMPLETED", completed.json()
+    assert completed.json().get("metadata", {}).get("transport") == "acp"
+    output = client.get(f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}/output")
+    kinds = [item["kind"] for item in output.json()]
+    assert "acp.message" in kinds

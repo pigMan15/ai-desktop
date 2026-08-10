@@ -1084,5 +1084,24 @@ def _migrate_knowledge_schema(db: sqlite3.Connection) -> None:
             ON knowledge_git_operations(repository_id, created_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_knowledge_idempotency_created
             ON knowledge_idempotency_keys(created_at, scope_key);
+
+        CREATE TABLE IF NOT EXISTS agent_permission_requests (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL,
+            permission_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('PENDING','ALLOWED','DENIED','EXPIRED')),
+            decided_by_json TEXT,
+            decided_at TEXT,
+            decision_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_permission_requests_job_status
+            ON agent_permission_requests(job_id, status, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_agent_permission_requests_run_status
+            ON agent_permission_requests(run_id, status, created_at, id);
         """
     )

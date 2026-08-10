@@ -10,3 +10,4 @@ export * from "./events.js";
 export * from "./rpc.js";
 export * from "./errors.js";
 export * from "./knowledge.js";
+export * from "./agent.js";

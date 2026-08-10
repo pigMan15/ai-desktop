@@ -245,3 +245,72 @@ class FakeCliProvider:
 
     def parse_line(self, line: str) -> dict[str, Any]:
         return CodexCliProvider().parse_line(line)
+
+
+class AcpProvider(Protocol):
+    id: str
+
+    def build_acp_command(self, *, cwd: Path) -> CliCommand: ...
+    def map_permission(self, request: dict) -> dict:
+        """ACP permission.request → AgentPermissionRequest 字段。"""
+        ...
+
+
+class ClaudeAcpProvider:
+    id = "claude"
+
+    def build_acp_command(self, *, cwd: Path) -> CliCommand:
+        from workflow_platform.execution.acp import build_acp_command
+
+        command = build_acp_command("claude", cwd=cwd)
+        assert command is not None
+        return command
+
+    def map_permission(self, request: dict) -> dict:
+        from workflow_platform.execution.acp import map_acp_permission
+
+        return map_acp_permission(request)
+
+
+class OpencodeAcpProvider:
+    id = "opencode"
+
+    def build_acp_command(self, *, cwd: Path) -> CliCommand:
+        from workflow_platform.execution.acp import build_acp_command
+
+        command = build_acp_command("opencode", cwd=cwd)
+        assert command is not None
+        return command
+
+    def map_permission(self, request: dict) -> dict:
+        from workflow_platform.execution.acp import map_acp_permission
+
+        return map_acp_permission(request)
+
+
+class FakeAcpProvider:
+    id = "fake"
+
+    def build_acp_command(self, *, cwd: Path) -> CliCommand:
+        from workflow_platform.execution.acp import build_acp_command
+
+        command = build_acp_command("fake", cwd=cwd)
+        assert command is not None
+        return command
+
+    def map_permission(self, request: dict) -> dict:
+        from workflow_platform.execution.acp import map_acp_permission
+
+        return map_acp_permission(request)
+
+
+def acp_provider_for(provider_id: str, *, platform: str | None = None) -> AcpProvider | None:
+    """返回支持 ACP 的 provider；codex 等暂不支持时返回 None（transport=acp → 422）。"""
+    del platform
+    if provider_id == "claude":
+        return ClaudeAcpProvider()
+    if provider_id == "opencode":
+        return OpencodeAcpProvider()
+    if provider_id == "fake":
+        return FakeAcpProvider()
+    return None

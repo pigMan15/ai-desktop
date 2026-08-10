@@ -15,10 +15,17 @@ import yaml
 from workflow_platform.adapters.registry import default_registry
 from workflow_platform.artifacts.service import hash_artifact, render_artifact_path, validate_safe_path
 from workflow_platform.compiler.compiler import compile_workflow
-from workflow_platform.execution.cli import CliAgentExecutor
+from workflow_platform.execution.cli import AcpAgentExecutor, CliAgentExecutor
 from workflow_platform.execution.agent_context import AgentContextBuilder
 from workflow_platform.execution.deploy import DeployExecutor
-from workflow_platform.execution.providers import ClaudeCliProvider, CliProvider, CodexCliProvider, FakeCliProvider
+from workflow_platform.execution.providers import (
+    AcpProvider,
+    ClaudeCliProvider,
+    CliProvider,
+    CodexCliProvider,
+    FakeCliProvider,
+    acp_provider_for,
+)
 from workflow_platform.governance.actors import require_trusted_human
 from workflow_platform.governance.audit import AuditLog
 from workflow_platform.kernel.projection import rebuild_projection
@@ -2853,6 +2860,7 @@ class WorkflowRuntimeService:
         resumed_from_checkpoint_id: str | None = None,
         mode: str = "automatic",
         parent_job_id: str | None = None,
+        transport: str = "auto",
     ) -> dict:
         execution_guard = (
             self._require_execution_lease(project_id, run_id, write_required=True)
@@ -2908,11 +2916,29 @@ class WorkflowRuntimeService:
         )
         cli_provider = self._agent_provider_factory(provider)
         safe_allowed_tools = allowed_tools or []
-        command = cli_provider.build_command(
-            cwd=execution_cwd,
-            prompt=effective_prompt,
-            allowed_tools=safe_allowed_tools,
-        )
+        if transport not in {"auto", "cli", "acp"}:
+            raise ValueError(f"AGENT_TRANSPORT_INVALID: unsupported transport {transport}")
+        resolved_transport = "cli"
+        acp_provider: AcpProvider | None = None
+        if transport == "acp":
+            acp_provider = acp_provider_for(provider)
+            if acp_provider is None:
+                raise RuntimeContractError(
+                    "AGENT_ACP_UNAVAILABLE",
+                    f"provider {provider} 不支持 ACP 传输",
+                    status=422,
+                )
+            resolved_transport = "acp"
+        # auto 保持 legacy CLI（默认兼容，零回归）；Phase 0 spike 确认各 CLI 的 ACP 参数后再切换
+        if resolved_transport == "acp":
+            assert acp_provider is not None
+            command = acp_provider.build_acp_command(cwd=execution_cwd)
+        else:
+            command = cli_provider.build_command(
+                cwd=execution_cwd,
+                prompt=effective_prompt,
+                allowed_tools=safe_allowed_tools,
+            )
         checkpoint_id = f"agent-checkpoint-{uuid4()}" if mode == "automatic" else None
         session_id = f"agent-session-{uuid4()}" if mode == "interactive" else None
         output_sequence = 0
@@ -2957,6 +2983,7 @@ class WorkflowRuntimeService:
                 mode=mode,
                 session_id=session_id,
                 parent_job_id=parent_job_id,
+                metadata={"transport": resolved_transport},
             )
             for artifact in context_artifacts:
                 artifact_id = artifact.get("artifactId")
@@ -3047,11 +3074,19 @@ class WorkflowRuntimeService:
                 self._agent_jobs.set_running(id=job_id, pid=pid, updated_at=now)
                 self._db.commit()
 
-        executor = CliAgentExecutor(
-            provider=cli_provider,
-            on_output=append_output,
-            on_started=mark_running,
-        )
+        if resolved_transport == "acp":
+            assert acp_provider is not None
+            executor = AcpAgentExecutor(
+                provider=acp_provider,
+                on_output=append_output,
+                on_started=mark_running,
+            )
+        else:
+            executor = CliAgentExecutor(
+                provider=cli_provider,
+                on_output=append_output,
+                on_started=mark_running,
+            )
         self._agent_executors[job_id] = executor
 
         def execute_job() -> None:

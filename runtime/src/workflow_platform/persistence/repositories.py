@@ -2859,3 +2859,129 @@ class KnowledgeSynthesisOutputRepository:
             }
             for row in rows
         ]
+
+
+class AgentPermissionRequestRepository:
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def create(
+        self,
+        *,
+        id: str,
+        job_id: str,
+        run_id: str,
+        permission_type: str,
+        target: str,
+        details: dict,
+        created_at: str,
+    ) -> None:
+        self._db.execute(
+            """
+            INSERT INTO agent_permission_requests (
+                id, job_id, run_id, permission_type, target, details_json,
+                status, decided_by_json, decided_at, decision_reason, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'PENDING', NULL, NULL, NULL, ?, ?)
+            """,
+            (
+                id,
+                job_id,
+                run_id,
+                permission_type,
+                target,
+                json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                created_at,
+                created_at,
+            ),
+        )
+
+    def get(self, id: str) -> dict | None:
+        row = self._db.execute(
+            "SELECT * FROM agent_permission_requests WHERE id = ?", (id,)
+        ).fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
+    def list_pending_for_job(self, job_id: str) -> list[dict]:
+        rows = self._db.execute(
+            """
+            SELECT * FROM agent_permission_requests
+            WHERE job_id = ? AND status = 'PENDING'
+            ORDER BY created_at, id
+            """,
+            (job_id,),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_for_run(self, run_id: str, *, status: str | None = None) -> list[dict]:
+        if status is None:
+            rows = self._db.execute(
+                """
+                SELECT * FROM agent_permission_requests
+                WHERE run_id = ? ORDER BY created_at, id
+                """,
+                (run_id,),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                """
+                SELECT * FROM agent_permission_requests
+                WHERE run_id = ? AND status = ? ORDER BY created_at, id
+                """,
+                (run_id, status),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def decide(
+        self,
+        id: str,
+        *,
+        status: str,
+        decided_by: dict,
+        decided_at: str,
+        reason: str | None,
+    ) -> None:
+        self._db.execute(
+            """
+            UPDATE agent_permission_requests
+            SET status = ?, decided_by_json = ?, decided_at = ?,
+                decision_reason = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                json.dumps(decided_by, ensure_ascii=False, separators=(",", ":")),
+                decided_at,
+                reason,
+                decided_at,
+                id,
+            ),
+        )
+
+    def expire_pending_for_job(self, job_id: str, *, expired_at: str) -> int:
+        cursor = self._db.execute(
+            """
+            UPDATE agent_permission_requests
+            SET status = 'EXPIRED', updated_at = ?
+            WHERE job_id = ? AND status = 'PENDING'
+            """,
+            (expired_at, job_id),
+        )
+        return cursor.rowcount
+
+    @staticmethod
+    def _row_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "jobId": row["job_id"],
+            "runId": row["run_id"],
+            "permissionType": row["permission_type"],
+            "target": row["target"],
+            "details": json.loads(row["details_json"]),
+            "status": row["status"],
+            "decidedBy": json.loads(row["decided_by_json"]) if row["decided_by_json"] else None,
+            "decidedAt": row["decided_at"],
+            "decisionReason": row["decision_reason"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
