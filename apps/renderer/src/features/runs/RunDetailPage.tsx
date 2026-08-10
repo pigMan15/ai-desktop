@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { ArrowLeft, Play, RefreshCw } from "lucide-react";
+import { ArrowLeft, Play, RefreshCw, BookOpen } from "lucide-react";
 
 import type {
   Actor,
@@ -446,6 +446,13 @@ function RunDetailPageContent({
         </div>
         <div className="run-console-toolbar-actions">
           <span>最近刷新 {formatTime(state.lastRefreshedAt)}</span>
+          <a
+            className="quiet-button icon-text-button"
+            href={`#/knowledge/change-sets/new?projectId=${encodeURIComponent(projectId)}&runId=${encodeURIComponent(runId)}`}
+          >
+            <BookOpen size={15} aria-hidden="true" />
+            创建知识变更集
+          </a>
           <button
             type="button"
             className="quiet-button icon-text-button"

@@ -150,7 +150,7 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
           {repository.status}
         </span>
       </div>
-      <p className="knowledge-meta"><code>{repository.rootPath}</code></p>
+      <p className="knowledge-path" title={repository.rootPath}>{repository.rootPath}</p>
 
       {message ? <p className="knowledge-toast knowledge-toast--success">{message}</p> : null}
       {error ? <p className="knowledge-toast knowledge-toast--error">{error}</p> : null}

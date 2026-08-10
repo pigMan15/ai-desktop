@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import {
+  ArrowUpRight,
+  BookOpen,
+  GitBranch,
+  GitCommitHorizontal,
+  Layers,
+} from "lucide-react";
 
 import {
   RuntimeClientError,
@@ -88,9 +95,7 @@ export function RepositoryList({ client, onNavigate }: Props) {
     <div className="knowledge-repository-list">
       <div className="knowledge-detail-header">
         <h2>本地知识库</h2>
-        <span className="knowledge-meta">
-          已绑定 {repositories.length} 个仓库
-        </span>
+        <span className="knowledge-meta">已绑定 {repositories.length} 个仓库</span>
       </div>
 
       {message ? <p className="knowledge-toast knowledge-toast--success">{message}</p> : null}
@@ -142,8 +147,15 @@ export function RepositoryList({ client, onNavigate }: Props) {
       ) : (
         <div className="knowledge-card-grid">
           {repositories.map((repository) => (
-            <article key={repository.id} className="knowledge-card">
+            <article
+              key={repository.id}
+              className="knowledge-card"
+              data-status={repository.status}
+            >
               <div className="knowledge-card__head">
+                <span className="knowledge-card__icon">
+                  <BookOpen />
+                </span>
                 <button
                   type="button"
                   className="link-button knowledge-card__title"
@@ -153,27 +165,36 @@ export function RepositoryList({ client, onNavigate }: Props) {
                 </button>
                 <span className={statusClass(repository.status)}>{repository.status}</span>
               </div>
-              <dl className="knowledge-facts">
-                <dt>路径</dt>
-                <dd><code>{repository.rootPath}</code></dd>
-                <dt>分支</dt>
-                <dd>{repository.gitStatus.branch ?? "（detached HEAD）"}</dd>
-                <dt>HEAD</dt>
-                <dd><code>{repository.gitStatus.headCommit.slice(0, 10)}</code></dd>
-                <dt>变更集</dt>
-                <dd>{repository.recentChangeSets.length} 个</dd>
-              </dl>
+
+              <div className="knowledge-card__facts">
+                <span className="knowledge-fact-row">
+                  <GitBranch />
+                  {repository.gitStatus.branch ?? "detached HEAD"}
+                </span>
+                <span className="knowledge-fact-row">
+                  <GitCommitHorizontal />
+                  <code>{repository.gitStatus.headCommit.slice(0, 10)}</code>
+                </span>
+                <span className="knowledge-fact-row">
+                  <Layers />
+                  {repository.recentChangeSets.length} 个变更集
+                  <span style={{ marginLeft: "auto", opacity: 0.75 }}>
+                    {repository.activeRuleSnapshotId ? "规则已确认" : "规则未确认"}
+                  </span>
+                </span>
+              </div>
+
               <div className="knowledge-card__foot">
-                <span className="knowledge-meta">
-                  规则快照：{repository.activeRuleSnapshotId ? "已确认" : "未确认"}
+                <span className="knowledge-path" title={repository.rootPath}>
+                  {repository.rootPath}
                 </span>
                 <div className="knowledge-card__actions">
                   <button
                     type="button"
-                    className="quiet-button"
+                    className="knowledge-button--ghost"
                     onClick={() => onNavigate(`#/knowledge/repositories/${repository.id}`)}
                   >
-                    打开
+                    打开 <ArrowUpRight />
                   </button>
                   <button
                     type="button"

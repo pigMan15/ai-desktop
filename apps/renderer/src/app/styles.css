@@ -1039,95 +1039,152 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .knowledge-workbench {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
   min-width: 0;
 }
 
+/* 知识库内的链接按钮：清除浏览器 button 默认灰底与立体边框 */
+.knowledge-workbench .link-button {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-strong);
+  cursor: pointer;
+  text-align: left;
+}
+
+.knowledge-workbench .link-button:hover {
+  text-decoration: underline;
+  color: var(--accent-strong);
+}
+
+/* ---- 页签 ---- */
 .knowledge-tabs {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 10px;
+  padding: 0 2px 0;
 }
 
 .knowledge-tabs button {
-  padding: 8px 16px;
-  border-radius: 7px;
-  border: 1px solid transparent;
+  position: relative;
+  padding: 10px 16px 12px;
+  border: none;
   background: transparent;
   color: var(--ink-muted);
   cursor: pointer;
   font-size: 0.9rem;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  font-weight: 550;
+  transition: color 0.15s;
 }
 
-.knowledge-tabs button:hover {
-  color: var(--ink);
-  background: var(--surface-subtle);
-}
+.knowledge-tabs button:hover { color: var(--ink); }
 
 .knowledge-tabs button.active {
-  background: var(--surface);
-  border-color: var(--line);
   color: var(--accent-strong);
-  box-shadow: 0 1px 2px rgba(23, 32, 51, 0.06);
 }
 
+.knowledge-tabs button.active::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* ---- 分区 ---- */
 .knowledge-section {
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 12px;
   background: var(--surface);
-  padding: 16px 18px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 2px rgba(23, 32, 51, 0.04);
 }
 
 .knowledge-section > h3 {
-  margin: 0 0 14px;
-  font-size: 0.95rem;
-  font-weight: 650;
-  color: var(--ink);
+  margin: 0 0 16px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
 }
 
-.knowledge-section + .knowledge-section {
-  margin-top: 14px;
-}
+.knowledge-section + .knowledge-section { margin-top: 14px; }
 
-/* 卡片网格与卡片 */
+/* ---- 卡片 ---- */
 .knowledge-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
 }
 
 .knowledge-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
-  padding: 14px 16px;
+  padding: 16px 16px 14px 18px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: 12px;
   background: var(--surface);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  box-shadow: 0 1px 2px rgba(23, 32, 51, 0.04);
+  overflow: hidden;
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
 }
 
+.knowledge-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--line-strong);
+}
+
+.knowledge-card[data-status="ACTIVE"]::before { background: var(--success); }
+.knowledge-card[data-status="RULES_PENDING"]::before { background: var(--warning); }
+.knowledge-card[data-status="BLOCKED"]::before { background: var(--danger); }
+.knowledge-card[data-status="REMOVED"]::before { background: var(--ink-muted); opacity: 0.5; }
+
 .knowledge-card:hover {
-  border-color: #9fb7c1;
-  box-shadow: 0 2px 8px rgba(23, 32, 51, 0.07);
+  transform: translateY(-2px);
+  border-color: #a7bcc7;
+  box-shadow: 0 8px 22px rgba(23, 32, 51, 0.09);
 }
 
 .knowledge-card__head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
 }
+
+.knowledge-card__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+  color: var(--accent-strong);
+}
+
+.knowledge-card__icon svg { width: 19px; height: 19px; }
 
 .knowledge-card__title {
   min-width: 0;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 650;
+  font-size: 0.97rem;
+  font-weight: 680;
   color: var(--ink);
 }
 
@@ -1135,12 +1192,45 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   padding: 0;
   min-height: auto;
   text-align: left;
-  font-size: 0.95rem;
 }
 
-.knowledge-card__actions {
+.knowledge-card__title:hover { color: var(--accent-strong); }
+
+/* 事实行（图标 + 文本） */
+.knowledge-fact-row {
   display: flex;
+  align-items: center;
   gap: 8px;
+  min-width: 0;
+  font-size: 0.84rem;
+  color: var(--ink-muted);
+}
+
+.knowledge-fact-row svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ink-muted);
+  opacity: 0.8;
+}
+
+.knowledge-fact-row code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.84em;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.knowledge-card__facts {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .knowledge-card__foot {
@@ -1148,8 +1238,37 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: auto;
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
 }
+
+.knowledge-card__actions { display: flex; gap: 8px; }
+
+/* 主幽灵按钮（次要主操作） */
+.knowledge-button--ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(15, 118, 110, 0.35);
+  background: rgba(15, 118, 110, 0.06);
+  color: var(--accent-strong);
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.knowledge-button--ghost:hover:not(:disabled) {
+  background: rgba(15, 118, 110, 0.12);
+  border-color: var(--accent);
+}
+
+.knowledge-button--ghost:disabled { cursor: not-allowed; opacity: 0.52; }
 
 /* 徽章 */
 .knowledge-badge {
@@ -1158,36 +1277,37 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   gap: 5px;
   padding: 2px 9px;
   border-radius: 999px;
-  font-size: 0.74rem;
-  font-weight: 650;
+  font-size: 0.72rem;
+  font-weight: 680;
+  letter-spacing: 0.01em;
   border: 1px solid var(--line);
   background: var(--surface-subtle);
   color: var(--ink-muted);
   white-space: nowrap;
 }
 
-.knowledge-badge--active { color: var(--success); border-color: rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); }
-.knowledge-badge--rules-pending { color: var(--warning); border-color: rgba(154, 91, 8, 0.35); background: var(--warning-bg); }
-.knowledge-badge--blocked { color: var(--danger); border-color: rgba(180, 35, 24, 0.35); background: var(--danger-bg); }
-.knowledge-badge--removed { opacity: 0.65; }
+.knowledge-badge--active { color: var(--success); border-color: rgba(24, 121, 78, 0.32); background: rgba(24, 121, 78, 0.08); }
+.knowledge-badge--rules-pending { color: var(--warning); border-color: rgba(154, 91, 8, 0.32); background: var(--warning-bg); }
+.knowledge-badge--blocked { color: var(--danger); border-color: rgba(180, 35, 24, 0.32); background: var(--danger-bg); }
+.knowledge-badge--removed { opacity: 0.6; }
 
-.knowledge-badge--low { color: var(--success); border-color: rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); }
-.knowledge-badge--medium { color: var(--warning); border-color: rgba(154, 91, 8, 0.35); background: var(--warning-bg); }
-.knowledge-badge--high { color: var(--danger); border-color: rgba(180, 35, 24, 0.35); background: var(--danger-bg); }
+.knowledge-badge--low { color: var(--success); border-color: rgba(24, 121, 78, 0.32); background: rgba(24, 121, 78, 0.08); }
+.knowledge-badge--medium { color: var(--warning); border-color: rgba(154, 91, 8, 0.32); background: var(--warning-bg); }
+.knowledge-badge--high { color: var(--danger); border-color: rgba(180, 35, 24, 0.32); background: var(--danger-bg); }
 
-.knowledge-badge--create { color: var(--success); border-color: rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); }
-.knowledge-badge--update { color: var(--warning); border-color: rgba(154, 91, 8, 0.35); background: var(--warning-bg); }
+.knowledge-badge--create { color: var(--success); border-color: rgba(24, 121, 78, 0.32); background: rgba(24, 121, 78, 0.08); }
+.knowledge-badge--update { color: var(--warning); border-color: rgba(154, 91, 8, 0.32); background: var(--warning-bg); }
 
-/* 事实列表 */
+/* 事实列表（详情页） */
 .knowledge-facts {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 7px 18px;
+  gap: 8px 18px;
   margin: 0;
   font-size: 0.87rem;
 }
 
-.knowledge-facts dt { color: var(--ink-muted); }
+.knowledge-facts dt { color: var(--ink-muted); font-size: 0.82rem; }
 .knowledge-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
 
 /* meta 行 */
@@ -1201,11 +1321,27 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 
 .knowledge-meta code {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.82em;
-  background: var(--surface-muted);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 1px 6px;
+  font-size: 0.84em;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  padding: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 仓库路径：等宽但无代码块外观，单行省略 */
+.knowledge-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--ink-muted);
 }
 
 /* 文件变更列表 */
@@ -1219,15 +1355,18 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 9px 12px;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--surface-subtle);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
   color: var(--ink);
   min-width: 0;
+  transition: border-color 0.15s, background 0.15s;
 }
+
+.knowledge-file-row:hover { border-color: #a7bcc7; background: var(--surface); }
 
 .knowledge-file-row > span:last-child {
   overflow: hidden;
@@ -1240,25 +1379,25 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   margin: 0;
   padding: 12px 14px;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface-subtle);
+  border-radius: 9px;
+  background: #0f172a;
+  color: #dbe4f0;
   overflow: auto;
   max-height: 420px;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.8rem;
-  line-height: 1.5;
+  line-height: 1.55;
   white-space: pre;
-  color: var(--ink);
 }
 
 /* 空状态 */
 .knowledge-empty {
   display: grid;
   place-items: center;
-  min-height: 120px;
-  padding: 28px 16px;
+  min-height: 130px;
+  padding: 30px 20px;
   border: 1px dashed var(--line-strong);
-  border-radius: 9px;
+  border-radius: 12px;
   background: var(--surface-subtle);
   color: var(--ink-muted);
   text-align: center;
@@ -1271,33 +1410,43 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   grid-template-columns: minmax(140px, 1fr) minmax(220px, 2fr) auto;
   gap: 10px;
   align-items: end;
-  margin: 0 0 18px;
+  margin: 0 0 20px;
 }
 
 .knowledge-import-form label { display: flex; flex-direction: column; gap: 5px; font-size: 0.82rem; color: var(--ink-muted); }
 .knowledge-import-form input,
-.knowledge-import-form select { min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 0.88rem; }
+.knowledge-import-form select {
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.88rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
 .knowledge-import-form input:focus,
-.knowledge-import-form select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }
+.knowledge-import-form select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12); }
 
 .knowledge-button--primary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 36px;
-  padding: 0 16px;
-  border-radius: 7px;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 18px;
+  border-radius: 8px;
   border: 1px solid var(--accent);
   background: var(--accent);
   color: #ffffff;
   font-size: 0.88rem;
-  font-weight: 600;
+  font-weight: 650;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
 .knowledge-button--primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
-.knowledge-button--primary:disabled { cursor: not-allowed; opacity: 0.52; }
+.knowledge-button--primary:disabled { cursor: not-allowed; opacity: 0.5; }
 
 /* 详情头部 */
 .knowledge-detail-header {
@@ -1307,13 +1456,23 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   flex-wrap: wrap;
 }
 
-.knowledge-detail-header h2 { margin: 0; font-size: 1.15rem; }
+.knowledge-detail-header h2 { margin: 0; font-size: 1.2rem; letter-spacing: -0.01em; }
 
-/* 表单堆叠（规则确认等） */
+/* 表单堆叠 */
 .knowledge-stacked-form { display: flex; flex-direction: column; gap: 12px; }
 .knowledge-stacked-form label { display: flex; flex-direction: column; gap: 5px; font-size: 0.82rem; color: var(--ink-muted); }
-.knowledge-stacked-form textarea { padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85rem; resize: vertical; }
-.knowledge-stacked-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }
+.knowledge-stacked-form textarea {
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.knowledge-stacked-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12); }
 
 /* 规则文件 chips */
 .knowledge-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1330,23 +1489,31 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 }
 .knowledge-chip em { font-style: normal; color: var(--ink-muted); font-size: 0.74rem; }
 
-/* 变更集操作区 */
+/* 操作区 */
 .knowledge-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.knowledge-actions input[type="text"] { min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 0.88rem; }
-.knowledge-actions input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14); }
+.knowledge-actions input[type="text"] {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+.knowledge-actions input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12); }
 
-/* Git 状态两列 */
-.knowledge-git-grid { display: grid; grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.6fr); gap: 14px; }
+/* Git 两列 */
+.knowledge-git-grid { display: grid; grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.6fr); gap: 18px; }
 @media (max-width: 900px) { .knowledge-git-grid { grid-template-columns: 1fr; } }
 
 /* 消息 */
 .knowledge-toast {
   padding: 9px 12px;
-  border-radius: 7px;
+  border-radius: 8px;
   font-size: 0.86rem;
 }
-.knowledge-toast--success { border: 1px solid rgba(24, 121, 78, 0.35); background: rgba(24, 121, 78, 0.08); color: var(--success); }
-.knowledge-toast--error { border: 1px solid rgba(180, 35, 24, 0.35); background: var(--danger-bg); color: var(--danger); }
+.knowledge-toast--success { border: 1px solid rgba(24, 121, 78, 0.32); background: rgba(24, 121, 78, 0.08); color: var(--success); }
+.knowledge-toast--error { border: 1px solid rgba(180, 35, 24, 0.32); background: var(--danger-bg); color: var(--danger); }
 
 /* 窄屏 */
 @media (max-width: 720px) {
@@ -1354,5 +1521,4 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
   .knowledge-card-grid { grid-template-columns: 1fr; }
 }
 
-/* 复选框/开关行 */
 .inline-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.86rem; color: var(--ink-muted); }
