@@ -96,6 +96,8 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
       });
       setDiscoveryJob({ id: queued.jobId, status: queued.status, error: null, output: [] });
       setDiscoveryElapsed(0);
+      // 新任务开始后收起旧的待确认报告，避免旧快照被误认为最新结果
+      setActiveSnapshot(null);
 
       if (discoveryTimer.current) {
         clearInterval(discoveryTimer.current);
