@@ -1257,7 +1257,7 @@ const scopedRunPath = (projectId: string, runId: string) =>
 
 const RUNTIME_IPC_PROTOCOL = "workflow-platform.runtime-ipc.v1#7f8c2a61";
 
-async function request<T>(
+export async function request<T>(
   apiBaseUrl: string,
   path: string,
   optionsOrLegacyBody: RuntimeRequestOptions | unknown = undefined,

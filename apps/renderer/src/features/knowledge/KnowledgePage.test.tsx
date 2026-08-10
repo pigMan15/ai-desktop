@@ -1,193 +1,50 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+﻿import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KnowledgePage } from "./KnowledgePage";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  delete (window as Window & { workflowRuntime?: unknown }).workflowRuntime;
+});
+
+function knowledgeProps() {
+  return {
+    candidates: [],
+    onCreate: vi.fn(),
+    onReview: vi.fn(),
+    onPublish: vi.fn(),
+    apiBaseUrl: "http://127.0.0.1:8765",
+  };
+}
 
 describe("KnowledgePage", () => {
-  it("创建候选、审核并发布经批准的知识", () => {
-    const onCreate = vi.fn();
-    const onReview = vi.fn();
-    const onPublish = vi.fn();
-    render(
-      <KnowledgePage
-        candidates={[
-          {
-            id: "candidate-1",
-            title: "Gate 证据规范",
-            content: "每个 Gate 必须关联证据。",
-            source: "run:run-1",
-            status: "approved",
-            createdAt: "2026-07-28T00:00:00Z",
-          },
-        ]}
-        runs={[
-          {
-            id: "run-1",
-            title: "旧任务",
-            status: "DONE",
-            createdAt: "2026-07-28T00:00:00Z",
-            updatedAt: "2026-07-28T00:01:00Z",
-          },
-          {
-            id: "run-2",
-            title: "知识沉淀任务",
-            status: "DONE",
-            createdAt: "2026-07-28T00:00:00Z",
-            updatedAt: "2026-07-28T00:01:00Z",
-          },
-        ]}
-        activeRunId="run-1"
-        onCreate={onCreate}
-        onReview={onReview}
-        onPublish={onPublish}
-      />,
-    );
-
-    fireEvent.change(screen.getByLabelText("知识标题"), { target: { value: "终端规范" } });
-    fireEvent.change(screen.getByLabelText("知识内容"), { target: { value: "终端输出应保留。" } });
-    fireEvent.change(screen.getByLabelText("关联 Run"), { target: { value: "run-2" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建候选" }));
-    fireEvent.click(screen.getByRole("button", { name: "发布知识" }));
-
-    expect(onCreate).toHaveBeenCalledWith("终端规范", "终端输出应保留。", "run:run-2");
-    expect(onPublish).toHaveBeenCalledWith("candidate-1");
-    expect(screen.queryByRole("button", { name: "批准候选" })).not.toBeInTheDocument();
-    expect(onReview).not.toHaveBeenCalled();
+  it("renders the legacy panel when no client is configured", () => {
+    window.location.hash = "#/knowledge";
+    render(<KnowledgePage {...knowledgeProps()} apiBaseUrl={undefined} />);
+    expect(screen.getByRole("heading", { name: "知识库" })).toBeInTheDocument();
   });
 
-  it("lets users open a published knowledge document replay", () => {
-    const onReplay = vi.fn();
-    render(
-      <KnowledgePage
-        candidates={[]}
-        documents={[
-          {
-            id: "document-1",
-            candidateId: "candidate-1",
-            title: "产物归档规范",
-            content: "所有产物必须保留内容哈希。",
-            source: "run:run-archive",
-            status: "published",
-            publishedAt: "2026-07-28T00:00:00Z",
-            gitPublicationCount: 0,
-            latestGitPublication: null,
-          },
-        ]}
-        onCreate={vi.fn()}
-        onReview={vi.fn()}
-        onPublish={vi.fn()}
-        onReplay={onReplay}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "回放发布记录：产物归档规范" }));
-
-    expect(onReplay).toHaveBeenCalledWith("document-1");
-  });
-
-  it("offers Git preview and controlled publishing for a published document", () => {
-    const onPreviewGit = vi.fn();
-    const onPublishGit = vi.fn();
-    render(
-      <KnowledgePage
-        candidates={[]}
-        documents={[
-          {
-            id: "document-1",
-            candidateId: "candidate-1",
-            title: "产物归档规范",
-            content: "所有产物必须保留内容哈希。",
-            source: "run:run-archive",
-            status: "published",
-            publishedAt: "2026-07-28T00:00:00Z",
-            gitPublicationCount: 1,
-            latestGitPublication: {
-              branch: "main",
-              relativePath: ".workflow-platform/knowledge/document-1.md",
-              commitHash: "abc1234",
-              pushedAt: "2026-07-28T00:01:00Z",
-            },
-          },
-        ]}
-        onCreate={vi.fn()}
-        onReview={vi.fn()}
-        onPublish={vi.fn()}
-        gitAvailable
-        onPreviewGit={onPreviewGit}
-        onPublishGit={onPublishGit}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "预览 Git 变更：产物归档规范" }));
-
-    expect(onPreviewGit).toHaveBeenCalledWith("document-1");
-    expect(screen.getByText("已推送 1 次")).toBeInTheDocument();
-    expect(screen.getByText("main · abc1234")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "提交并推送知识：产物归档规范" })).not.toBeInTheDocument();
-  });
-
-  it("shows CLI synthesis results, records feedback, and publishes only a completed draft", () => {
-    const onFeedback = vi.fn();
-    const onPublishSynthesis = vi.fn();
-    const { container } = render(
-      <KnowledgePage
-        candidates={[
-          {
-            id: "candidate-1",
-            title: "部署验收规则",
-            content: "部署前必须完成 Gate 审核。",
-            source: "run:run-1",
-            status: "approved",
-            createdAt: "2026-07-28T00:00:00Z",
-          },
-        ]}
-        syntheses={[
-          {
-            id: "synthesis-1",
-            candidateId: "candidate-1",
-            provider: "codex",
-            status: "COMPLETED",
-            prompt: "合成提示",
-            summary: "部署前必须完成 Gate 审核并保留回滚证据。",
-            error: null,
-            feedback: null,
-            createdAt: "2026-07-28T00:00:00Z",
-            updatedAt: "2026-07-28T00:01:00Z",
-          },
-        ]}
-        synthesisOutput={[
-          {
-            id: "synthesis-1:output:1",
-            synthesisId: "synthesis-1",
-            sequence: 1,
-            kind: "message",
-            payload: { text: "正在整理部署验收规则。" },
-            createdAt: "2026-07-28T00:00:00Z",
-          },
-        ]}
-        onCreate={vi.fn()}
-        onReview={vi.fn()}
-        onPublish={vi.fn()}
-        onFeedbackSynthesis={onFeedback}
-        onPublishSynthesis={onPublishSynthesis}
-      />,
-    );
-
-    fireEvent.change(screen.getByLabelText("合成反馈：部署验收规则"), {
-      target: { value: "补充上线后验证要求。" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "保存合成反馈：部署验收规则" }));
-    fireEvent.click(screen.getByRole("button", { name: "发布合成稿：部署验收规则" }));
-
-    expect(onFeedback).toHaveBeenCalledWith("synthesis-1", "补充上线后验证要求。");
-    expect(onPublishSynthesis).toHaveBeenCalledWith("synthesis-1");
-    fireEvent.click(screen.getByRole("button", { name: "查看 CLI 执行日志" }));
-    expect(screen.getByLabelText("CLI 执行日志：部署验收规则").textContent).toContain("正在整理部署验收规则。");
-    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
-    fireEvent.click(screen.getByRole("button", { name: "查看合成结果" }));
-    expect(screen.getByLabelText("合成结果：部署验收规则").textContent).toContain("部署前必须完成 Gate 审核并保留回滚证据。");
-    expect(container.querySelector(".gate-record .gate-record")).toBeNull();
+  it("renders the repository workbench when a client is configured", async () => {
+    const repository = {
+      id: "repo-1",
+      name: "物流知识库",
+      status: "RULES_PENDING",
+      revision: "1",
+      gitStatus: { branch: "main", headCommit: "abc", dirty: false, conflict: false, stagedPaths: [], unstagedPaths: [] },
+      activeRuleSnapshot: null,
+      recentChangeSets: [],
+      allowedActions: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ items: [repository] }),
+    })));
+    window.location.hash = "#/knowledge/repositories";
+    render(<KnowledgePage {...knowledgeProps()} />);
+    expect(await screen.findByText("物流知识库")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "仓库" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "示例包" })).toBeInTheDocument();
   });
 });

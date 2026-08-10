@@ -2561,6 +2561,7 @@ export function App() {
               publishingDocumentId={publishingKnowledgeDocumentId}
               gitPreview={knowledgeGitPreview}
               operationMessage={operationMessage}
+              apiBaseUrl={apiBaseUrl}
             />
           ) : null}
           {currentRoute === "audit" && !invalidScopedRoute ? (
