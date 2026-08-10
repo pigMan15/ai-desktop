@@ -461,3 +461,78 @@ def _wait_change_set_status(
             return detail
         time.sleep(0.1)
     raise AssertionError(f"change set did not reach {targets}: {detail['status']}")
+
+
+
+def test_list_candidate_knowledge_and_promote(tmp_path: Path) -> None:
+    client, _service = _make_client(tmp_path)
+    repository_id, repository = _activate_repository(client, tmp_path)
+    repo = Path(repository["rootPath"])
+    candidate = repo / "candidate" / "release-check.md"
+    candidate.write_text(
+        "---\ntitle: release-check 设计\nstatus: candidate\n---\n内容\n",
+        encoding="utf-8",
+    )
+    (repo / "INDEX.md").write_text(
+        "# 索引\n\n- [候选](candidate/release-check.md)\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add candidate")
+
+    listed = client.get(f"/knowledge-repositories/{repository_id}/candidate-knowledge")
+    assert listed.status_code == 200, listed.text
+    paths = [item["path"] for item in listed.json()["items"]]
+    assert "candidate/release-check.md" in paths
+
+    promoted = client.post(
+        f"/knowledge-repositories/{repository_id}/promote",
+        json={
+            "path": "candidate/release-check.md",
+            "targetPath": "main/release-check.md",
+            "actor": TRUSTED,
+            "expectedRevision": repository["revision"],
+            "now": NOW,
+        },
+    )
+    assert promoted.status_code == 200, promoted.text
+    detail = promoted.json()
+    assert not candidate.exists()
+    target = repo / "main" / "release-check.md"
+    assert target.is_file()
+    assert "status: confirmed" in target.read_text(encoding="utf-8")
+    assert "](" + "main/release-check.md)" in (repo / "INDEX.md").read_text(encoding="utf-8")
+    log = _git(repo, "log", "--oneline", "-1")
+    assert "promote" in log
+    assert detail["revision"] != repository["revision"]
+
+
+def test_promote_rejects_invalid_inputs(tmp_path: Path) -> None:
+    client, _service = _make_client(tmp_path)
+    repository_id, repository = _activate_repository(client, tmp_path)
+    repo = Path(repository["rootPath"])
+    (repo / "candidate" / "sample.md").write_text(
+        "---\nstatus: candidate\n---\nx\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "candidate")
+
+    def promote(path: str, target: str) -> int:
+        resp = client.post(
+            f"/knowledge-repositories/{repository_id}/promote",
+            json={
+                "path": path,
+                "targetPath": target,
+                "actor": TRUSTED,
+                "expectedRevision": repository["revision"],
+                "now": NOW,
+            },
+        )
+        return resp.status_code
+
+    assert promote("main/sample.md", "main/out.md") == 400  # 源不在 candidate
+    assert promote("candidate/missing.md", "main/out.md") == 404
+    assert promote("candidate/sample.md", "candidate/sample.md") == 400  # 相同路径
+    assert promote("candidate/sample.md", ".ai-workflow/out.md") == 400  # 受保护
+    assert promote("candidate/sample.md", "outside/out.txt") == 400  # 不可写
+

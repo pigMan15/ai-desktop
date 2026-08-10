@@ -96,6 +96,11 @@ class KnowledgeGitCommitRequest(KnowledgeMutationRequest):
     expectedRepositoryRevision: str
 
 
+class KnowledgePromoteRequest(KnowledgeMutationRequest):
+    path: str
+    targetPath: str
+
+
 def create_knowledge_router(repository_service: Any, change_set_service: Any) -> APIRouter:
     router = APIRouter()
 
@@ -244,6 +249,23 @@ def create_knowledge_router(repository_service: Any, change_set_service: Any) ->
         return repository_service.cancel_rule_discovery(
             repository_id,
             job_id,
+            actor=request.actor,
+            expected_revision=request.expectedRevision,
+            now=request.now,
+        )
+
+    @router.get("/knowledge-repositories/{repository_id}/candidate-knowledge")
+    def list_candidate_knowledge(repository_id: str) -> dict:
+        return repository_service.list_candidate_knowledge(repository_id)
+
+    @router.post("/knowledge-repositories/{repository_id}/promote")
+    def promote_candidate_knowledge(
+        repository_id: str, request: KnowledgePromoteRequest
+    ) -> dict:
+        return repository_service.promote_candidate_knowledge(
+            repository_id,
+            path=request.path,
+            target_path=request.targetPath,
             actor=request.actor,
             expected_revision=request.expectedRevision,
             now=request.now,

@@ -148,6 +148,13 @@ export type KnowledgeClient = {
       createdAt: string;
     }>;
   }>;
+  listCandidateKnowledge: (repositoryId: string) => Promise<{
+    items: Array<{ path: string; title: string; sizeBytes: number }>;
+  }>;
+  promoteCandidateKnowledge: (
+    repositoryId: string,
+    input: { path: string; targetPath: string; actor: Actor; expectedRevision: string; now: string },
+  ) => Promise<KnowledgeRepositoryDetail>;
   generateChangeSet: (projectId: string, runId: string, changeSetId: string, input: { actor: Actor; expectedRevision: string; now: string }) => Promise<{ jobId: string; changeSetId: string; status: "QUEUED" }>;
   approveChangeSet: (projectId: string, runId: string, changeSetId: string, input: { comment: string; actor: Actor; expectedRevision: string; now: string }) => Promise<KnowledgeChangeSetDetail>;
   rejectChangeSet: (projectId: string, runId: string, changeSetId: string, input: { comment: string; actor: Actor; expectedRevision: string; now: string }) => Promise<KnowledgeChangeSetDetail>;
@@ -193,6 +200,10 @@ export function createKnowledgeClient(apiBaseUrl: string): KnowledgeClient {
     getChangeSet: async (projectId, runId, changeSetId) => request(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/knowledge-change-sets/${encodeURIComponent(changeSetId)}`),
     listChangeSetOutput: async (projectId, runId, changeSetId, afterSequence) =>
       request(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/knowledge-change-sets/${encodeURIComponent(changeSetId)}/output?afterSequence=${afterSequence}`),
+    listCandidateKnowledge: async (repositoryId) =>
+      request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/candidate-knowledge`),
+    promoteCandidateKnowledge: async (repositoryId, input) =>
+      request(apiBaseUrl, `/knowledge-repositories/${encodeURIComponent(repositoryId)}/promote`, { method: "POST", body: input }),
     generateChangeSet: async (projectId, runId, changeSetId, input) => request(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/knowledge-change-sets/${encodeURIComponent(changeSetId)}/generate`, { method: "POST", body: input }),
     approveChangeSet: async (projectId, runId, changeSetId, input) => request(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/knowledge-change-sets/${encodeURIComponent(changeSetId)}/approve`, { method: "POST", body: input }),
     rejectChangeSet: async (projectId, runId, changeSetId, input) => request(apiBaseUrl, `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/knowledge-change-sets/${encodeURIComponent(changeSetId)}/reject`, { method: "POST", body: input }),

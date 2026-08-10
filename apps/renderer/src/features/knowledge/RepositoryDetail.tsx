@@ -7,6 +7,7 @@ import {
   type KnowledgeRuleSnapshotSummary,
 } from "./knowledgeClient";
 import { KnowledgeGitPanel } from "./KnowledgeGitPanel";
+import { CandidatePromote } from "./CandidatePromote";
 import { RuleDiscoveryReview } from "./RuleDiscoveryReview";
 
 type Props = {
@@ -232,6 +233,13 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
     return <div className="knowledge-empty">加载知识库…</div>;
   }
 
+  const refreshRepository = useCallback(() => {
+    client
+      .getRepository(repositoryId)
+      .then((value) => setRepository(value))
+      .catch(() => undefined);
+  }, [client, repositoryId]);
+
   return (
     <div className="knowledge-repository-detail">
       <div className="knowledge-detail-header">
@@ -367,6 +375,14 @@ export function RepositoryDetail({ client, repositoryId, onNavigate }: Props) {
       ) : null}
 
       <KnowledgeGitPanel client={client} repositoryId={repositoryId} />
+      {repository.status === "ACTIVE" ? (
+        <CandidatePromote
+          client={client}
+          repositoryId={repositoryId}
+          expectedRevision={repository.revision}
+          onPromoted={() => void refreshRepository()}
+        />
+      ) : null}
 
       <section className="knowledge-section">
         <h3>最近变更集</h3>

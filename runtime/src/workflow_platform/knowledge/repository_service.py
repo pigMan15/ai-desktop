@@ -15,10 +15,17 @@ from workflow_platform.governance.actors import require_trusted_human
 from workflow_platform.governance.audit import AuditLog
 from workflow_platform.knowledge.agent_runner import KnowledgeAgentRunner
 from workflow_platform.knowledge.git_gateway import (
+    KnowledgeGitError,
     KnowledgeGitGateway,
     repository_identity,
+    validate_repository_relative_path,
 )
-from workflow_platform.knowledge.proposal import KnowledgeProposalError, validate_rule_discovery_output
+from workflow_platform.knowledge.proposal import (
+    KnowledgeProposalError,
+    is_protected,
+    is_writable,
+    validate_rule_discovery_output,
+)
 from workflow_platform.knowledge.prompts import build_rule_discovery_prompt
 from workflow_platform.knowledge.rule_discovery import (
     KnowledgeRuleDiscoveryError,
@@ -420,6 +427,127 @@ class KnowledgeRepositoryService:
         diff = self._gateway.diff(Path(repository["rootPath"]), staged=staged)
         return {"diff": diff}
 
+    # -- candidate promotion ------------------------------------------------
+
+    def list_candidate_knowledge(self, repository_id: str) -> dict:
+        with self._lock:
+            repository = self._require_repository(repository_id)
+        root = Path(repository["rootPath"])
+        candidate_root = root / "candidate"
+        items: list[dict] = []
+        if candidate_root.is_dir():
+            for path in sorted(candidate_root.rglob("*.md")):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(root).as_posix()
+                items.append(
+                    {
+                        "path": relative,
+                        "title": _frontmatter_title(path),
+                        "sizeBytes": path.stat().st_size,
+                    }
+                )
+        return {"items": items}
+
+    def promote_candidate_knowledge(
+        self,
+        repository_id: str,
+        *,
+        path: str,
+        target_path: str,
+        actor: dict,
+        expected_revision: str,
+        now: str,
+    ) -> dict:
+        require_trusted_human(actor, operation="转正候选知识")
+        with self._lock, self._db:
+            repository = self._require_repository(repository_id)
+            self._require_revision(repository, expected_revision)
+            if repository["status"] != "ACTIVE":
+                raise RuntimeContractError("KNOWLEDGE_RULES_NOT_CONFIRMED", "仓库未激活，无法转正", status=409)
+            try:
+                source = validate_repository_relative_path(path)
+                target = validate_repository_relative_path(target_path)
+            except KnowledgeGitError as error:
+                raise RuntimeContractError("KNOWLEDGE_INPUT_INVALID", error.message, status=400) from error
+            if source == target:
+                raise RuntimeContractError("KNOWLEDGE_PROMOTE_INVALID", "源与目标路径相同", status=400)
+            if not source.startswith("candidate/"):
+                raise RuntimeContractError("KNOWLEDGE_PROMOTE_INVALID", "只能转正 candidate/** 下的知识", status=400)
+            root = Path(repository["rootPath"])
+            source_path = root / source
+            target_path_resolved = root / target
+            if not source_path.is_file():
+                raise RuntimeContractError("KNOWLEDGE_PROMOTE_INVALID", f"候选知识不存在: {source}", status=404)
+            if target_path_resolved.exists():
+                raise RuntimeContractError("KNOWLEDGE_PROMOTE_INVALID", f"目标已存在: {target}", status=409)
+            snapshot = (
+                self._snapshots.get(repository["activeRuleSnapshotId"])
+                if repository["activeRuleSnapshotId"]
+                else None
+            )
+            if snapshot is not None:
+                writable = snapshot.get("writablePaths") or []
+                protected = snapshot.get("protectedPaths") or []
+                if not is_writable(target, writable):
+                    raise RuntimeContractError("KNOWLEDGE_PROMOTE_INVALID", f"目标不在可写目录: {target}", status=400)
+                if is_protected(target, protected):
+                    raise RuntimeContractError("KNOWLEDGE_PROMOTE_INVALID", f"目标是受保护路径: {target}", status=400)
+            original = source_path.read_text(encoding="utf-8")
+            promoted = _promote_frontmatter_status(original)
+            target_path_resolved.parent.mkdir(parents=True, exist_ok=True)
+            target_path_resolved.write_text(promoted, encoding="utf-8", newline="\n")
+            source_path.unlink()
+            index_updated = False
+            index_path = root / "INDEX.md"
+            original_index: str | None = None
+            if index_path.is_file():
+                index_text = index_path.read_text(encoding="utf-8")
+                original_index = index_text
+                updated = index_text.replace(f"]({source})", f"]({target})")
+                if updated != index_text:
+                    index_path.write_text(updated, encoding="utf-8", newline="\n")
+                    index_updated = True
+            commit_paths = [target, source]
+            if index_updated:
+                commit_paths.append("INDEX.md")
+            self._gateway.stage(root, commit_paths)
+            try:
+                commit = self._gateway.commit(
+                    root,
+                    title=f"promote: {Path(target).name} from candidate",
+                    body="",
+                    paths=commit_paths,
+                )
+            except KnowledgeGitError as error:
+                target_path_resolved.unlink(missing_ok=True)
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                source_path.write_text(original, encoding="utf-8", newline="\n")
+                if index_updated and original_index is not None:
+                    index_path.write_text(original_index, encoding="utf-8", newline="\n")
+                raise RuntimeContractError(
+                    "KNOWLEDGE_PROMOTE_GIT_FAILED", f"提交失败，已回滚: {error.message}", status=500
+                ) from error
+            self._repositories.update_revision(
+                repository_id,
+                revision=_next_revision(repository["revision"]),
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=actor,
+                action="knowledge.repository.knowledge_promoted",
+                resource=f"knowledge-repository:{repository_id}",
+                detail={
+                    "source": source,
+                    "target": target,
+                    "indexUpdated": index_updated,
+                    "commitHash": commit.commitHash,
+                },
+                created_at=now,
+            )
+            self._db.commit()
+        return self._detail(repository_id)
+
     # -- examples -----------------------------------------------------------
 
     def list_examples(self) -> list[dict]:
@@ -685,6 +813,29 @@ class KnowledgeRepositoryService:
         if repository["status"] == "RULES_PENDING":
             actions.append("confirm-rules")
         return actions
+
+
+def _frontmatter_title(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")[:4000]
+    except OSError:
+        return ""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    if end == -1:
+        return ""
+    for line in text[3:end].splitlines():
+        stripped = line.strip()
+        if stripped.startswith("title:"):
+            return stripped.split(":", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _promote_frontmatter_status(content: str) -> str:
+    import re
+
+    return re.sub(r"(?m)^status:\s*candidate\s*$", "status: confirmed", content, count=1)
 
 
 def _system_actor() -> dict:

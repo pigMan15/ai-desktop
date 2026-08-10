@@ -85,6 +85,7 @@ _WHITELIST = (
     ("diff", "--no-ext-diff", "--binary"),
     ("diff", "--no-ext-diff", "--binary", "--cached"),
     ("add", "--"),
+    ("add", "-A", "--"),
     ("reset", "--"),
     ("commit", "--only", "-m"),
 )
@@ -102,16 +103,19 @@ def _parse_status(data: bytes) -> tuple[list[str], list[str], bool]:
             index += 1
             continue
         raw_xy = entry[:2].decode("ascii", errors="replace")
-        path_bytes = entry[3:]
-        path = _decode_output(path_bytes)
+        path = _decode_output(entry[3:])
         x, y = raw_xy[0], raw_xy[1]
+        old_path: str | None = None
+        if x in {"R", "C"} and index + 1 < len(fields) and fields[index + 1]:
+            # porcelain v1 -z 的 rename/copy：第一字段是新路径，下一字段是旧路径
+            old_path = _decode_output(fields[index + 1])
+            index += 1
         if x == "U" or y == "U":
             conflict = True
         if x != " " and x != "?":
-            if x == "R" and index + 1 < len(fields) and fields[index + 1]:
-                index += 1
-                path = _decode_output(fields[index])
             staged.append(path)
+            if old_path is not None and old_path != path:
+                staged.append(old_path)
         if y != " " and y != "?":
             unstaged.append(path)
         index += 1
@@ -165,7 +169,8 @@ class KnowledgeGitGateway:
 
     def stage(self, root: Path, paths: list[str]) -> GitInspection:
         validated = [self._validate(root, path) for path in paths]
-        self._run(root, ["add", "--", *validated])
+        # -A：显式路径可同时暂存新增、修改与删除（转正会删除源文件）
+        self._run(root, ["add", "-A", "--", *validated])
         return self.inspect(root)
 
     def unstage(self, root: Path, paths: list[str]) -> GitInspection:
