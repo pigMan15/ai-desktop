@@ -3,6 +3,13 @@ import type { AgentPermissionRequest } from "@workflow-platform/contracts";
 import type { AgentChatMessage } from "./runAgentExecutorModel";
 import { ChatMarkdown } from "./ChatMarkdown";
 
+const toolStatusLabel = (status: string | undefined): string => {
+  if (status === "running") return "执行中";
+  if (status === "completed") return "完成";
+  if (status === "failed") return "失败";
+  return status || "执行";
+};
+
 type Props = {
   jobLabel: string;
   messages: AgentChatMessage[];
@@ -54,6 +61,19 @@ export function AgentChatView({ jobLabel, messages, permissions, disabled, onSen
                 <ChatMarkdown text={message.text} />
               ) : message.kind === "user" ? (
                 <span className="agent-chat-user-text">{message.text}</span>
+              ) : message.kind === "tool" ? (
+                <details
+                  className="agent-chat-tool"
+                  open={message.tool?.status === "running" || Boolean(message.text)}
+                >
+                  <summary>
+                    <span className="agent-chat-tool-title">{message.tool?.title ?? "命令执行"}</span>
+                    <span className={`agent-chat-tool-status is-${message.tool?.status ?? ""}`}>
+                      {toolStatusLabel(message.tool?.status)}
+                    </span>
+                  </summary>
+                  {message.text ? <pre className="agent-chat-tool-output">{message.text}</pre> : null}
+                </details>
               ) : (
                 message.text
               )}

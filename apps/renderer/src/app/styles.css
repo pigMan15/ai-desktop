@@ -1645,3 +1645,14 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .run-agent-transport select { min-height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
 .run-agent-conversational { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--ink-muted); cursor: pointer; }
 .run-agent-conversational input { accent-color: var(--accent); }
+
+.agent-chat-message--tool { max-width: 100%; align-self: stretch; padding: 0; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.agent-chat-tool { padding: 8px 12px; }
+.agent-chat-tool summary { cursor: pointer; display: flex; align-items: center; gap: 8px; list-style: none; flex-wrap: wrap; }
+.agent-chat-tool summary::-webkit-details-marker { display: none; }
+.agent-chat-tool-title { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.78rem; color: #a5b4cf; word-break: break-all; }
+.agent-chat-tool-status { font-size: 0.72rem; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.agent-chat-tool-status.is-running { background: rgba(59, 130, 246, 0.16); color: #93c5fd; }
+.agent-chat-tool-status.is-completed { background: rgba(34, 197, 94, 0.16); color: #86efac; }
+.agent-chat-tool-status.is-failed { background: rgba(248, 113, 113, 0.16); color: #fda4af; }
+.agent-chat-tool-output { margin: 8px 0 0; padding: 8px 10px; background: #0b1120; border-radius: 6px; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.76rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }

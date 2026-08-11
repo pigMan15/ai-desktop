@@ -111,10 +111,15 @@ export function RunAgentExecutor({
     persistedOutput,
     liveOutputByJob,
   );
+  const chatView = conversational && view === "chat";
   const statusMessage = selectedJob.mode === "automatic"
-    ? "自动模式执行记录为只读。"
+    ? chatView
+      ? null
+      : "自动模式执行记录为只读。"
     : active && !sessionState?.writable
-      ? "正在等待本地执行器连接，当前为只读。"
+      ? chatView
+        ? null
+        : "正在等待本地执行器连接，当前为只读。"
       : sessionState?.persistenceLimited
         ? "本地执行器可交互，输出持久化能力受限。"
         : null;

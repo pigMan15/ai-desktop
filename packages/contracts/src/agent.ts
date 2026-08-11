@@ -1,7 +1,7 @@
 // Agent runtime ACP adapter and chat contracts (design doc 2026-08-10 v2, section 4)
 import type { Actor } from "./events.js";
 
-export const AGENT_TRANSPORTS = ["auto", "cli", "acp", "direct"] as const;
+export const AGENT_TRANSPORTS = ["auto", "cli", "acp", "direct", "app-server"] as const;
 export type AgentTransport = (typeof AGENT_TRANSPORTS)[number];
 
 export const AGENT_PERMISSION_STATUSES = ["PENDING", "ALLOWED", "DENIED", "EXPIRED"] as const;

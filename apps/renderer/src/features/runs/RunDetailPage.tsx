@@ -85,7 +85,7 @@ export type RunAgentStartRequest = {
   mode: "interactive" | "automatic";
   allowedTools: string[];
   cwd: string;
-  transport?: "auto" | "cli" | "acp" | "direct";
+  transport?: "auto" | "cli" | "acp" | "direct" | "app-server";
   conversational?: boolean;
   modelProviderId?: string | null;
 };
@@ -133,7 +133,7 @@ function RunDetailPageContent({
   const [agentProvider, setAgentProvider] = useState<AgentJobSummary["provider"]>("codex");
   const [agentMode, setAgentMode] = useState<"interactive" | "automatic">("interactive");
   const [agentPrompt, setAgentPrompt] = useState("");
-  const [agentTransport, setAgentTransport] = useState<"auto" | "cli" | "acp" | "direct">("auto");
+  const [agentTransport, setAgentTransport] = useState<"auto" | "cli" | "acp" | "direct" | "app-server">("auto");
   const [agentConversational, setAgentConversational] = useState(false);
   const [agentModelProviderId, setAgentModelProviderId] = useState<string | null>(null);
   const [agentLaunchError, setAgentLaunchError] = useState<string | null>(null);
@@ -166,6 +166,10 @@ function RunDetailPageContent({
     // ??????????????? Provider????????
     if (agentTransport === "direct" && agentProvider !== "direct") {
       setAgentProvider("direct");
+      return;
+    }
+    if (agentTransport === "app-server" && agentProvider !== "codex") {
+      setAgentProvider("codex");
       return;
     }
     if (agentProvider === "direct") {
@@ -645,8 +649,8 @@ function RunDetailPageContent({
                     )}
                   </div>
                 </fieldset>
-                <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>
-                <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport("acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic" || agentProvider === "direct"} /><span>{agentProvider === "direct" ? "聊天模式（模型直连自动开启）" : "聊天模式（多轮，需 ACP）"}</span></label>
+                <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct" | "app-server")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>
+                <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport(agentProvider === "codex" ? "app-server" : "acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic" || agentProvider === "direct"} /><span>{agentProvider === "direct" ? "聊天模式（模型直连自动开启）" : agentProvider === "codex" ? "聊天模式（多轮 + 命令执行 + 审批）" : "聊天模式（多轮，需 ACP）"}</span></label>
 
                 {agentProvider === "direct" ? (
                   <label className="run-agent-model-service">模型服务<select value={agentModelProviderId ?? ""} onChange={(event) => setAgentModelProviderId(event.target.value || null)} disabled={agentReadOnly || agentLaunching || !modelProviders?.length}><option value="">默认服务</option>{modelProviders?.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}{provider.isDefault ? "（默认）" : ""}</option>)}</select></label>

@@ -15,6 +15,7 @@ import yaml
 from workflow_platform.adapters.registry import default_registry
 from workflow_platform.artifacts.service import hash_artifact, render_artifact_path, validate_safe_path
 from workflow_platform.compiler.compiler import compile_workflow
+from workflow_platform.execution.app_server import AppServerAgentExecutor, app_server_executable
 from workflow_platform.execution.cli import AcpAgentExecutor, CliAgentExecutor
 from workflow_platform.execution.direct_chat import (
     DEFAULT_BASE_URL,
@@ -83,6 +84,19 @@ from workflow_platform.workspaces import normalize_workspace_path
 
 
 AGENT_PERMISSION_PENDING_LIMIT = 50
+
+
+def _default_app_server_executor(
+    on_output: Callable[[dict[str, Any]], None] | None,
+    on_started: Callable[[int], None] | None,
+    on_permission: Callable[[str, dict], None] | None,
+) -> AppServerAgentExecutor:
+    return AppServerAgentExecutor(
+        executable=app_server_executable(),
+        on_output=on_output,
+        on_started=on_started,
+        on_permission=on_permission,
+    )
 
 
 def _coerce_max_tokens(value: object) -> int | None:
@@ -233,6 +247,15 @@ class WorkflowRuntimeService:
             DirectChatExecutor,
         ]
         | None = None,
+        app_server_factory: Callable[
+            [
+                Callable[[dict], None] | None,
+                Callable[[int], None] | None,
+                Callable[[str, dict], None] | None,
+            ],
+            AppServerAgentExecutor,
+        ]
+        | None = None,
         maintenance_mode: bool = False,
     ) -> None:
         self._db = db
@@ -263,6 +286,7 @@ class WorkflowRuntimeService:
         self._settings = RuntimeSettingsRepository(db)
         self._agent_provider_factory = agent_provider_factory or _default_agent_provider
         self._direct_chat_factory = direct_chat_factory or _default_direct_chat_executor
+        self._app_server_factory = app_server_factory or _default_app_server_executor
         self._maintenance_mode = maintenance_mode
         self._agent_executors: dict[str, CliAgentExecutor] = {}
         self._interactive_desktop_sessions: dict[str, str] = {}
@@ -1088,15 +1112,24 @@ class WorkflowRuntimeService:
             if job["status"] != "AWAITING_INPUT":
                 raise RuntimeContractError(
                     "AGENT_CONVERSATION_NOT_AWAITING_INPUT",
-                    f"聊天任务状态应为 AWAITING_INPUT（当前 {job['status']}）",
+                    "聊天任务状态应为 AWAITING_INPUT（当前 {job['status']}）",
                     status=409,
                 )
-            executor = self._agent_executors.get(job_id)
-            if executor is None or not hasattr(executor, "continue_conversation"):
-                raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话执行器不可用", status=409)
             session = self._agent_sessions.get_for_job(job_id)
             if session is None:
                 raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话记录缺失", status=409)
+            executor = self._agent_executors.get(job_id)
+            if executor is None or not hasattr(executor, "continue_conversation"):
+                metadata = job.get("metadata") or {}
+                if metadata.get("transport") == "app-server" and metadata.get("codexThreadId"):
+                    # Rehydrate outside the lock: the executor's notification
+                    # callbacks append output under the same lock and must not
+                    # block on it from the reader thread.
+                    rehydrate_state = (job, session)
+                else:
+                    raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话执行器不可用", status=409)
+            else:
+                rehydrate_state = None
             sequence = len(self._agent_sessions.list_input(session["id"])) + 1
             self._agent_sessions.append_input(
                 id=f"{session['id']}:input:{sequence}",
@@ -1106,7 +1139,6 @@ class WorkflowRuntimeService:
                 content=redact_terminal_output(message.strip()),
                 created_at=now,
             )
-            turn_id = executor.continue_conversation(job_id, message.strip())
             self._agent_jobs.set_status(id=job_id, status="RUNNING", updated_at=now)
             self._audit.record(
                 actor=human_actor,
@@ -1116,6 +1148,14 @@ class WorkflowRuntimeService:
                 created_at=now,
             )
             self._db.commit()
+
+        if rehydrate_state is not None:
+            rehydrate_job, rehydrate_session = rehydrate_state
+            executor = self._rehydrate_app_server_executor(rehydrate_job, rehydrate_session)
+            with self._lock:
+                self._agent_executors[job_id] = executor
+
+        turn_id = executor.continue_conversation(job_id, message.strip())
 
         def finish_turn() -> None:
             try:
@@ -1144,6 +1184,101 @@ class WorkflowRuntimeService:
 
         Thread(target=finish_turn, name=f"workflow-agent-turn-{job_id}", daemon=True).start()
         return {"turnId": turn_id, "status": "RUNNING"}
+
+    def _make_agent_permission_handler(
+        self, *, job_id: str, run_id: str, append_output: Callable[[dict], None], now: str
+    ) -> Callable[[str, dict], None]:
+        def on_permission(request_id: str, mapped: dict) -> None:
+            permission_id = f"agent-permission-{uuid4()}"
+            with self._lock, self._db:
+                pending_count = len(self._agent_permissions.list_pending_for_job(job_id))
+                over_limit = pending_count >= AGENT_PERMISSION_PENDING_LIMIT
+                self._agent_permissions.create(
+                    id=permission_id,
+                    job_id=job_id,
+                    run_id=run_id,
+                    permission_type=str(mapped.get("permissionType") or "other"),
+                    target=str(mapped.get("target") or ""),
+                    details={
+                        **(mapped.get("details") or {}),
+                        "agentRequestId": request_id,
+                    },
+                    created_at=now,
+                )
+                if over_limit:
+                    self._agent_permissions.decide(
+                        permission_id,
+                        status="DENIED",
+                        decided_by={
+                            "id": "runtime-policy",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        decided_at=now,
+                        reason="?? PENDING ???????",
+                    )
+                    self._audit.record(
+                        actor={
+                            "id": "runtime-policy",
+                            "type": "system",
+                            "source": "runtime",
+                            "trusted": True,
+                        },
+                        action="agent.permission.denied",
+                        resource=f"agent-permission:{permission_id}",
+                        detail={"runId": run_id, "jobId": job_id, "reason": "pending limit"},
+                        created_at=now,
+                    )
+                append_output(
+                    {
+                        "kind": "acp.permission",
+                        "payload": {
+                            "requestId": request_id,
+                            "permissionId": permission_id,
+                            "status": "DENIED" if over_limit else "PENDING",
+                            "permissionType": mapped.get("permissionType"),
+                            "target": mapped.get("target"),
+                        },
+                    }
+                )
+                self._db.commit()
+
+        return on_permission
+
+    def _rehydrate_app_server_executor(self, job: dict, session: dict) -> AppServerAgentExecutor:
+        """?????? Codex thread id ?? app-server ??????Runtime ???????"""
+        job_id = job["id"]
+        run_id = job["runId"]
+        existing_output = sorted(
+            self._agent_jobs.list_output(job_id), key=lambda item: item["sequence"]
+        )
+        output_sequence = max((item["sequence"] for item in existing_output), default=0)
+
+        def append_output(event: dict[str, Any]) -> None:
+            nonlocal output_sequence
+            output_sequence += 1
+            with self._lock:
+                self._agent_jobs.append_output(
+                    id=f"{job_id}:output:{output_sequence}",
+                    job_id=job_id,
+                    sequence=output_sequence,
+                    kind=event["kind"],
+                    payload=event["payload"],
+                    created_at=_now(),
+                )
+                self._db.commit()
+
+        on_permission = self._make_agent_permission_handler(
+            job_id=job_id, run_id=run_id, append_output=append_output, now=_now()
+        )
+        executor = self._app_server_factory(append_output, None, on_permission)
+        executor.adopt_conversation(
+            job_id,
+            thread_id=str((job.get("metadata") or {})["codexThreadId"]),
+            cwd=Path(session["cwd"]),
+        )
+        return executor
 
     def list_scoped_agent_permissions(
         self, project_id: str, run_id: str, job_id: str, *, status: str = "PENDING"
@@ -1219,6 +1354,18 @@ class WorkflowRuntimeService:
         updated = self._agent_permissions.get(permission_request_id)
         if updated is None:
             raise KeyError(f"Agent permission not found: {permission_request_id}")
+        executor = self._agent_executors.get(job_id)
+        if executor is not None and hasattr(executor, "respond_permission"):
+            try:
+                details = permission.get("details") or {}
+                agent_request_id = details.get("agentRequestId") or permission_request_id
+                executor.respond_permission(
+                    str(agent_request_id),
+                    allow=decision == "allow",
+                    reason=reason,
+                )
+            except Exception:
+                pass
         return updated
 
     def get_scoped_interactive_agent_session(self, project_id: str, run_id: str, job_id: str) -> dict:
@@ -3614,7 +3761,7 @@ class WorkflowRuntimeService:
         if provider != "direct":
             cli_provider = self._agent_provider_factory(provider)
         safe_allowed_tools = allowed_tools or []
-        if transport not in {"auto", "cli", "acp", "direct"}:
+        if transport not in {"auto", "cli", "acp", "direct", "app-server"}:
             raise ValueError(f"AGENT_TRANSPORT_INVALID: unsupported transport {transport}")
         resolved_transport = "cli"
         acp_provider: AcpProvider | None = None
@@ -3647,8 +3794,27 @@ class WorkflowRuntimeService:
                     status=422,
                 )
             resolved_transport = "acp"
-        if conversational and resolved_transport not in {"acp", "direct"}:
-            raise ValueError("AGENT_CONVERSATIONAL_UNSUPPORTED: conversational requires acp transport")
+        elif transport == "app-server" or (
+            transport == "auto" and conversational and provider == "codex"
+        ):
+            if provider != "codex":
+                raise RuntimeContractError(
+                    "AGENT_APP_SERVER_UNAVAILABLE",
+                    "app-server ??? Codex ??",
+                    status=422,
+                )
+            resolved_transport = "app-server"
+        if conversational and resolved_transport not in {"acp", "direct", "app-server"}:
+            cli_chat_supported = bool(
+                resolved_transport == "cli"
+                and cli_provider is not None
+                and hasattr(cli_provider, "build_conversation_command")
+            )
+            if not cli_chat_supported:
+                raise ValueError(
+                    "AGENT_CONVERSATIONAL_UNSUPPORTED: conversational requires "
+                    "acp/app-server transport or a chat-capable CLI provider"
+                )
         # auto ?? legacy CLI???????????Phase 0 spike ??? CLI ? ACP ??????
         if resolved_transport == "direct":
             assert direct_chat_config is not None
@@ -3660,6 +3826,12 @@ class WorkflowRuntimeService:
         elif resolved_transport == "acp":
             assert acp_provider is not None
             command = acp_provider.build_acp_command(cwd=execution_cwd)
+        elif resolved_transport == "app-server":
+            command = CliCommand(
+                executable=app_server_executable(),
+                args=["app-server", "--listen", "stdio://"],
+                cwd=execution_cwd,
+            )
         else:
             assert cli_provider is not None
             command = cli_provider.build_command(
@@ -3672,6 +3844,11 @@ class WorkflowRuntimeService:
             f"agent-session-{uuid4()}" if mode == "interactive" or conversational else None
         )
         output_sequence = 0
+        job_metadata = {
+            "transport": resolved_transport,
+            "conversational": conversational,
+            **({"modelProviderId": model_provider_id} if model_provider_id else {}),
+        }
 
         def append_output(event: dict[str, Any]) -> None:
             nonlocal output_sequence
@@ -3713,11 +3890,7 @@ class WorkflowRuntimeService:
                 mode=mode,
                 session_id=session_id,
                 parent_job_id=parent_job_id,
-                metadata={
-                    "transport": resolved_transport,
-                    "conversational": conversational,
-                    **({"modelProviderId": model_provider_id} if model_provider_id else {}),
-                },
+                metadata=job_metadata,
             )
             for artifact in context_artifacts:
                 artifact_id = artifact.get("artifactId")
@@ -3767,7 +3940,15 @@ class WorkflowRuntimeService:
                     provider=provider,
                     cwd=str(execution_cwd),
                     max_output_bytes=max_output_bytes,
-                    kind="direct-chat" if provider == "direct" else "acp-chat",
+                    kind=(
+                        "direct-chat"
+                        if provider == "direct"
+                        else "app-server-chat"
+                        if resolved_transport == "app-server"
+                        else "cli-chat"
+                        if resolved_transport == "cli"
+                        else "acp-chat"
+                    ),
                     created_at=now,
                 )
                 self._agent_sessions.append_input(
@@ -3841,58 +4022,9 @@ class WorkflowRuntimeService:
                 self._agent_jobs.set_running(id=job_id, pid=pid, updated_at=now)
                 self._db.commit()
 
-        def on_permission(request_id: str, mapped: dict) -> None:
-            permission_id = f"agent-permission-{uuid4()}"
-            with self._lock, self._db:
-                pending_count = len(self._agent_permissions.list_pending_for_job(job_id))
-                over_limit = pending_count >= AGENT_PERMISSION_PENDING_LIMIT
-                self._agent_permissions.create(
-                    id=permission_id,
-                    job_id=job_id,
-                    run_id=run_id,
-                    permission_type=str(mapped.get("permissionType") or "other"),
-                    target=str(mapped.get("target") or ""),
-                    details=mapped.get("details") or {},
-                    created_at=now,
-                )
-                if over_limit:
-                    self._agent_permissions.decide(
-                        permission_id,
-                        status="DENIED",
-                        decided_by={
-                            "id": "runtime-policy",
-                            "type": "system",
-                            "source": "runtime",
-                            "trusted": True,
-                        },
-                        decided_at=now,
-                        reason="超过 PENDING 上限，自动拒绝",
-                    )
-                    self._audit.record(
-                        actor={
-                            "id": "runtime-policy",
-                            "type": "system",
-                            "source": "runtime",
-                            "trusted": True,
-                        },
-                        action="agent.permission.denied",
-                        resource=f"agent-permission:{permission_id}",
-                        detail={"runId": run_id, "jobId": job_id, "reason": "pending limit"},
-                        created_at=now,
-                    )
-                append_output(
-                    {
-                        "kind": "acp.permission",
-                        "payload": {
-                            "requestId": request_id,
-                            "permissionId": permission_id,
-                            "status": "DENIED" if over_limit else "PENDING",
-                            "permissionType": mapped.get("permissionType"),
-                            "target": mapped.get("target"),
-                        },
-                    }
-                )
-                self._db.commit()
+        on_permission = self._make_agent_permission_handler(
+            job_id=job_id, run_id=run_id, append_output=append_output, now=now
+        )
 
         if resolved_transport == "direct":
             assert direct_chat_config is not None
@@ -3909,6 +4041,8 @@ class WorkflowRuntimeService:
                 on_started=mark_running,
                 on_permission=on_permission,
             )
+        elif resolved_transport == "app-server":
+            executor = self._app_server_factory(append_output, mark_running, on_permission)
         else:
             assert cli_provider is not None
             executor = CliAgentExecutor(
@@ -3941,6 +4075,16 @@ class WorkflowRuntimeService:
                 error = f"AGENT_EXECUTION_ERROR: {exception}"
                 result_status = status
             finally:
+                if result_status == "AWAITING_INPUT" and resolved_transport == "app-server":
+                    thread_id = getattr(executor, "thread_id_for", lambda _job_id: None)(job_id)
+                    if thread_id and job_metadata.get("codexThreadId") != thread_id:
+                        with self._lock:
+                            self._agent_jobs.set_metadata(
+                                id=job_id,
+                                metadata={**job_metadata, "codexThreadId": thread_id},
+                                updated_at=now,
+                            )
+                            self._db.commit()
                 if result_status != "AWAITING_INPUT":
                     self._agent_executors.pop(job_id, None)
 

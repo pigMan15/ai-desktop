@@ -261,6 +261,7 @@ class AcpAgentExecutor:
             if event.get("method") == "permission/request" and self._on_permission is not None:
                 request_id = (event.get("params") or {}).get("requestId")
                 if isinstance(request_id, str) and request_id:
+                    state.setdefault("request_ids", set()).add(request_id)
                     self._on_permission(request_id, self._provider.map_permission(event))
             if self._on_output is not None:
                 self._on_output(acp_event_to_agent_output(event))
@@ -371,6 +372,23 @@ class AcpAgentExecutor:
             self._cancelled.discard(job_id)
         if state is not None:
             state["session"].close()
+
+    def respond_permission(self, request_id: str, *, allow: bool, reason: str | None = None) -> None:
+        with self._lock:
+            state = next(
+                (
+                    candidate
+                    for candidate in self._conversations.values()
+                    if request_id in (candidate.get("request_ids") or set())
+                ),
+                None,
+            )
+        if state is None:
+            return
+        try:
+            state["session"].request_permission_response(request_id, allow=allow, reason=reason)
+        except Exception:
+            pass
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:

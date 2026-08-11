@@ -47,10 +47,18 @@ export function agentViewportOutput(
     .map((event) => ({ sequence: event.sequence, data: persistedData(event) }));
 }
 
+export type AgentChatTool = {
+  title?: string;
+  status?: string;
+  text?: string;
+  itemId?: string;
+};
+
 export type AgentChatMessage = {
   sequence: number;
-  kind: "message" | "user" | "permission" | "turn" | "error";
+  kind: "message" | "user" | "permission" | "turn" | "error" | "tool";
   text: string;
+  tool?: AgentChatTool;
 };
 
 export function isConversationalJob(job: AgentJobSummary): boolean {
@@ -88,6 +96,22 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
       text: typeof event.payload.text === "string" ? event.payload.text : "??????",
     };
   }
+  if (event.kind === "tool") {
+    const title = typeof event.payload.title === "string" ? event.payload.title : "命令执行";
+    const status = typeof event.payload.status === "string" ? event.payload.status : "";
+    const text = typeof event.payload.text === "string" ? event.payload.text : "";
+    return {
+      sequence: event.sequence,
+      kind: "tool" as const,
+      text,
+      tool: {
+        title,
+        status,
+        text,
+        itemId: typeof event.payload.itemId === "string" ? event.payload.itemId : undefined,
+      },
+    };
+  }
   return {
     sequence: event.sequence,
     kind: "message" as const,
@@ -107,13 +131,18 @@ export function agentChatMessages(
           event.kind === "chat.user" ||
           event.kind === "acp.permission" ||
           event.kind === "acp.turn" ||
-          event.kind === "acp.error"),
+          event.kind === "acp.error" ||
+          event.kind === "tool"),
     )
     .sort((left, right) => left.sequence - right.sequence);
 
-  // Stream deltas are coalesced by messageId so one reply renders as one bubble.
-  const streamLatest = new Map<string, AgentOutputSummary>();
+  // Stream deltas share a messageId; concatenate them in order so one reply
+  // renders as one bubble with the full text.
+  const streamDeltas = new Map<string, string[]>();
   const streamFirstSequence = new Map<string, number>();
+  // Tool/command executions share an itemId (item.started + item.completed);
+  // keep one block per command and let the latest event win (running -> completed).
+  const toolByItem = new Map<string, { sequence: number; message: AgentChatMessage }>();
   const standalone: AgentOutputSummary[] = [];
   for (const event of events) {
     const messageId =
@@ -121,22 +150,39 @@ export function agentChatMessages(
         ? event.payload.messageId
         : "";
     if (messageId) {
-      if (!streamFirstSequence.has(messageId)) streamFirstSequence.set(messageId, event.sequence);
-      streamLatest.set(messageId, event);
+      let deltas = streamDeltas.get(messageId);
+      if (!deltas) {
+        deltas = [];
+        streamDeltas.set(messageId, deltas);
+        streamFirstSequence.set(messageId, event.sequence);
+      }
+      deltas.push(typeof event.payload.text === "string" ? event.payload.text : "");
+    } else if (event.kind === "tool" && typeof event.payload.itemId === "string" && event.payload.itemId) {
+      const itemId = event.payload.itemId;
+      const mapped = mapChatEvent(event) as AgentChatMessage;
+      const existing = toolByItem.get(itemId);
+      if (!existing || event.sequence > existing.sequence) {
+        toolByItem.set(itemId, {
+          sequence: existing ? existing.sequence : event.sequence,
+          message: mapped,
+        });
+      }
     } else {
       standalone.push(event);
     }
   }
 
   const items: Array<{ sequence: number; message: AgentChatMessage }> = [];
-  for (const [messageId, latest] of streamLatest) {
+  for (const [messageId, deltas] of streamDeltas) {
+    const sequence = streamFirstSequence.get(messageId) ?? 0;
     items.push({
-      sequence: streamFirstSequence.get(messageId) ?? latest.sequence,
-      message: {
-        ...mapChatEvent(latest),
-        sequence: streamFirstSequence.get(messageId) ?? latest.sequence,
-      },
+      sequence,
+      message: { sequence, kind: "message", text: deltas.join("") },
     });
+  }
+  for (const [itemId, entry] of toolByItem) {
+    void itemId;
+    items.push({ sequence: entry.sequence, message: entry.message });
   }
   for (const event of standalone) {
     items.push({ sequence: event.sequence, message: mapChatEvent(event) });
