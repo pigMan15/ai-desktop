@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentPermissionRequest } from "@workflow-platform/contracts";
 import type { AgentChatMessage } from "./runAgentExecutorModel";
+import { ChatMarkdown } from "./ChatMarkdown";
 
 type Props = {
   jobLabel: string;
@@ -49,7 +50,7 @@ export function AgentChatView({ jobLabel, messages, permissions, disabled, onSen
               key={message.sequence}
               className={"agent-chat-message agent-chat-message--" + message.kind}
             >
-              {message.text}
+              {message.kind === "message" ? <ChatMarkdown text={message.text} /> : message.text}
             </div>
           ))
         )}
