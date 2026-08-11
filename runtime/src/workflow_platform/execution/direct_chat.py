@@ -17,6 +17,8 @@ from uuid import uuid4
 
 from workflow_platform.execution.cli import CliExecutionResult
 
+DIRECT_HTTP_TIMEOUT_SECONDS = 60
+
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_TEMPERATURE = 0.7
@@ -86,7 +88,7 @@ def stream_chat_completion(
     )
     collected: list[str] = []
     try:
-        with urlopen(request, timeout=180) as response:
+        with urlopen(request, timeout=DIRECT_HTTP_TIMEOUT_SECONDS) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
@@ -215,6 +217,10 @@ class DirectChatExecutor:
         with self._lock:
             self._histories[job_id] = history
             self._states[job_id] = state
+        self._emit({
+            "kind": "acp.turn",
+            "payload": {"text": "正在请求模型回复（" + self._config.model + "）…"},
+        })
         try:
             text = self._stream_turn(job_id, message_id, history, state)
         except Exception as error:
@@ -241,6 +247,10 @@ class DirectChatExecutor:
                 return
             history.append({"role": "user", "content": message})
             message_id = f"direct-message-{turn_id}"
+            self._emit({
+                "kind": "acp.turn",
+                "payload": {"text": "正在请求模型回复（" + self._config.model + "）…"},
+            })
             try:
                 self._stream_turn(job_id, message_id, history, state)
             except Exception as error:

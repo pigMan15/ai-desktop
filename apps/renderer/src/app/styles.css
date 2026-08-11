@@ -1623,6 +1623,7 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .agent-chat-message { padding: 8px 12px; border-radius: 8px; background: rgba(148, 163, 184, 0.12); color: #dbe4f0; font-size: 0.86rem; white-space: pre-wrap; word-break: break-word; }
 .agent-chat-message--permission { background: rgba(180, 132, 24, 0.12); color: #fde68a; }
 .agent-chat-message--turn { background: transparent; color: #7f97ad; font-size: 0.78rem; }
+.agent-chat-message--error { background: rgba(248, 113, 113, 0.12); color: #fda4af; }
 .agent-chat-empty { color: #64748b; text-align: center; padding: 20px 0; }
 .agent-chat-input { display: flex; gap: 8px; }
 .agent-chat-input input { flex: 1; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }

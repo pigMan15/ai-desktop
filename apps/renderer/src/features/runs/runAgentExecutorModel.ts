@@ -49,7 +49,7 @@ export function agentViewportOutput(
 
 export type AgentChatMessage = {
   sequence: number;
-  kind: "message" | "permission" | "turn";
+  kind: "message" | "permission" | "turn" | "error";
   text: string;
 };
 
@@ -74,6 +74,13 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
       text: typeof event.payload.text === "string" ? event.payload.text : "",
     };
   }
+  if (event.kind === "acp.error") {
+    return {
+      sequence: event.sequence,
+      kind: "error" as const,
+      text: typeof event.payload.text === "string" ? event.payload.text : "??????",
+    };
+  }
   return {
     sequence: event.sequence,
     kind: "message" as const,
@@ -91,7 +98,8 @@ export function agentChatMessages(
         event.jobId === jobId &&
         (event.kind === "acp.message" ||
           event.kind === "acp.permission" ||
-          event.kind === "acp.turn"),
+          event.kind === "acp.turn" ||
+          event.kind === "acp.error"),
     )
     .sort((left, right) => left.sequence - right.sequence);
 
