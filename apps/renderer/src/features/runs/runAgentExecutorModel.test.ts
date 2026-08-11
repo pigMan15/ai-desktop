@@ -145,6 +145,18 @@ describe("agentChatMessages streaming coalescing", () => {
     expect(messages[0].sequence).toBeLessThan(messages[1].sequence);
   });
 
+  it("maps chat.user events into user bubbles", () => {
+    const persisted: AgentOutputSummary[] = [
+      { id: "u1", jobId: "job-user", sequence: 1, kind: "chat.user", payload: { text: "你好" }, createdAt: "2026-08-12T00:00:00.000Z" },
+      { id: "a1", jobId: "job-user", sequence: 2, kind: "acp.message", payload: { text: "你好！", messageId: "m1" }, createdAt: "2026-08-12T00:00:01.000Z" },
+    ];
+    const messages = agentChatMessages("job-user", persisted);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].kind).toBe("user");
+    expect(messages[0].text).toBe("你好");
+    expect(messages[1].kind).toBe("message");
+  });
+
   it("keeps non-streamed messages in order with streamed ones", () => {
     const persisted = [
       event("s1", 1, "msg-1", "first"),

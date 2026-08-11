@@ -26,7 +26,7 @@ from test_api import AGENT_ACTOR, HUMAN_ACTOR, NOW, FakeProvider, import_project
 
 
 class _SseHandler(BaseHTTPRequestHandler):
-    chunks = ["??", "???", "?"]
+    chunks = ["你好", "，世界", "！"]
     error_code: int | None = None
 
     def do_POST(self) -> None:
@@ -103,6 +103,7 @@ class FakeDirectExecutor:
         return CliExecutionResult(status="AWAITING_INPUT", summary="direct ack", error=None, exit_code=0)
 
     def continue_conversation(self, job_id: str, message: str) -> str:
+        self._emit({"kind": "chat.user", "payload": {"text": message}})
         self._emit({"kind": "acp.message", "payload": {"text": f"direct ack: {message[:40]}", "messageId": "m2"}})
         self._completed.set()
         return "turn-2"
@@ -139,8 +140,8 @@ def test_stream_chat_completion_parses_sse() -> None:
         )
         deltas: list[str] = []
         text = stream_chat_completion(config, [{"role": "user", "content": "hi"}], on_delta=deltas.append)
-        assert text == "??????"
-        assert deltas == ["??", "???", "?"]
+        assert text == "你好，世界！"
+        assert deltas == ["你好", "，世界", "！"]
     finally:
         server.shutdown()
 
@@ -170,9 +171,9 @@ def test_direct_executor_conversation_flow_with_fake_streamer() -> None:
     def fake_streamer(config, messages, on_delta):
         assert messages[0]["role"] == "system"
         assert messages[-1]["role"] == "user"
-        for part in ("??", "??"):
+        for part in ("流式", "回复"):
             on_delta(part)
-        return "????"
+        return "流式回复"
 
     events: list[dict] = []
     started: list[int] = []
@@ -184,7 +185,7 @@ def test_direct_executor_conversation_flow_with_fake_streamer() -> None:
     )
     result = executor.run(
         job_id="job-1",
-        prompt="??",
+        prompt="首轮",
         cwd=None,
         project_root=None,
         timeout_seconds=30,
@@ -195,15 +196,15 @@ def test_direct_executor_conversation_flow_with_fake_streamer() -> None:
     assert started == [0]
     message_events = [e for e in events if e["kind"] == "acp.message"]
     assert len(message_events) == 2
-    assert message_events[0]["payload"]["text"] == "??"
+    assert message_events[0]["payload"]["text"] == "流式"
     assert message_events[0]["payload"]["messageId"] == message_events[1]["payload"]["messageId"]
 
     assert executor.is_conversation_alive("job-1")
-    turn_id = executor.continue_conversation("job-1", "??")
+    turn_id = executor.continue_conversation("job-1", "继续")
     assert turn_id.startswith("direct-turn-")
     assert executor.wait_turn_completed("job-1", timeout=5)
     texts = [e["payload"]["text"] for e in events if e["kind"] == "acp.message"]
-    assert "??" in texts
+    assert "流式" in texts
     executor.end_conversation("job-1")
     assert not executor.is_conversation_alive("job-1")
 
@@ -223,7 +224,7 @@ def test_runtime_api_model_provider_settings_roundtrip(tmp_path) -> None:
             "apiKey": "sk-test-123",
             "model": "deepseek-chat",
             "temperature": 0.3,
-            "systemPrompt": "??????",
+            "systemPrompt": "你是测试助手",
             "actor": HUMAN_ACTOR,
             "now": NOW,
         },
@@ -311,7 +312,7 @@ def test_runtime_api_direct_chat_flow(tmp_path) -> None:
         json={
             "nodeId": "plan",
             "provider": "direct",
-            "prompt": "??",
+            "prompt": "你好",
             "transport": "direct",
             "conversational": True,
             "actor": AGENT_ACTOR,
@@ -331,14 +332,16 @@ def test_runtime_api_direct_chat_flow(tmp_path) -> None:
 
     continued = client.post(
         f"{job_path}/conversation/message",
-        json={"message": "??", "actor": HUMAN_ACTOR, "now": NOW},
+        json={"message": "继续", "actor": HUMAN_ACTOR, "now": NOW},
     )
     assert continued.status_code == 200
     assert continued.json()["status"] == "RUNNING"
     _wait_status(client, run, job_id, {"AWAITING_INPUT", "COMPLETED", "FAILED", "CANCELLED"})
     output2 = client.get(f"{job_path}/output").json()
     texts = [item["payload"].get("text") or "" for item in output2 if item["kind"] == "acp.message"]
-    assert any("direct ack: ??" in text for text in texts), texts
+    assert any("direct ack: 继续" in text for text in texts), texts
+    user_events = [item for item in output2 if item["kind"] == "chat.user"]
+    assert any(item["payload"].get("text") == "继续" for item in user_events), user_events
 
     cancelled = client.post(f"{job_path}/cancel", json={"actor": HUMAN_ACTOR, "now": NOW})
     assert cancelled.status_code == 200
@@ -538,7 +541,7 @@ def test_runtime_api_direct_chat_with_selected_provider(tmp_path) -> None:
         json={
             "nodeId": "plan",
             "provider": "direct",
-            "prompt": "??",
+            "prompt": "你好",
             "transport": "direct",
             "conversational": True,
             "modelProviderId": provider["id"],

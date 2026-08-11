@@ -49,7 +49,7 @@ export function agentViewportOutput(
 
 export type AgentChatMessage = {
   sequence: number;
-  kind: "message" | "permission" | "turn" | "error";
+  kind: "message" | "user" | "permission" | "turn" | "error";
   text: string;
 };
 
@@ -65,6 +65,13 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
       sequence: event.sequence,
       kind: "permission" as const,
       text: "权限请求" + (status ? "（" + status + "）" : "") + (target ? "：" + target : ""),
+    };
+  }
+  if (event.kind === "chat.user") {
+    return {
+      sequence: event.sequence,
+      kind: "user" as const,
+      text: typeof event.payload.text === "string" ? event.payload.text : "",
     };
   }
   if (event.kind === "acp.turn") {
@@ -97,6 +104,7 @@ export function agentChatMessages(
       (event) =>
         event.jobId === jobId &&
         (event.kind === "acp.message" ||
+          event.kind === "chat.user" ||
           event.kind === "acp.permission" ||
           event.kind === "acp.turn" ||
           event.kind === "acp.error"),

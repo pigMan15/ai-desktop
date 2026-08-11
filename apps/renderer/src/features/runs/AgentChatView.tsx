@@ -50,7 +50,13 @@ export function AgentChatView({ jobLabel, messages, permissions, disabled, onSen
               key={message.sequence}
               className={"agent-chat-message agent-chat-message--" + message.kind}
             >
-              {message.kind === "message" ? <ChatMarkdown text={message.text} /> : message.text}
+              {message.kind === "message" ? (
+                <ChatMarkdown text={message.text} />
+              ) : message.kind === "user" ? (
+                <span className="agent-chat-user-text">{message.text}</span>
+              ) : (
+                message.text
+              )}
             </div>
           ))
         )}

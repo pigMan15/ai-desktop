@@ -103,10 +103,17 @@ def stream_chat_completion(
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
-                delta = (choices[0].get("delta") or {}).get("content")
-                if isinstance(delta, str) and delta:
-                    collected.append(delta)
-                    on_delta(delta)
+                delta = (choices[0].get("delta") or {})
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    collected.append(content)
+                    on_delta(content)
+                else:
+                    # DeepSeek Reasoner ?????????? reasoning_content
+                    reasoning = delta.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        collected.append(reasoning)
+                        on_delta(reasoning)
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")[:500]
         raise ValueError(f"AGENT_DIRECT_HTTP_ERROR: ?????? {error.code}: {body}") from error
@@ -180,6 +187,7 @@ class DirectChatExecutor:
         state.events = []
         state.completed.clear()
         state.error = None
+        self._emit({"kind": "chat.user", "payload": {"text": message}})
         self._spawn_turn(job_id, turn_id, message)
         return turn_id
 

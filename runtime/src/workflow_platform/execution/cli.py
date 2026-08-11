@@ -345,6 +345,8 @@ class AcpAgentExecutor:
             raise ValueError("AGENT_CONVERSATION_LOST: ACP session is not alive")
         state["events"] = []
         state["completed"].clear()
+        if self._on_output is not None:
+            self._on_output({"kind": "chat.user", "payload": {"text": message}})
         turn_id = session.continue_turn(str(state["turn_id"]), message)
         state["turn_id"] = turn_id
         return turn_id
