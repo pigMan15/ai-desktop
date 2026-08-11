@@ -197,8 +197,8 @@ function RunDetailPageContent({
         mode: agentMode,
         allowedTools: selectedAgentRole?.allowedTools ?? [],
         cwd: state.overview.workspace?.workspacePath ?? state.overview.run.executionWorkspace,
-        transport: agentTransport,
-        conversational: agentConversational,
+        transport: agentProvider === "direct" ? "direct" : agentTransport,
+        conversational: agentProvider === "direct" ? true : agentConversational,
         modelProviderId: agentProvider === "direct" ? agentModelProviderId : null,
       });
       if (mountedRef.current) setSelectedAgentJobId(job.id);
@@ -627,13 +627,22 @@ function RunDetailPageContent({
                 <label className="run-agent-provider">Agent Provider<select value={agentProvider} onChange={(event) => {
                   const value = event.target.value as AgentJobSummary["provider"];
                   setAgentProvider(value);
-                  if (value !== "direct" && agentTransport === "direct") setAgentTransport("auto");
+                  if (value !== "direct") {
+                    if (agentTransport === "direct") setAgentTransport("auto");
+                    setAgentConversational(false);
+                  }
                 }} disabled={agentReadOnly || agentLaunching}>{availableProviderDiagnostics.map((diagnostic) => <option key={diagnostic.id} value={diagnostic.id} disabled={!diagnostic.available}>{providerLabel(diagnostic.id)}{diagnostic.available ? "" : "（不可用）"}</option>)}</select></label>
                 <fieldset className="run-agent-mode" role="radiogroup">
                   <legend>Agent 模式</legend>
                   <div>
-                    <label><input type="radio" name="agent-mode" value="interactive" checked={agentMode === "interactive"} onChange={() => setAgentMode("interactive")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"} /><span>交互式终端</span></label>
-                    <label><input type="radio" name="agent-mode" value="automatic" checked={agentMode === "automatic"} onChange={() => setAgentMode("automatic")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"} /><span>自动执行</span></label>
+                    {agentProvider === "direct" ? (
+                      <span className="run-agent-mode-note">聊天模式（模型直连，多轮对话）</span>
+                    ) : (
+                      <>
+                        <label><input type="radio" name="agent-mode" value="interactive" checked={agentMode === "interactive"} onChange={() => setAgentMode("interactive")} disabled={agentReadOnly || agentLaunching} /><span>交互式终端</span></label>
+                        <label><input type="radio" name="agent-mode" value="automatic" checked={agentMode === "automatic"} onChange={() => setAgentMode("automatic")} disabled={agentReadOnly || agentLaunching} /><span>自动执行</span></label>
+                      </>
+                    )}
                   </div>
                 </fieldset>
                 <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>

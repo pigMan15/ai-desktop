@@ -36,6 +36,18 @@ export type RunAgentExecutorProps = {
 const shortJobId = (jobId: string) =>
   jobId.length > 12 ? `${jobId.slice(0, 12)}...` : jobId;
 
+const AGENT_STATUS_LABELS: Record<AgentJobSummary["status"], string> = {
+  QUEUED: "排队中",           // ???
+  RUNNING: "执行中",          // ???
+  AWAITING_INPUT: "等待回复",  // ????
+  COMPLETED: "已完成",        // ???
+  FAILED: "失败",                 // ??
+  CANCELLED: "已取消",        // ???
+};
+
+const agentStatusLabel = (status: AgentJobSummary["status"]): string =>
+  AGENT_STATUS_LABELS[status] ?? status;
+
 const AGENT_ICONS = {
   gem: Gem,
   sparkles: Sparkles,
@@ -137,7 +149,7 @@ export function RunAgentExecutor({
                     <Icon size={13} aria-hidden="true" />
                   </span>
                   <span className="run-agent-name" data-testid="agent-codename">{identity.displayName}</span>
-                  <span className={`run-agent-status is-${candidate.status.toLowerCase()}`}>{candidate.status}</span>
+                  <span className={`run-agent-status is-${candidate.status.toLowerCase()}`}>{agentStatusLabel(candidate.status)}</span>
                 </button>
               );
             })}
@@ -148,7 +160,7 @@ export function RunAgentExecutor({
             <div className="run-agent-executor-heading">
               <span className="eyebrow">Agent 执行器</span>
               <strong>{selectedJob.provider} · {shortJobId(selectedJob.id)}</strong>
-              <span>{selectedJob.nodeId} · {selectedJob.status}</span>
+              <span>{selectedJob.nodeId} · {agentStatusLabel(selectedJob.status)}</span>
             </div>
             <div className="run-agent-executor-actions">
               {conversational ? (

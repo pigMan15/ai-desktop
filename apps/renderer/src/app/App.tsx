@@ -1533,10 +1533,15 @@ export function App() {
   ): Promise<AgentJobSummary> {
     try {
       const terminalBridge = getDesktopTerminalBridge();
+      const isDirectChat = provider === "direct";
       const canUseInteractiveTerminal =
         mode === "interactive" && terminalBridge && (provider === "codex" || provider === "claude");
       const agentMode =
-        conversational === true ? "automatic" : canUseInteractiveTerminal ? "interactive" : "automatic";
+        isDirectChat || conversational === true
+          ? "automatic"
+          : canUseInteractiveTerminal
+            ? "interactive"
+            : "automatic";
       const executionCwd = cwd || projectPath;
       const job = await client.startAgentJob(
         projectId,
@@ -1550,8 +1555,8 @@ export function App() {
         executionCwd,
         undefined,
         {
-          transport: transport ?? "auto",
-          conversational: conversational === true,
+          transport: isDirectChat ? "direct" : transport ?? "auto",
+          conversational: isDirectChat ? true : conversational === true,
           modelProviderId: modelProviderId ?? null,
         },
       );
