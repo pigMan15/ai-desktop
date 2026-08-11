@@ -126,6 +126,8 @@ describe("RunDetailPage", () => {
       mode: "interactive",
       allowedTools: ["read", "edit"],
       cwd: "G:\\project\\release",
+      transport: "auto",
+      conversational: false,
     }));
     expect(window.location.hash).toBe("#/runs/run%2Fone");
     view.rerender(page({

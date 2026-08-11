@@ -1497,13 +1497,14 @@ export function App() {
 
   async function handleStartScopedAgent(
     runId: string,
-    { nodeId, provider, prompt, mode, allowedTools, cwd }: RunAgentStartRequest,
+    { nodeId, provider, prompt, mode, allowedTools, cwd, transport, conversational }: RunAgentStartRequest,
   ): Promise<AgentJobSummary> {
     try {
       const terminalBridge = getDesktopTerminalBridge();
       const canUseInteractiveTerminal =
         mode === "interactive" && terminalBridge && (provider === "codex" || provider === "claude");
-      const agentMode = canUseInteractiveTerminal ? "interactive" : "automatic";
+      const agentMode =
+        conversational === true ? "automatic" : canUseInteractiveTerminal ? "interactive" : "automatic";
       const executionCwd = cwd || projectPath;
       const job = await client.startAgentJob(
         projectId,
@@ -1515,6 +1516,8 @@ export function App() {
         agentMode,
         allowedTools,
         executionCwd,
+        undefined,
+        { transport: transport ?? "auto", conversational: conversational === true },
       );
       if (canUseInteractiveTerminal) {
         let terminalSession: Awaited<ReturnType<DesktopTerminalBridge["create"]>> | null = null;

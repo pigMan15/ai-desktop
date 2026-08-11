@@ -1631,3 +1631,9 @@ input[type="checkbox"] { width: 15px; min-height: 15px; accent-color: var(--acce
 .agent-view-toggle { display: inline-flex; gap: 4px; }
 .agent-view-toggle button { min-height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink-muted); cursor: pointer; }
 .agent-view-toggle button.is-active { background: rgba(15, 118, 110, 0.12); border-color: var(--accent); color: var(--accent); }
+
+/* Agent 启动面板：传输与聊天模式 */
+.run-agent-transport { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: var(--ink-muted); }
+.run-agent-transport select { min-height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.run-agent-conversational { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--ink-muted); cursor: pointer; }
+.run-agent-conversational input { accent-color: var(--accent); }

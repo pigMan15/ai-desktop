@@ -243,7 +243,7 @@ export type AgentOutputSummary = {
 };
 
 export type AgentProviderDiagnostic = {
-  id: "codex" | "claude";
+  id: "codex" | "claude" | "opencode" | "fake";
   executable: string;
   available: boolean;
   path: string | null;

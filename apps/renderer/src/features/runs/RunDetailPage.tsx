@@ -82,6 +82,8 @@ export type RunAgentStartRequest = {
   mode: "interactive" | "automatic";
   allowedTools: string[];
   cwd: string;
+  transport?: "auto" | "cli" | "acp";
+  conversational?: boolean;
 };
 
 export function RunDetailPage(props: RunDetailPageProps) {
@@ -125,6 +127,8 @@ function RunDetailPageContent({
   const [agentProvider, setAgentProvider] = useState<AgentJobSummary["provider"]>("codex");
   const [agentMode, setAgentMode] = useState<"interactive" | "automatic">("interactive");
   const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentTransport, setAgentTransport] = useState<"auto" | "cli" | "acp">("auto");
+  const [agentConversational, setAgentConversational] = useState(false);
   const [agentLaunchError, setAgentLaunchError] = useState<string | null>(null);
   const [agentLaunching, setAgentLaunching] = useState(false);
   const [deploymentStarting, setDeploymentStarting] = useState(false);
@@ -163,6 +167,8 @@ function RunDetailPageContent({
         mode: agentMode,
         allowedTools: selectedAgentRole?.allowedTools ?? [],
         cwd: state.overview.workspace?.workspacePath ?? state.overview.run.executionWorkspace,
+        transport: agentTransport,
+        conversational: agentConversational,
       });
       if (mountedRef.current) setSelectedAgentJobId(job.id);
     } catch (error) {
@@ -595,6 +601,8 @@ function RunDetailPageContent({
                     <label><input type="radio" name="agent-mode" value="automatic" checked={agentMode === "automatic"} onChange={() => setAgentMode("automatic")} disabled={agentReadOnly || agentLaunching} /><span>自动执行</span></label>
                   </div>
                 </fieldset>
+                <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp")} disabled={agentReadOnly || agentLaunching}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option></select></label>
+                <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport("acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic"} /><span>聊天模式（多轮，需 ACP）</span></label>
                 <label className="run-agent-prompt">Agent 提示词<textarea value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} disabled={agentReadOnly || agentLaunching} /></label>
                 <button type="button" className="run-agent-start" disabled={agentReadOnly || agentLaunching || !onStartAgent || !agentPrompt.trim() || !providerAvailable} onClick={() => void startAgent()}>
                   <Play size={15} aria-hidden="true" />
@@ -736,10 +744,14 @@ const EMPTY_ACTION_INPUTS: ActionInputValues = {
 const DEFAULT_PROVIDER_DIAGNOSTICS: AgentProviderDiagnostic[] = [
   { id: "codex", executable: "codex", available: true, path: null, version: null, message: "未检测" },
   { id: "claude", executable: "claude", available: true, path: null, version: null, message: "未检测" },
+  { id: "fake", executable: "fake", available: true, path: null, version: null, message: "演示用假执行器" },
 ];
 
 function providerLabel(provider: AgentJobSummary["provider"]): string {
-  return provider === "codex" ? "Codex CLI" : "Claude Code";
+  if (provider === "codex") return "Codex CLI";
+  if (provider === "claude") return "Claude Code";
+  if (provider === "opencode") return "OpenCode";
+  return "Fake（演示）";
 }
 
 function renderActionInputs(

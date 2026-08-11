@@ -1055,6 +1055,9 @@ const defaultProviderDiagnostics: AgentProviderDiagnostic[] = [
   },
 ];
 
-function providerLabel(provider: "codex" | "claude"): string {
-  return provider === "codex" ? "Codex CLI" : "Claude Code CLI";
+function providerLabel(provider: AgentProviderDiagnostic["id"]): string {
+  if (provider === "codex") return "Codex CLI";
+  if (provider === "claude") return "Claude Code CLI";
+  if (provider === "opencode") return "OpenCode CLI";
+  return "Fake（演示）";
 }
