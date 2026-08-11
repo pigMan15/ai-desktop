@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from http.client import HTTPException
 from typing import Any, Callable
@@ -17,12 +18,12 @@ from uuid import uuid4
 
 from workflow_platform.execution.cli import CliExecutionResult
 
-DIRECT_HTTP_TIMEOUT_SECONDS = 60
+DIRECT_HTTP_TIMEOUT_SECONDS = 45
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_SYSTEM_PROMPT = "?? ai-desktop ??????????????????????"
+DEFAULT_SYSTEM_PROMPT = "你是 ai-desktop 的模型直连助手，请用中文简洁回答用户的问题。"
 
 MASKED_API_KEY = "********"
 
@@ -63,7 +64,7 @@ def stream_chat_completion(
     """
     if not config.configured:
         raise ValueError(
-            "AGENT_DIRECT_NOT_CONFIGURED: ??????????????????????"
+            "AGENT_DIRECT_NOT_CONFIGURED: 模型直连未配置，请先在设置页填写模型厂商信息"
         )
     endpoint = _chat_completions_url(config.base_url)
     payload: dict[str, Any] = {
@@ -87,9 +88,15 @@ def stream_chat_completion(
         method="POST",
     )
     collected: list[str] = []
+    started = time.monotonic()
+    timed_out = False
     try:
         with urlopen(request, timeout=DIRECT_HTTP_TIMEOUT_SECONDS) as response:
             for raw_line in response:
+                # 输出回调异常不得中断流式线程
+                if time.monotonic() - started > DIRECT_HTTP_TIMEOUT_SECONDS:
+                    timed_out = True
+                    break
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
                     continue
@@ -109,16 +116,20 @@ def stream_chat_completion(
                     collected.append(content)
                     on_delta(content)
                 else:
-                    # DeepSeek Reasoner ?????????? reasoning_content
+                    # DeepSeek Reasoner DeepSeek Reasoner 等模型把思考过程放在 reasoning_content reasoning_content
                     reasoning = delta.get("reasoning_content")
                     if isinstance(reasoning, str) and reasoning:
                         collected.append(reasoning)
                         on_delta(reasoning)
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")[:500]
-        raise ValueError(f"AGENT_DIRECT_HTTP_ERROR: ?????? {error.code}: {body}") from error
+        raise ValueError(f"AGENT_DIRECT_HTTP_ERROR: 模型接口返回  {error.code}: {body}") from error
     except (URLError, TimeoutError, HTTPException, OSError) as error:
-        raise ValueError(f"AGENT_DIRECT_NETWORK_ERROR: ????????: {error}") from error
+        raise ValueError(f"AGENT_DIRECT_NETWORK_ERROR: 无法连接模型接口:  {error}") from error
+    if timed_out and not collected:
+        raise ValueError("AGENT_DIRECT_TIMEOUT: 模型接口响应超时，请检查模型名称与接口地址")
+    if timed_out and collected:
+        return "".join(collected) + "\n\u3010\u54cd\u5e94\u8d85\u65f6\uff0c\u5df2\u622a\u65ad\u3011"
     return "".join(collected)
 
 
@@ -285,6 +296,8 @@ class DirectChatExecutor:
 
         text = self._streamer(self._config, history, on_delta)
         history.append({"role": "assistant", "content": text})
+        if not text.strip():
+            self._emit({"kind": "acp.error", "payload": {"text": "模型返回为空，请检查模型名称或接口地址"}})
         return text
 
     def _emit(self, event: dict[str, Any]) -> None:
@@ -292,7 +305,7 @@ class DirectChatExecutor:
             try:
                 self._on_output(event)
             except Exception:
-                # ??????????????
+                # 输出回调异常不得中断流式线程
                 pass
 
 
