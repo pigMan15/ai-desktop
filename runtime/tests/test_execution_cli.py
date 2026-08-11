@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from workflow_platform.execution.cli import CliAgentExecutor, decode_cli_output
+from workflow_platform.execution.cli import CliAgentExecutor, _to_chat_event, decode_cli_output
 from workflow_platform.execution.providers import (
     CliCommand,
     ClaudeCliProvider,
@@ -178,17 +178,22 @@ def test_codex_provider_normalizes_execution_progress_events() -> None:
 
     assert provider.parse_line('{"type":"thread.started","thread_id":"thread-1"}') == {
         "kind": "progress",
-        "payload": {"text": "Codex 会话已创建（thread-1）。"},
+        "payload": {"text": "Codex 会话已创建（thread-1）。", "threadId": "thread-1"},
     }
     assert provider.parse_line('{"type":"turn.started"}') == {
         "kind": "progress",
         "payload": {"text": "Codex 正在分析并生成结果。"},
     }
     assert provider.parse_line(
-        '{"type":"item.started","item":{"type":"command_execution","command":"rg --files"}}'
+        '{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"rg --files"}}'
     ) == {
-        "kind": "progress",
-        "payload": {"text": "Codex 正在执行命令：rg --files"},
+        "kind": "tool",
+        "payload": {
+            "text": "Codex 正在执行命令：rg --files",
+            "title": "rg --files",
+            "status": "running",
+            "itemId": "item_0",
+        },
     }
     assert provider.parse_line('{"type":"turn.completed"}') == {
         "kind": "progress",
@@ -342,3 +347,184 @@ def test_executor_cancel_terminates_running_process(tmp_path: Path) -> None:
     thread.join(timeout=5)
 
     assert result_holder["result"].status == "CANCELLED"
+
+class ChatFakeProvider:
+    id = "fake"
+
+    def build_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        allowed_tools: list[str],
+    ) -> CliCommand:
+        return CliCommand(executable=sys.executable, args=[str(FAKE_CLI), "complete"], cwd=cwd)
+
+    def build_conversation_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        thread_id: str | None = None,
+        allowed_tools: list[str] | None = None,
+    ) -> CliCommand:
+        if thread_id:
+            args = [str(FAKE_CLI), "chat-resume", thread_id, prompt]
+        else:
+            args = [str(FAKE_CLI), "chat-start"]
+        return CliCommand(executable=sys.executable, args=args, cwd=cwd)
+
+    def parse_line(self, line: str) -> dict:
+        return CodexCliProvider(platform="linux").parse_line(line)
+
+
+def test_codex_provider_builds_conversation_commands() -> None:
+    provider = CodexCliProvider(platform="win32")
+    cwd = Path("C:/project")
+
+    first = provider.build_conversation_command(cwd=cwd, prompt="第一轮")
+    assert first.executable == "codex.cmd"
+    assert first.args == [
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "--cd",
+        str(cwd),
+        "-",
+    ]
+    assert first.stdin == "第一轮"
+
+    resumed = provider.build_conversation_command(
+        cwd=cwd, prompt="继续", thread_id="thread-1"
+    )
+    assert resumed.args == [
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "--cd",
+        str(cwd),
+        "resume",
+        "thread-1",
+        "-",
+    ]
+    assert resumed.stdin == "继续"
+
+
+def test_codex_provider_emits_tool_blocks_for_command_execution() -> None:
+    provider = CodexCliProvider(platform="win32")
+
+    completed = provider.parse_line(
+        '{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"rg --files","status":"completed","exit_code":0,"aggregated_output":"src/a.ts"}}'
+    )
+    assert completed == {
+        "kind": "tool",
+        "payload": {
+            "text": "src/a.ts",
+            "title": "rg --files",
+            "status": "completed",
+            "itemId": "item_0",
+            "exitCode": 0,
+        },
+    }
+
+    failed = provider.parse_line(
+        '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bad","status":"failed","exit_code":1,"aggregated_output":"boom"}}'
+    )
+    assert failed["kind"] == "tool"
+    assert failed["payload"]["status"] == "failed"
+    assert failed["payload"]["text"] == "boom"
+
+    mcp = provider.parse_line(
+        '{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","tool":"list_mcp_resources","result":{"content":[{"type":"text","text":"ok"}]}}}'
+    )
+    assert mcp["kind"] == "tool"
+    assert mcp["payload"]["title"] == "MCP 工具 list_mcp_resources"
+    assert mcp["payload"]["text"] == "ok"
+
+
+def test_to_chat_event_maps_cli_events_to_chat_shape() -> None:
+    mapped = _to_chat_event({"kind": "message", "payload": {"text": "hi"}})
+    assert mapped is not None
+    assert mapped["kind"] == "acp.message"
+    assert mapped["payload"]["text"] == "hi"
+    assert isinstance(mapped["payload"]["messageId"], str)
+    assert _to_chat_event({"kind": "final", "payload": {"text": "done"}})["kind"] == "acp.message"
+    assert _to_chat_event({"kind": "progress", "payload": {"text": "working"}}) == {
+        "kind": "acp.turn",
+        "payload": {"text": "working"},
+    }
+    assert _to_chat_event({"kind": "error", "payload": {"text": "boom"}}) == {
+        "kind": "acp.error",
+        "payload": {"text": "boom"},
+    }
+    tool = _to_chat_event({"kind": "tool", "payload": {"title": "cmd", "status": "running"}})
+    assert tool == {"kind": "tool", "payload": {"title": "cmd", "status": "running"}}
+    assert _to_chat_event({"kind": "raw", "payload": {"text": "noise"}}) is None
+
+
+def test_executor_runs_conversational_cli_chat(tmp_path: Path) -> None:
+    events: list[dict] = []
+    executor = CliAgentExecutor(provider=ChatFakeProvider(), on_output=events.append)
+
+    result = executor.run(
+        job_id="agent-job-chat",
+        prompt="第一轮",
+        cwd=tmp_path,
+        project_root=tmp_path,
+        timeout_seconds=5,
+        max_output_bytes=4096,
+        conversational=True,
+    )
+    assert result.status == "AWAITING_INPUT"
+    assert executor.thread_id_for("agent-job-chat") == "thread-123"
+    assert executor.is_conversation_alive("agent-job-chat") is True
+    assert any(
+        event["kind"] == "acp.message" and "fake chat first" in event["payload"]["text"]
+        for event in events
+    )
+
+    turn_id = executor.continue_conversation("agent-job-chat", "继续，执行命令")
+    assert turn_id.startswith("codex-turn-")
+    assert executor.wait_turn_completed("agent-job-chat", timeout=5) is True
+    assert executor.is_conversation_alive("agent-job-chat") is True
+    user_events = [event for event in events if event["kind"] == "chat.user"]
+    assert any(event["payload"]["text"] == "继续，执行命令" for event in user_events)
+    resumed = [
+        event
+        for event in events
+        if event["kind"] == "acp.message" and "fake chat resume" in event["payload"]["text"]
+    ]
+    assert resumed, events
+
+    executor.end_conversation("agent-job-chat")
+    assert executor.is_conversation_alive("agent-job-chat") is False
+
+
+def test_executor_conversational_run_streams_tool_blocks(tmp_path: Path) -> None:
+    events: list[dict] = []
+    provider = ChatFakeProvider()
+    provider.build_conversation_command = lambda *, cwd, prompt, thread_id=None, allowed_tools=None: CliCommand(
+        executable=sys.executable, args=[str(FAKE_CLI), "chat-tools"], cwd=cwd
+    )
+    executor = CliAgentExecutor(provider=provider, on_output=events.append)
+    result = executor.run(
+        job_id="agent-job-tools",
+        prompt="扫描",
+        cwd=tmp_path,
+        project_root=tmp_path,
+        timeout_seconds=5,
+        max_output_bytes=4096,
+        conversational=True,
+    )
+    assert result.status == "AWAITING_INPUT"
+    tool_events = [event for event in events if event["kind"] == "tool"]
+    assert len(tool_events) == 2, events
+    assert tool_events[0]["payload"]["status"] == "running"
+    assert tool_events[1]["payload"]["status"] == "completed"
+    assert tool_events[0]["payload"]["itemId"] == tool_events[1]["payload"]["itemId"]
+    assert tool_events[1]["payload"]["text"] == "src/a.ts\nsrc/b.ts"
+    executor.end_conversation("agent-job-tools")

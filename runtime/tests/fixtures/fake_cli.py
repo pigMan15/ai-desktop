@@ -48,6 +48,39 @@ def main() -> int:
         time.sleep(0.8)
         emit("final", "fake-cli: streamed completion")
         return 0
+    if mode == "chat-start":
+        print(json.dumps({"type": "thread.started", "thread_id": "thread-123"}, ensure_ascii=False), flush=True)
+        emit("message", "fake chat first")
+        emit("final", "fake chat first done")
+        return 0
+    if mode == "chat-resume":
+        thread_id = sys.argv[2] if len(sys.argv) > 2 else "thread-123"
+        prompt = sys.argv[3] if len(sys.argv) > 3 else ""
+        print(json.dumps({"type": "thread.started", "thread_id": thread_id}, ensure_ascii=False), flush=True)
+        emit("message", f"fake chat resume: {prompt}")
+        emit("final", "fake chat resume done")
+        return 0
+    if mode == "chat-tools":
+        print(json.dumps({"type": "thread.started", "thread_id": "thread-456"}, ensure_ascii=False), flush=True)
+        print(json.dumps({
+            "type": "item.started",
+            "item": {"id": "item_0", "type": "command_execution", "command": "rg --files"},
+        }, ensure_ascii=False), flush=True)
+        print(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "id": "item_0",
+                "type": "command_execution",
+                "command": "rg --files",
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": "src/a.ts\nsrc/b.ts",
+            },
+        }, ensure_ascii=False), flush=True)
+        emit("message", "fake chat tools done")
+        emit("final", "fake chat tools completed")
+        return 0
+
     if mode == "knowledge-rule-discovery":
         _write_rule_discovery(Path.cwd())
         emit("final", "fake-cli: rule discovery completed")

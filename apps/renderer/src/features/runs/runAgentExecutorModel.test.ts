@@ -131,12 +131,12 @@ describe("agentChatMessages streaming coalescing", () => {
     createdAt: "2026-08-11T00:00:00.000Z",
   });
 
-  it("coalesces deltas of the same messageId into one bubble with the latest text", () => {
+  it("coalesces deltas of the same messageId into one bubble with concatenated text", () => {
     const persisted = [
       event("d1", 1, "msg-1", "hello "),
-      event("d2", 2, "msg-1", "hello world"),
+      event("d2", 2, "msg-1", "world"),
       event("d3", 3, "msg-2", "second reply"),
-      event("d4", 4, "msg-1", "hello world!"),
+      event("d4", 4, "msg-1", "!"),
     ];
     const messages = agentChatMessages("job-stream", persisted);
     expect(messages).toHaveLength(2);
@@ -161,12 +161,58 @@ describe("agentChatMessages streaming coalescing", () => {
     const persisted = [
       event("s1", 1, "msg-1", "first"),
       { id: "t1", jobId: "job-stream", sequence: 2, kind: "acp.turn", payload: { text: "turn" }, createdAt: "2026-08-11T00:00:00.000Z" },
-      event("s2", 3, "msg-1", "first done"),
+      event("s2", 3, "msg-1", " done"),
     ];
     const messages = agentChatMessages("job-stream", persisted);
     expect(messages).toHaveLength(2);
     expect(messages[0].kind).toBe("message");
     expect(messages[0].text).toBe("first done");
     expect(messages[1].kind).toBe("turn");
+  });
+});
+
+describe("agentChatMessages tool execution blocks", () => {
+  it("maps and merges tool events by itemId (running -> completed)", () => {
+    const persisted: AgentOutputSummary[] = [
+      {
+        id: "t1",
+        jobId: "job-tool",
+        sequence: 1,
+        kind: "tool",
+        payload: { itemId: "item_0", title: "rg --files", status: "running", text: "Codex 正在执行命令：rg --files" },
+        createdAt: "2026-08-12T00:00:00.000Z",
+      },
+      {
+        id: "t2",
+        jobId: "job-tool",
+        sequence: 2,
+        kind: "tool",
+        payload: { itemId: "item_0", title: "rg --files", status: "completed", text: "src/a.ts\nsrc/b.ts", exitCode: 0 },
+        createdAt: "2026-08-12T00:00:01.000Z",
+      },
+    ];
+    const messages = agentChatMessages("job-tool", persisted);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].kind).toBe("tool");
+    expect(messages[0].tool?.status).toBe("completed");
+    expect(messages[0].tool?.title).toBe("rg --files");
+    expect(messages[0].text).toBe("src/a.ts\nsrc/b.ts");
+  });
+
+  it("keeps a running-only tool event as one block when completed is missing", () => {
+    const persisted: AgentOutputSummary[] = [
+      {
+        id: "t1",
+        jobId: "job-tool-running",
+        sequence: 1,
+        kind: "tool",
+        payload: { itemId: "item_9", title: "npm test", status: "running", text: "Codex 正在执行命令：npm test" },
+        createdAt: "2026-08-12T00:00:00.000Z",
+      },
+    ];
+    const messages = agentChatMessages("job-tool-running", persisted);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].kind).toBe("tool");
+    expect(messages[0].tool?.status).toBe("running");
   });
 });

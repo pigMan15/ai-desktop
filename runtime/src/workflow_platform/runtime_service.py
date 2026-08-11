@@ -1091,12 +1091,28 @@ class WorkflowRuntimeService:
                     f"聊天任务状态应为 AWAITING_INPUT（当前 {job['status']}）",
                     status=409,
                 )
-            executor = self._agent_executors.get(job_id)
-            if executor is None or not hasattr(executor, "continue_conversation"):
-                raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话执行器不可用", status=409)
             session = self._agent_sessions.get_for_job(job_id)
             if session is None:
                 raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话记录缺失", status=409)
+            executor = self._agent_executors.get(job_id)
+            if executor is None or not hasattr(executor, "continue_conversation"):
+                metadata = job.get("metadata") or {}
+                if metadata.get("transport") == "direct":
+                    # Runtime 重启后内存执行器丢失；direct 聊天可依据持久化
+                    # 事件重建执行器与历史，使孤立会话能够继续。
+                    executor = self._rehydrate_direct_chat_executor(job, session)
+                    self._agent_executors[job_id] = executor
+                elif (
+                    metadata.get("transport") == "cli"
+                    and isinstance(metadata.get("codexThreadId"), str)
+                    and metadata["codexThreadId"]
+                ):
+                    # Codex 聊天通过持久化的 thread id 恢复：续话时以
+                    # `codex exec resume` 重建执行器继续同一会话。
+                    executor = self._rehydrate_cli_chat_executor(job, session)
+                    self._agent_executors[job_id] = executor
+                else:
+                    raise RuntimeContractError("AGENT_CONVERSATION_LOST", "聊天会话执行器不可用", status=409)
             sequence = len(self._agent_sessions.list_input(session["id"])) + 1
             self._agent_sessions.append_input(
                 id=f"{session['id']}:input:{sequence}",
@@ -1144,6 +1160,100 @@ class WorkflowRuntimeService:
 
         Thread(target=finish_turn, name=f"workflow-agent-turn-{job_id}", daemon=True).start()
         return {"turnId": turn_id, "status": "RUNNING"}
+
+    def _rehydrate_direct_chat_executor(self, job: dict, session: dict) -> DirectChatExecutor:
+        """依据持久化事件重建 direct 聊天执行器（Runtime 重启后恢复孤立会话）。"""
+        metadata = job.get("metadata") or {}
+        provider_id = metadata.get("modelProviderId")
+        config = (
+            self.get_model_provider_config_by_id(str(provider_id))
+            if provider_id
+            else self.get_model_provider_config()
+        )
+        if not config.configured:
+            raise RuntimeContractError(
+                "AGENT_DIRECT_NOT_CONFIGURED",
+                "模型直连未配置，请先在设置页填写模型厂商信息",
+                status=422,
+            )
+        job_id = job["id"]
+        existing_output = sorted(
+            self._agent_jobs.list_output(job_id), key=lambda item: item["sequence"]
+        )
+        output_sequence = max((item["sequence"] for item in existing_output), default=0)
+
+        def append_output(event: dict[str, Any]) -> None:
+            nonlocal output_sequence
+            output_sequence += 1
+            with self._lock:
+                self._agent_jobs.append_output(
+                    id=f"{job_id}:output:{output_sequence}",
+                    job_id=job_id,
+                    sequence=output_sequence,
+                    kind=event["kind"],
+                    payload=event["payload"],
+                    created_at=_now(),
+                )
+                self._db.commit()
+
+        executor = self._direct_chat_factory(config, append_output, None)
+        history: list[dict[str, Any]] = [
+            {"role": "system", "content": config.system_prompt or DEFAULT_SYSTEM_PROMPT},
+        ]
+        for item in self._agent_sessions.list_input(session["id"]):
+            if item["kind"] == "initial_prompt":
+                history.append({"role": "user", "content": str(item["content"])})
+        assistant_by_message: dict[str, dict[str, Any]] = {}
+        for event in existing_output:
+            payload = event.get("payload") or {}
+            if event["kind"] == "chat.user":
+                history.append({"role": "user", "content": str(payload.get("text") or "")})
+            elif event["kind"] == "acp.message":
+                message_id = payload.get("messageId")
+                if not isinstance(message_id, str) or not message_id:
+                    continue
+                entry = assistant_by_message.get(message_id)
+                if entry is None:
+                    entry = {"role": "assistant", "content": ""}
+                    assistant_by_message[message_id] = entry
+                    history.append(entry)
+                delta = payload.get("text")
+                if isinstance(delta, str):
+                    entry["content"] += delta
+        if hasattr(executor, "adopt_history"):
+            executor.adopt_history(job_id, history)
+        return executor
+
+    def _rehydrate_cli_chat_executor(self, job: dict, session: dict) -> CliAgentExecutor:
+        """依据持久化的 Codex thread id 重建聊天执行器（Runtime 重启后恢复）。"""
+        job_id = job["id"]
+        existing_output = sorted(
+            self._agent_jobs.list_output(job_id), key=lambda item: item["sequence"]
+        )
+        output_sequence = max((item["sequence"] for item in existing_output), default=0)
+
+        def append_output(event: dict[str, Any]) -> None:
+            nonlocal output_sequence
+            output_sequence += 1
+            with self._lock:
+                self._agent_jobs.append_output(
+                    id=f"{job_id}:output:{output_sequence}",
+                    job_id=job_id,
+                    sequence=output_sequence,
+                    kind=event["kind"],
+                    payload=event["payload"],
+                    created_at=_now(),
+                )
+                self._db.commit()
+
+        provider = self._agent_provider_factory(job["provider"])
+        executor = CliAgentExecutor(provider=provider, on_output=append_output, on_started=None)
+        executor.adopt_conversation(
+            job_id,
+            thread_id=str((job.get("metadata") or {})["codexThreadId"]),
+            cwd=Path(session["cwd"]),
+        )
+        return executor
 
     def list_scoped_agent_permissions(
         self, project_id: str, run_id: str, job_id: str, *, status: str = "PENDING"
@@ -3648,7 +3758,16 @@ class WorkflowRuntimeService:
                 )
             resolved_transport = "acp"
         if conversational and resolved_transport not in {"acp", "direct"}:
-            raise ValueError("AGENT_CONVERSATIONAL_UNSUPPORTED: conversational requires acp transport")
+            cli_chat_supported = bool(
+                resolved_transport == "cli"
+                and cli_provider is not None
+                and hasattr(cli_provider, "build_conversation_command")
+            )
+            if not cli_chat_supported:
+                raise ValueError(
+                    "AGENT_CONVERSATIONAL_UNSUPPORTED: conversational requires acp transport "
+                    "or a chat-capable CLI provider"
+                )
         # auto ?? legacy CLI???????????Phase 0 spike ??? CLI ? ACP ??????
         if resolved_transport == "direct":
             assert direct_chat_config is not None
@@ -3672,6 +3791,11 @@ class WorkflowRuntimeService:
             f"agent-session-{uuid4()}" if mode == "interactive" or conversational else None
         )
         output_sequence = 0
+        job_metadata = {
+            "transport": resolved_transport,
+            "conversational": conversational,
+            **({"modelProviderId": model_provider_id} if model_provider_id else {}),
+        }
 
         def append_output(event: dict[str, Any]) -> None:
             nonlocal output_sequence
@@ -3713,11 +3837,7 @@ class WorkflowRuntimeService:
                 mode=mode,
                 session_id=session_id,
                 parent_job_id=parent_job_id,
-                metadata={
-                    "transport": resolved_transport,
-                    "conversational": conversational,
-                    **({"modelProviderId": model_provider_id} if model_provider_id else {}),
-                },
+                metadata=job_metadata,
             )
             for artifact in context_artifacts:
                 artifact_id = artifact.get("artifactId")
@@ -3767,7 +3887,11 @@ class WorkflowRuntimeService:
                     provider=provider,
                     cwd=str(execution_cwd),
                     max_output_bytes=max_output_bytes,
-                    kind="direct-chat" if provider == "direct" else "acp-chat",
+                    kind=(
+                        "direct-chat"
+                        if provider == "direct"
+                        else "cli-chat" if resolved_transport == "cli" else "acp-chat"
+                    ),
                     created_at=now,
                 )
                 self._agent_sessions.append_input(
@@ -3941,6 +4065,16 @@ class WorkflowRuntimeService:
                 error = f"AGENT_EXECUTION_ERROR: {exception}"
                 result_status = status
             finally:
+                if result_status == "AWAITING_INPUT" and resolved_transport == "cli":
+                    thread_id = getattr(executor, "thread_id_for", lambda _job_id: None)(job_id)
+                    if thread_id and job_metadata.get("codexThreadId") != thread_id:
+                        with self._lock:
+                            self._agent_jobs.set_metadata(
+                                id=job_id,
+                                metadata={**job_metadata, "codexThreadId": thread_id},
+                                updated_at=now,
+                            )
+                            self._db.commit()
                 if result_status != "AWAITING_INPUT":
                     self._agent_executors.pop(job_id, None)
 

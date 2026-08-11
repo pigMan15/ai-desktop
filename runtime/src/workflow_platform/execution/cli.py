@@ -4,8 +4,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import subprocess
-from threading import RLock, Thread
+from threading import Event, RLock, Thread
 from typing import Any, Callable
+from uuid import uuid4
 
 from workflow_platform.execution.acp import AcpSession, acp_event_to_agent_output
 from workflow_platform.execution.providers import AcpProvider, CliProvider
@@ -48,6 +49,7 @@ class CliAgentExecutor:
         self._on_started = on_started
         self._extra_environment = extra_environment or {}
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._conversations: dict[str, dict[str, Any]] = {}
         self._cancelled: set[str] = set()
         self._lock = RLock()
 
@@ -63,7 +65,18 @@ class CliAgentExecutor:
         allowed_tools: list[str] | None = None,
         conversational: bool = False,
     ) -> CliExecutionResult:
-        del conversational
+        if conversational and hasattr(self._provider, "build_conversation_command"):
+            return self._run_chat_turn(
+                job_id=job_id,
+                prompt=prompt,
+                cwd=cwd,
+                project_root=project_root,
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+                allowed_tools=allowed_tools or [],
+                thread_id=None,
+                first_turn=True,
+            )
         resolved_cwd = _resolve_safe_cwd(cwd, project_root)
         command = self._provider.build_command(
             cwd=resolved_cwd,
@@ -177,10 +190,299 @@ class CliAgentExecutor:
         with self._lock:
             process = self._processes.get(job_id)
             self._cancelled.add(job_id)
-            if process is None:
-                return True
-        _terminate_process(process)
+        if process is not None:
+            _terminate_process(process)
+        with self._lock:
+            self._conversations.pop(job_id, None)
         return True
+
+    def _run_chat_turn(
+        self,
+        *,
+        job_id: str,
+        prompt: str,
+        cwd: Path,
+        project_root: Path,
+        timeout_seconds: float,
+        max_output_bytes: int,
+        allowed_tools: list[str],
+        thread_id: str | None,
+        first_turn: bool,
+    ) -> CliExecutionResult:
+        """Run one chat turn for a conversation-capable CLI provider (Codex).
+
+        The first turn starts a fresh `codex exec` thread; follow-up turns
+        resume the same thread via `codex exec resume <thread_id>` so history,
+        workspace cwd and sandbox are preserved. Events are mapped to the
+        conversational chat event shape (acp.message / acp.turn / acp.error /
+        tool) so the existing ChatView can render them.
+        """
+        resolved_cwd = _resolve_safe_cwd(cwd, project_root)
+        command = self._provider.build_conversation_command(
+            cwd=resolved_cwd,
+            prompt=prompt,
+            thread_id=thread_id,
+            allowed_tools=allowed_tools,
+        )
+        process = subprocess.Popen(
+            [command.executable, *command.args],
+            cwd=command.cwd,
+            stdin=subprocess.PIPE if command.stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+            env=self._allowed_environment(),
+            startupinfo=_hidden_startupinfo(),
+        )
+        if command.stdin is not None and process.stdin is not None:
+            process.stdin.write(command.stdin.encode("utf-8"))
+            process.stdin.close()
+
+        turn_id = f"codex-turn-{uuid4()}"
+        with self._lock:
+            state = self._conversations.get(job_id)
+            if state is None:
+                state = {
+                    "thread_id": None,
+                    "cwd": resolved_cwd,
+                    "events": [],
+                    "completed": Event(),
+                    "turn_id": None,
+                }
+                self._conversations[job_id] = state
+            state["thread_id"] = thread_id
+            state["turn_id"] = turn_id
+            state["events"] = []
+            state["completed"].clear()
+            self._processes[job_id] = process
+            cancelled_before_start = job_id in self._cancelled
+        if self._on_started is not None:
+            self._on_started(process.pid)
+        if cancelled_before_start:
+            _terminate_process(process)
+            self._drop_chat_state(job_id)
+            return CliExecutionResult(
+                status="CANCELLED",
+                summary=None,
+                error="AGENT_CANCELLED: CLI chat was cancelled before start",
+                exit_code=None,
+            )
+
+        events: list[dict[str, Any]] = []
+        output_bytes = 0
+        output_limit_reached = False
+        output_lock = RLock()
+
+        def read_output() -> None:
+            nonlocal output_bytes, output_limit_reached
+            if process.stdout is None:
+                return
+            for raw_line in process.stdout:
+                line = decode_cli_output(raw_line)
+                if not line:
+                    continue
+                with output_lock:
+                    output_bytes += len(raw_line)
+                    if output_bytes > max_output_bytes:
+                        output_limit_reached = True
+                        _terminate_process(process)
+                        return
+                event = self._provider.parse_line(line.strip())
+                if event["kind"] == "progress":
+                    thread_id_value = (event.get("payload") or {}).get("threadId")
+                    if isinstance(thread_id_value, str) and thread_id_value:
+                        with self._lock:
+                            state["thread_id"] = thread_id_value
+                chat_event = _to_chat_event(event)
+                if chat_event is None:
+                    continue
+                with output_lock:
+                    events.append(chat_event)
+                if self._on_output is not None:
+                    self._on_output(chat_event)
+
+        reader = Thread(target=read_output, daemon=True)
+        reader.start()
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            _terminate_process(process)
+            reader.join(timeout=2)
+            state["completed"].set()
+            with self._lock:
+                self._processes.pop(job_id, None)
+            if first_turn:
+                self._drop_chat_state(job_id)
+                return CliExecutionResult(
+                    status="FAILED",
+                    summary=None,
+                    error=f"AGENT_TIMEOUT: Codex chat turn exceeded {timeout_seconds} seconds",
+                    exit_code=process.returncode,
+                )
+            return CliExecutionResult(
+                status="AWAITING_INPUT",
+                summary=None,
+                error=None,
+                exit_code=None,
+            )
+        reader.join(timeout=2)
+
+        with self._lock:
+            self._processes.pop(job_id, None)
+        if output_limit_reached:
+            state["completed"].set()
+            if first_turn:
+                self._drop_chat_state(job_id)
+                return CliExecutionResult(
+                    status="FAILED",
+                    summary=None,
+                    error=f"AGENT_OUTPUT_LIMIT: Codex chat output exceeded {max_output_bytes} bytes",
+                    exit_code=process.returncode,
+                )
+            return CliExecutionResult(
+                status="AWAITING_INPUT",
+                summary=None,
+                error=None,
+                exit_code=None,
+            )
+        if self._is_cancelled(job_id):
+            self._drop_chat_state(job_id)
+            return CliExecutionResult(
+                status="CANCELLED",
+                summary=None,
+                error="AGENT_CANCELLED: Codex chat was cancelled",
+                exit_code=process.returncode,
+            )
+
+        state["completed"].set()
+        with self._lock:
+            current_thread_id = state["thread_id"]
+        if first_turn and not current_thread_id:
+            self._drop_chat_state(job_id)
+            return CliExecutionResult(
+                status="FAILED",
+                summary=None,
+                error="AGENT_THREAD_LOST: Codex did not report a thread id",
+                exit_code=process.returncode,
+            )
+        if process.returncode != 0:
+            error_event = next(
+                (event for event in reversed(events) if event["kind"] == "acp.error"),
+                None,
+            )
+            if first_turn:
+                self._drop_chat_state(job_id)
+            return CliExecutionResult(
+                status="FAILED",
+                summary=None,
+                error=_event_text(error_event)
+                or f"AGENT_FAILED: Codex chat exited with {process.returncode}",
+                exit_code=process.returncode,
+            )
+        last_message = next(
+            (event for event in reversed(events) if event["kind"] == "acp.message"),
+            None,
+        )
+        return CliExecutionResult(
+            status="AWAITING_INPUT",
+            summary=_event_text(last_message),
+            error=None,
+            exit_code=process.returncode,
+        )
+
+    def continue_conversation(self, job_id: str, message: str) -> str:
+        with self._lock:
+            state = self._conversations.get(job_id)
+            thread_id = state.get("thread_id") if state else None
+            cwd = state.get("cwd") if state else None
+        if (
+            state is None
+            or not isinstance(thread_id, str)
+            or not thread_id
+            or not isinstance(cwd, Path)
+        ):
+            raise ValueError("AGENT_CONVERSATION_LOST: Codex chat thread is not active")
+        if self._on_output is not None:
+            self._on_output({"kind": "chat.user", "payload": {"text": message}})
+        # 清空完成信号必须先于启动后台线程，否则 wait_turn_completed
+        # 可能立即读到上一轮的旧完成状态而误判本轮已完成。
+        state["completed"].clear()
+        state["events"] = []
+
+        def worker() -> None:
+            try:
+                self._run_chat_turn(
+                    job_id=job_id,
+                    prompt=message,
+                    cwd=cwd,
+                    project_root=cwd,
+                    timeout_seconds=300,
+                    max_output_bytes=1_000_000,
+                    allowed_tools=[],
+                    thread_id=thread_id,
+                    first_turn=False,
+                )
+            except Exception as error:
+                state["completed"].set()
+                if self._on_output is not None:
+                    self._on_output(
+                        {"kind": "acp.error", "payload": {"text": f"AGENT_CONTINUE_ERROR: {error}"}}
+                    )
+
+        Thread(target=worker, name=f"codex-chat-{job_id}", daemon=True).start()
+        return state["turn_id"] or f"codex-turn-{uuid4()}"
+
+    def wait_turn_completed(self, job_id: str, timeout: float) -> bool:
+        with self._lock:
+            state = self._conversations.get(job_id)
+        if state is None:
+            return False
+        return bool(state["completed"].wait(timeout=timeout))
+
+    def is_conversation_alive(self, job_id: str) -> bool:
+        with self._lock:
+            return job_id in self._conversations
+
+    def end_conversation(self, job_id: str) -> None:
+        with self._lock:
+            process = self._processes.get(job_id)
+            self._cancelled.discard(job_id)
+        if process is not None:
+            _terminate_process(process)
+        with self._lock:
+            self._processes.pop(job_id, None)
+            self._conversations.pop(job_id, None)
+
+    def thread_id_for(self, job_id: str) -> str | None:
+        with self._lock:
+            state = self._conversations.get(job_id)
+        if state is None:
+            return None
+        thread_id = state.get("thread_id")
+        return thread_id if isinstance(thread_id, str) and thread_id else None
+
+    def adopt_conversation(self, job_id: str, *, thread_id: str, cwd: Path) -> None:
+        """Attach a persisted Codex thread so a restarted Runtime can resume it."""
+        with self._lock:
+            state = self._conversations.get(job_id)
+            if state is None:
+                state = {
+                    "thread_id": thread_id,
+                    "cwd": cwd,
+                    "events": [],
+                    "completed": Event(),
+                    "turn_id": None,
+                }
+                self._conversations[job_id] = state
+            else:
+                state["thread_id"] = thread_id
+                state["cwd"] = cwd
+
+    def _drop_chat_state(self, job_id: str) -> None:
+        with self._lock:
+            self._conversations.pop(job_id, None)
+            self._processes.pop(job_id, None)
+            self._cancelled.discard(job_id)
 
     def _allowed_environment(self) -> dict[str, str]:
         environment = {
@@ -398,6 +700,38 @@ class AcpAgentExecutor:
         with self._lock:
             return job_id in self._cancelled
 
+
+def _to_chat_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Map a CLI provider event to the conversational chat event shape.
+
+    message/final become assistant bubbles, progress becomes a status line,
+    error becomes an error bubble, and tool events pass through unchanged so
+    the ChatView can render command/tool execution blocks.
+    """
+    kind = event["kind"]
+    payload = event.get("payload") or {}
+    if kind in {"message", "final"}:
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+        return {
+            "kind": "acp.message",
+            "payload": {"text": text, "messageId": f"codex-message-{uuid4()}"},
+        }
+    if kind == "progress":
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            return None
+        return {"kind": "acp.turn", "payload": {"text": text}}
+    if kind == "error":
+        text = payload.get("text")
+        return {
+            "kind": "acp.error",
+            "payload": {"text": text if isinstance(text, str) and text else "Codex 执行出错"},
+        }
+    if kind == "tool":
+        return {"kind": "tool", "payload": payload}
+    return None
 
 def _last_acp_message(events: list[dict[str, Any]]) -> str | None:
     for event in reversed(events):

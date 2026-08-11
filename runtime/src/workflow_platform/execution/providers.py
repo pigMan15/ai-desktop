@@ -59,6 +59,29 @@ class CodexCliProvider:
             stdin=prompt,
         )
 
+    def build_conversation_command(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        thread_id: str | None = None,
+        allowed_tools: list[str] | None = None,
+    ) -> CliCommand:
+        """Build a chat-turn command for `codex exec` (first turn) or
+        `codex exec resume <thread_id>` (follow-up turn).
+
+        Codex does not implement ACP, so multi-turn chat reuses the real
+        session machinery: the first turn creates a thread and later turns
+        resume it by id, preserving history, workspace cwd and sandbox.
+        """
+        del allowed_tools
+        executable = "codex.cmd" if self._platform == "win32" else "codex"
+        args = ["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", str(cwd)]
+        if thread_id:
+            args += ["resume", thread_id]
+        args += ["-"]
+        return CliCommand(executable=executable, args=args, cwd=cwd, stdin=prompt)
+
     def parse_line(self, line: str) -> dict[str, Any]:
         payload = _parse_json_line(line)
         if payload is None:
@@ -71,7 +94,13 @@ class CodexCliProvider:
         if event_type == "thread.started":
             thread_id = _text_from_value(payload.get("thread_id"))
             suffix = f"（{thread_id}）" if thread_id else ""
-            return {"kind": "progress", "payload": {"text": f"Codex 会话已创建{suffix}。"}}
+            result: dict[str, Any] = {
+                "kind": "progress",
+                "payload": {"text": f"Codex 会话已创建{suffix}。"},
+            }
+            if thread_id:
+                result["payload"]["threadId"] = thread_id
+            return result
         if event_type == "turn.started":
             return {"kind": "progress", "payload": {"text": "Codex 正在分析并生成结果。"}}
         if event_type == "turn.completed":
@@ -97,17 +126,19 @@ class CodexCliProvider:
                     if text is not None:
                         return {"kind": "message", "payload": {"text": text}}
                 if item_type == "command_execution":
-                    status = item.get("status")
+                    status = "failed" if item.get("status") == "failed" or item.get("error") else "completed"
                     output = _text_from_value(item.get("aggregated_output")) or ""
-                    if status == "failed" or item.get("error"):
-                        return {
-                            "kind": "error",
-                            "payload": {"text": output[:500] or "命令执行失败"},
-                        }
-                    return {
-                        "kind": "message",
-                        "payload": {"text": output[:500] if output else "命令执行完成"},
+                    item_id = _text_from_value(item.get("id"))
+                    tool_payload = {
+                        "text": output[:500] if output else ("命令执行失败" if status == "failed" else "命令执行完成"),
+                        "title": _text_from_value(item.get("command")) or "命令执行",
+                        "status": status,
                     }
+                    if item_id:
+                        tool_payload["itemId"] = item_id
+                    if item.get("exit_code") is not None:
+                        tool_payload["exitCode"] = item.get("exit_code")
+                    return {"kind": "tool", "payload": tool_payload}
                 if item_type == "mcp_tool_call":
                     tool = _text_from_value(item.get("tool")) or "MCP"
                     result = item.get("result")
@@ -116,21 +147,40 @@ class CodexCliProvider:
                         for content in result.get("content") or []:
                             if isinstance(content, dict) and content.get("type") == "text":
                                 result_text += str(content.get("text", "")) + "\n"
-                    if result_text.strip():
-                        return {
-                            "kind": "message",
-                            "payload": {"text": f"MCP 工具 {tool} 返回：{result_text.strip()[:500]}"},
-                        }
-                    return {"kind": "progress", "payload": {"text": f"MCP 工具 {tool} 已完成。"}}
+                    item_id = _text_from_value(item.get("id"))
+                    tool_payload = {
+                        "text": result_text.strip()[:500] if result_text.strip() else f"MCP 工具 {tool} 已完成。",
+                        "title": f"MCP 工具 {tool}",
+                        "status": "failed" if item.get("error") else "completed",
+                    }
+                    if item_id:
+                        tool_payload["itemId"] = item_id
+                    return {"kind": "tool", "payload": tool_payload}
         if event_type == "item.started":
             item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "command_execution":
-                command = _text_from_value(item.get("command"))
-                if command is not None:
-                    return {"kind": "progress", "payload": {"text": f"Codex 正在执行命令：{command}"}}
-            if isinstance(item, dict) and item.get("type") == "mcp_tool_call":
-                tool = _text_from_value(item.get("tool")) or "MCP"
-                return {"kind": "progress", "payload": {"text": f"Codex 正在调用 MCP 工具：{tool}"}}
+            if isinstance(item, dict):
+                item_id = _text_from_value(item.get("id"))
+                if item.get("type") == "command_execution":
+                    command = _text_from_value(item.get("command"))
+                    if command is not None:
+                        tool_payload: dict[str, Any] = {
+                            "text": f"Codex 正在执行命令：{command}",
+                            "title": command,
+                            "status": "running",
+                        }
+                        if item_id:
+                            tool_payload["itemId"] = item_id
+                        return {"kind": "tool", "payload": tool_payload}
+                if item.get("type") == "mcp_tool_call":
+                    tool = _text_from_value(item.get("tool")) or "MCP"
+                    tool_payload = {
+                        "text": f"Codex 正在调用 MCP 工具：{tool}",
+                        "title": f"MCP 工具 {tool}",
+                        "status": "running",
+                    }
+                    if item_id:
+                        tool_payload["itemId"] = item_id
+                    return {"kind": "tool", "payload": tool_payload}
 
         return _raw_event(line)
 

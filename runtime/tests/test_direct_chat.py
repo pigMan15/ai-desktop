@@ -516,6 +516,91 @@ def test_runtime_api_model_provider_test_by_id(tmp_path) -> None:
         server.shutdown()
 
 
+def test_direct_chat_rehydrates_after_runtime_restart(tmp_path) -> None:
+    """内存执行器丢失（Runtime 重启）后，AWAITING_INPUT 的 direct 会话应能继续。"""
+    seen_histories: list[list[dict]] = []
+
+    def fake_streamer(config, messages, on_delta):
+        seen_histories.append([dict(item) for item in messages])
+        reply = f"ack-{len(seen_histories)}"
+        for part in (reply[:2], reply[2:]):
+            on_delta(part)
+        return reply
+
+    service = _make_service(
+        tmp_path,
+        direct_factory=lambda config, on_output, on_started: DirectChatExecutor(
+            config=config, on_output=on_output, on_started=on_started, streamer=fake_streamer
+        ),
+    )
+    client = TestClient(create_app(service))
+    configured = client.put(
+        "/settings/model-provider",
+        json={
+            "vendor": "custom",
+            "baseUrl": "http://fake",
+            "apiKey": "sk-test",
+            "model": "fake-model",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert configured.status_code == 200
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    started = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "direct",
+            "prompt": "首轮",
+            "transport": "direct",
+            "conversational": True,
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert started.status_code == 200, started.text
+    job_id = started.json()["id"]
+    job_path = f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}"
+    detail = _wait_status(client, run, job_id, {"AWAITING_INPUT", "COMPLETED", "FAILED", "CANCELLED"})
+    assert detail["status"] == "AWAITING_INPUT", detail
+    assert len(seen_histories) == 1
+
+    # 模拟 Runtime 重启：内存执行器全部丢失，DB 中任务仍为 AWAITING_INPUT
+    service._agent_executors.clear()
+
+    continued = client.post(
+        f"{job_path}/conversation/message",
+        json={"message": "继续", "actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert continued.status_code == 200, continued.text
+    back = _wait_status(client, run, job_id, {"AWAITING_INPUT", "COMPLETED", "FAILED", "CANCELLED"})
+    assert back["status"] == "AWAITING_INPUT", back
+
+    # 重建的历史应包含：system + 首轮 user + 首轮 assistant 回复 + 续话 user
+    assert len(seen_histories) == 2
+    history = seen_histories[1]
+    assert history[0]["role"] == "system"
+    assert [item["role"] for item in history[1:]] == ["user", "assistant", "user"]
+    assert history[1]["content"] == "首轮"
+    assert history[2]["content"] == "ack-1"
+    assert history[3]["content"] == "继续"
+
+    # 续话输出应续接已有 sequence，且聊天事件完整持久化
+    output = client.get(f"{job_path}/output").json()
+    sequences = [item["sequence"] for item in output]
+    assert len(sequences) == len(set(sequences))
+    kinds = [item["kind"] for item in output]
+    assert "chat.user" in kinds
+    deltas = [
+        item["payload"]["text"]
+        for item in output
+        if item["kind"] == "acp.message" and item["payload"].get("messageId")
+    ]
+    assert "".join(deltas[:2]) == "ack-1"
+
+
 def test_runtime_api_direct_chat_with_selected_provider(tmp_path) -> None:
     service = _make_service(
         tmp_path,

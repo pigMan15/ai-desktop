@@ -188,6 +188,12 @@ class DirectChatExecutor:
             self._on_started(0)
         return self._run_first_turn(job_id, prompt, keep_alive=conversational)
 
+    def adopt_history(self, job_id: str, history: list[dict[str, Any]]) -> None:
+        """接管重建后的对话历史（用于 Runtime 重启后恢复孤立会话）。"""
+        with self._lock:
+            self._histories[job_id] = [dict(item) for item in history]
+            self._states[job_id] = _TurnState()
+
     def continue_conversation(self, job_id: str, message: str) -> str:
         with self._lock:
             state = self._states.get(job_id)
