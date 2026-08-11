@@ -163,6 +163,11 @@ function RunDetailPageContent({
   }, [selectedAgentNode?.id, selectedAgentRole?.provider]);
 
   useEffect(() => {
+    // ??????????????? Provider????????
+    if (agentTransport === "direct" && agentProvider !== "direct") {
+      setAgentProvider("direct");
+      return;
+    }
     if (agentProvider === "direct") {
       setAgentMode("automatic");
       setAgentConversational(true);
@@ -619,7 +624,11 @@ function RunDetailPageContent({
                 {agentLaunching ? <span>正在启动...</span> : null}
               </div>
               <div className="run-agent-controls">
-                <label className="run-agent-provider">Agent Provider<select value={agentProvider} onChange={(event) => setAgentProvider(event.target.value as AgentJobSummary["provider"])} disabled={agentReadOnly || agentLaunching}>{availableProviderDiagnostics.map((diagnostic) => <option key={diagnostic.id} value={diagnostic.id} disabled={!diagnostic.available}>{providerLabel(diagnostic.id)}{diagnostic.available ? "" : "（不可用）"}</option>)}</select></label>
+                <label className="run-agent-provider">Agent Provider<select value={agentProvider} onChange={(event) => {
+                  const value = event.target.value as AgentJobSummary["provider"];
+                  setAgentProvider(value);
+                  if (value !== "direct" && agentTransport === "direct") setAgentTransport("auto");
+                }} disabled={agentReadOnly || agentLaunching}>{availableProviderDiagnostics.map((diagnostic) => <option key={diagnostic.id} value={diagnostic.id} disabled={!diagnostic.available}>{providerLabel(diagnostic.id)}{diagnostic.available ? "" : "（不可用）"}</option>)}</select></label>
                 <fieldset className="run-agent-mode" role="radiogroup">
                   <legend>Agent 模式</legend>
                   <div>
@@ -628,7 +637,7 @@ function RunDetailPageContent({
                   </div>
                 </fieldset>
                 <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>
-                <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport("acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic" || agentProvider === "direct"} /><span>聊天模式（多轮，需 ACP）</span></label>
+                <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport("acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic" || agentProvider === "direct"} /><span>{agentProvider === "direct" ? "聊天模式（模型直连自动开启）" : "聊天模式（多轮，需 ACP）"}</span></label>
 
                 {agentProvider === "direct" ? (
                   <label className="run-agent-model-service">模型服务<select value={agentModelProviderId ?? ""} onChange={(event) => setAgentModelProviderId(event.target.value || null)} disabled={agentReadOnly || agentLaunching || !modelProviders?.length}><option value="">默认服务</option>{modelProviders?.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}{provider.isDefault ? "（默认）" : ""}</option>)}</select></label>

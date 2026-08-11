@@ -105,7 +105,10 @@ describe("RunDetailPage", () => {
     });
 
     expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
-    const agentRegion = screen.getByRole("region", { name: "Agent 执行" });
+  expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+      const debugRegions = screen.getAllByRole("region").map((region) => region.getAttribute("aria-label"));
+  console.log("DEBUG_REGIONS", JSON.stringify(debugRegions));
+const agentRegion = await screen.findByRole("region", { name: "Agent 执行" });
     const mode = within(agentRegion).getByRole("radiogroup", { name: "Agent 模式" });
     expect(within(mode).getByRole("radio", { name: "交互式终端" })).toBeChecked();
     expect(within(mode).getByRole("radio", { name: "自动执行" })).not.toBeChecked();
@@ -726,6 +729,8 @@ function page(options: Partial<React.ComponentProps<typeof RunDetailPage>> & { o
       agentLiveOutput={options.agentLiveOutput ?? {}}
       agentSessionState={options.agentSessionState ?? {}}
       providerDiagnostics={options.providerDiagnostics}
+      modelProviders={options.modelProviders}
+      activeModelProviderId={options.activeModelProviderId}
       onStartAgent={options.onStartAgent}
       onStartDeployment={options.onStartDeployment}
       onAgentInput={options.onAgentInput ?? vi.fn()}
@@ -874,3 +879,67 @@ function secondaryLabel(route: string): string {
     recovery: "恢复",
   }[route] ?? route;
 }
+it("selecting direct transport switches provider and enables chat mode", async () => {
+  const startedJob = agentJob("job-new", "RUNNING");
+  const onStartAgent = vi.fn().mockResolvedValue(startedJob);
+  const agentWorkflow = workflowDefinition();
+  agentWorkflow.roles = [{ id: "developer", name: "Developer", provider: "codex", allowedTools: [] }];
+  window.location.hash = "#/runs/run%2Fone";
+  renderPage({
+    overview: overview({ workflow: agentWorkflow }),
+    agentJobs: [],
+    onStartAgent,
+    providerDiagnostics: [
+      { id: "codex", executable: "codex", available: true, path: null, version: null, message: "ok" },
+      { id: "direct", executable: "direct", available: true, path: null, version: null, message: "已配置" },
+    ],
+    modelProviders: [{
+      id: "mp-1",
+      name: "DeepSeek",
+      vendor: "deepseek",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "********",
+      hasApiKey: true,
+      model: "deepseek-chat",
+      temperature: 0.7,
+      maxTokens: null,
+      topP: null,
+      systemPrompt: "",
+      isDefault: true,
+      available: true,
+      message: "配置完整",
+      createdAt: "2026-08-11T00:00:00Z",
+      updatedAt: "2026-08-11T00:00:00Z",
+    }],
+    activeModelProviderId: "mp-1",
+  });
+
+  expect(await screen.findByRole("heading", { name: "Release candidate" })).toBeInTheDocument();
+  const agentRegion = await screen.findByRole("region", { name: "Agent 执行" });
+  fireEvent.change(within(agentRegion).getByLabelText("Agent 传输"), {
+    target: { value: "direct" },
+  });
+  await waitFor(() =>
+    expect(within(agentRegion).getByLabelText("Agent Provider")).toHaveValue("direct"),
+  );
+  await waitFor(() =>
+    expect(within(agentRegion).getByLabelText(/聊天模式/)).toBeChecked(),
+  );
+  await waitFor(() =>
+    expect(within(agentRegion).getByLabelText("模型服务")).toHaveValue("mp-1"),
+  );
+
+  fireEvent.change(screen.getByLabelText("Agent 提示词"), { target: { value: "你好" } });
+  fireEvent.click(screen.getByRole("button", { name: "启动 Agent" }));
+  await waitFor(() =>
+    expect(onStartAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "direct",
+        transport: "direct",
+        conversational: true,
+        modelProviderId: "mp-1",
+      }),
+    ),
+  );
+});
+
