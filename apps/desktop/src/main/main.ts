@@ -456,8 +456,14 @@ function parseRuntimeRequestOptions(value: unknown): RuntimeRequestOptions {
   }
   const options = value as Record<string, unknown>;
   const method = options.method;
-  if (method !== undefined && method !== "GET" && method !== "POST") {
-    throw new Error("Runtime request method must be GET or POST");
+  if (
+    method !== undefined
+    && method !== "GET"
+    && method !== "POST"
+    && method !== "PUT"
+    && method !== "DELETE"
+  ) {
+    throw new Error("Runtime request method must be GET, POST, PUT or DELETE");
   }
   const headers = parseRuntimeRequestHeaders(options.headers);
   return {

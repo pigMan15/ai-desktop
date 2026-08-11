@@ -60,8 +60,8 @@ import {
   type AgentJobSummary,
   type AgentOutputSummary,
   type AgentProviderDiagnostic,
-  type ModelProviderSettings,
-  type ModelProviderSettingsInput,
+  type ModelProviderInput,
+  type ModelProviderRecord,
   type ArtifactPreview,
   type AuditRecord,
   type CompiledWorkflowSummary,
@@ -136,8 +136,10 @@ export function App() {
   const [providerDiagnostics, setProviderDiagnostics] = useState<AgentProviderDiagnostic[] | undefined>(
     undefined,
   );
-  const [modelProvider, setModelProvider] = useState<ModelProviderSettings | null>(null);
+  const [modelProviders, setModelProviders] = useState<ModelProviderRecord[] | null>(null);
+  const [activeModelProviderId, setActiveModelProviderId] = useState<string | null>(null);
   const [savingModelProvider, setSavingModelProvider] = useState(false);
+  const [testingModelProvider, setTestingModelProvider] = useState(false);
   const [knowledgeCandidates, setKnowledgeCandidates] = useState<KnowledgeCandidate[]>([]);
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
   const [knowledgeSyntheses, setKnowledgeSyntheses] = useState<KnowledgeSynthesis[]>([]);
@@ -307,12 +309,18 @@ export function App() {
         }
       });
     runtimeClient
-      .getModelProviderSettings()
-      .then((settings) => {
-        if (isMounted) setModelProvider(settings);
+      .listModelProviders()
+      .then((result) => {
+        if (isMounted) {
+          setModelProviders(result.providers);
+          setActiveModelProviderId(result.activeProviderId);
+        }
       })
       .catch(() => {
-        if (isMounted) setModelProvider(null);
+        if (isMounted) {
+          setModelProviders([]);
+          setActiveModelProviderId(null);
+        }
       });
     return () => {
       isMounted = false;
@@ -1369,6 +1377,17 @@ export function App() {
     }
   }
 
+  async function refreshModelProviders() {
+    try {
+      const result = await createRuntimeClient(apiBaseUrl).listModelProviders();
+      setModelProviders(result.providers);
+      setActiveModelProviderId(result.activeProviderId);
+    } catch {
+      setModelProviders([]);
+      setActiveModelProviderId(null);
+    }
+  }
+
   async function refreshProviderDiagnostics() {
     if (state?.connection !== "connected") {
       setProviderDiagnostics(undefined);
@@ -1510,7 +1529,7 @@ export function App() {
 
   async function handleStartScopedAgent(
     runId: string,
-    { nodeId, provider, prompt, mode, allowedTools, cwd, transport, conversational }: RunAgentStartRequest,
+    { nodeId, provider, prompt, mode, allowedTools, cwd, transport, conversational, modelProviderId }: RunAgentStartRequest,
   ): Promise<AgentJobSummary> {
     try {
       const terminalBridge = getDesktopTerminalBridge();
@@ -1530,7 +1549,11 @@ export function App() {
         allowedTools,
         executionCwd,
         undefined,
-        { transport: transport ?? "auto", conversational: conversational === true },
+        {
+          transport: transport ?? "auto",
+          conversational: conversational === true,
+          modelProviderId: modelProviderId ?? null,
+        },
       );
       if (canUseInteractiveTerminal) {
         let terminalSession: Awaited<ReturnType<DesktopTerminalBridge["create"]>> | null = null;
@@ -2402,6 +2425,8 @@ export function App() {
                 ]),
               )}
               providerDiagnostics={providerDiagnostics}
+              modelProviders={modelProviders}
+              activeModelProviderId={activeModelProviderId}
               onStartAgent={(request) => handleStartScopedAgent(runRoute.runId, request)}
               onStartDeployment={async (nodeId, expectedRevision) => {
                 const deployment = await client.startDeployment(
@@ -2677,22 +2702,47 @@ export function App() {
                 setProjectConcurrency(saved);
                 setOperationMessage("项目并发限制已保存");
               }}
-              modelProvider={modelProvider}
+              modelProviders={modelProviders}
+              activeModelProviderId={activeModelProviderId}
               savingModelProvider={savingModelProvider}
-              onSaveModelProvider={async (settings) => {
+              testingModelProvider={testingModelProvider}
+              onSaveModelProvider={async (providerId, input) => {
                 setSavingModelProvider(true);
                 try {
-                  const saved = await client.saveModelProviderSettings(settings, now());
-                  setModelProvider(saved);
+                  if (providerId) {
+                    await client.updateModelProvider(providerId, input, now());
+                  } else {
+                    await client.createModelProvider(input, now());
+                  }
                   setOperationMessage("模型直连配置已保存");
+                  await refreshModelProviders();
                 } finally {
                   setSavingModelProvider(false);
                 }
               }}
-              onTestModelProvider={async (settings) => {
-                const result = await client.testModelProviderConnection(settings, now());
-                setOperationMessage(result.ok ? "模型直连连接测试通过" : "模型直连连接测试失败");
-                return result;
+              onDeleteModelProvider={async (providerId) => {
+                await client.deleteModelProvider(providerId, now());
+                setOperationMessage("模型服务已删除");
+                await refreshModelProviders();
+              }}
+              onSetDefaultModelProvider={async (providerId) => {
+                await client.setDefaultModelProvider(providerId, now());
+                setOperationMessage("默认模型服务已更新");
+                await refreshModelProviders();
+              }}
+              onTestModelProvider={async (providerId, input) => {
+                setTestingModelProvider(true);
+                try {
+                  const result = input
+                    ? await client.testModelProviderConnection(input, now())
+                    : providerId
+                      ? await client.testModelProviderById(providerId, now())
+                      : null;
+                  setOperationMessage(result?.ok ? "模型直连连接测试通过" : "模型直连连接测试失败");
+                  return result;
+                } finally {
+                  setTestingModelProvider(false);
+                }
               }}
             />
           ) : null}

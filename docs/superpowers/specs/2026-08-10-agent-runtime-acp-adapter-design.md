@@ -465,6 +465,16 @@ Fake Provider 必须继续通过 `CliProvider` legacy 路径运行（不引入 A
 - API Key 仅存本地 SQLite；返回给前端时始终掩码；
 - 对话历史仅在内存，重启 Runtime 后需新建聊天；当前不提供工具调用/权限审批。
 
+### 9.5.6 多模型服务管理（v3，2026-08-11 落地）
+
+模型直连升级为多模型服务管理，借鉴 Cherry Studio / Chatbox 等开源客户端的配置体验：
+- 存储：`runtime_settings.model_providers`（服务列表），老单一 `model_provider` 自动迁移为默认服务；
+- 每个服务：名称 / 厂商预设 / Base URL / API Key（掩码） / 模型 / 温度 / 最大 Tokens / Top P / 系统提示词 / 是否默认；
+- API：`GET/POST /settings/model-providers`、`PUT/DELETE /settings/model-providers/{id}`、`POST .../{id}/test`、`POST .../{id}/default`；原单一接口保留兼容；
+- 平台：桌面 IPC 桥允许 PUT/DELETE（修复之前保存报错）；
+- 启动面板：`provider=direct` 时可选择具体模型服务（默认服务），通过 `modelProviderId` 传递并写入 job metadata；
+- 设置页：服务列表卡片（默认标记 / 编辑 / 删除 / 设为默认）+ 编辑表单（API Key 显隐切换、高级参数折叠）+测试连接。
+
 ## 10. 分阶段执行与提交顺序
 
 ```

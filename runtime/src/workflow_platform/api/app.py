@@ -218,6 +218,7 @@ class StartAgentJobRequest(BaseModel):
     mode: str = "automatic"
     transport: str = "auto"
     conversational: bool = False
+    modelProviderId: str | None = None
     allowedTools: list[str] = Field(default_factory=list)
     timeoutSeconds: float = 300
     maxOutputBytes: int = 1_000_000
@@ -285,6 +286,22 @@ class TestModelProviderConnectionRequest(BaseModel):
     apiKey: str | None = None
     model: str | None = None
     temperature: float | None = None
+    maxTokens: int | None = None
+    topP: float | None = None
+    systemPrompt: str | None = None
+    actor: dict[str, Any]
+    now: str
+
+
+class ModelProviderMutationRequest(BaseModel):
+    name: str | None = None
+    vendor: str | None = None
+    baseUrl: str | None = None
+    apiKey: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    maxTokens: int | None = None
+    topP: float | None = None
     systemPrompt: str | None = None
     actor: dict[str, Any]
     now: str
@@ -357,6 +374,20 @@ class RecordKnowledgeGitPublicationRequest(BaseModel):
     commitHash: str
     actor: dict[str, Any]
     now: str
+
+
+def _mutation_fields(request: ModelProviderMutationRequest) -> dict:
+    return {
+        "name": request.name,
+        "vendor": request.vendor,
+        "baseUrl": request.baseUrl,
+        "apiKey": request.apiKey,
+        "model": request.model,
+        "temperature": request.temperature,
+        "maxTokens": request.maxTokens,
+        "topP": request.topP,
+        "systemPrompt": request.systemPrompt,
+    }
 
 
 def _model_provider_response(config: Any) -> dict[str, Any]:
@@ -557,7 +588,58 @@ def create_app(
             api_key=request.apiKey,
             model=request.model,
             temperature=request.temperature,
+            max_tokens=request.maxTokens,
+            top_p=request.topP,
             system_prompt=request.systemPrompt,
+            actor=request.actor,
+            now=request.now,
+        )
+
+    @application.get("/settings/model-providers")
+    def list_model_providers() -> dict[str, Any]:
+        return _require_service(runtime_service).list_model_providers()
+
+    @application.post("/settings/model-providers")
+    def create_model_provider(request: ModelProviderMutationRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        return service.create_model_provider(
+            fields=_mutation_fields(request),
+            actor=request.actor,
+            now=request.now,
+        )
+
+    @application.put("/settings/model-providers/{provider_id}")
+    def update_model_provider(
+        provider_id: str, request: ModelProviderMutationRequest
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        return service.update_model_provider(
+            provider_id,
+            fields=_mutation_fields(request),
+            actor=request.actor,
+            now=request.now,
+        )
+
+    @application.delete("/settings/model-providers/{provider_id}")
+    def delete_model_provider(provider_id: str, request: ModelProviderMutationRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).delete_model_provider(
+            provider_id,
+            actor=request.actor,
+            now=request.now,
+        )
+
+    @application.post("/settings/model-providers/{provider_id}/test")
+    def test_model_provider_by_id(provider_id: str, request: ModelProviderMutationRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).test_model_provider_connection_by_id(
+            provider_id,
+            actor=request.actor,
+            now=request.now,
+        )
+
+    @application.post("/settings/model-providers/{provider_id}/default")
+    def set_default_model_provider(provider_id: str, request: ModelProviderMutationRequest) -> dict[str, Any]:
+        return _require_service(runtime_service).set_default_model_provider(
+            provider_id,
             actor=request.actor,
             now=request.now,
         )
@@ -1192,6 +1274,7 @@ def create_app(
             mode=request.mode,
             transport=request.transport,
             conversational=request.conversational,
+            model_provider_id=request.modelProviderId,
             now=request.now,
         )
 

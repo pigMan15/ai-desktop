@@ -53,7 +53,7 @@ type ManagedRuntimeOptions = {
 
 export type RuntimeRequestOptions = {
   path: string;
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
   headers?: Record<string, string>;
 };

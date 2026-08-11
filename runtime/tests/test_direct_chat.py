@@ -394,3 +394,182 @@ def test_runtime_api_direct_requires_config_and_conversational(tmp_path) -> None
     )
     assert non_conversational.status_code == 422
     assert non_conversational.json()["code"] == "AGENT_DIRECT_REQUIRES_CONVERSATIONAL"
+def test_runtime_api_model_providers_crud(tmp_path) -> None:
+    service = _make_service(tmp_path)
+    client = TestClient(create_app(service))
+
+    empty = client.get("/settings/model-providers").json()
+    assert empty["providers"] == []
+    assert empty["activeProviderId"] is None
+
+    created = client.post(
+        "/settings/model-providers",
+        json={
+            "name": "DeepSeek",
+            "vendor": "deepseek",
+            "baseUrl": "https://api.deepseek.com/v1",
+            "apiKey": "sk-1",
+            "model": "deepseek-chat",
+            "temperature": 0.3,
+            "maxTokens": 4096,
+            "topP": 0.9,
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert created.status_code == 200, created.text
+    first = created.json()
+    assert first["isDefault"] is True
+    assert first["hasApiKey"] is True
+    assert first["apiKey"] == "********"
+    assert first["maxTokens"] == 4096
+    assert first["topP"] == 0.9
+
+    second = client.post(
+        "/settings/model-providers",
+        json={
+            "name": "OpenAI",
+            "vendor": "openai",
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "sk-2",
+            "model": "gpt-4o-mini",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    ).json()
+    assert second["isDefault"] is False
+
+    listing = client.get("/settings/model-providers").json()
+    assert len(listing["providers"]) == 2
+    assert listing["activeProviderId"] == first["id"]
+
+    updated = client.put(
+        f"/settings/model-providers/{second['id']}",
+        json={
+            "name": "OpenAI Main",
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "",
+            "model": "gpt-4o",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["name"] == "OpenAI Main"
+    assert updated.json()["model"] == "gpt-4o"
+    assert updated.json()["hasApiKey"] is True  # blank key keeps existing
+
+    defaulted = client.post(
+        f"/settings/model-providers/{second['id']}/default",
+        json={"actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert defaulted.status_code == 200
+    listing2 = client.get("/settings/model-providers").json()
+    assert listing2["activeProviderId"] == second["id"]
+
+    deleted = client.request(
+        "DELETE",
+        f"/settings/model-providers/{second['id']}",
+        json={"actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert deleted.status_code == 200, deleted.text
+    listing3 = client.get("/settings/model-providers").json()
+    assert [p["id"] for p in listing3["providers"]] == [first["id"]]
+    assert listing3["activeProviderId"] == first["id"]  # promoted after default deleted
+
+    missing = client.put(
+        "/settings/model-providers/does-not-exist",
+        json={"model": "x", "actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "MODEL_PROVIDER_NOT_FOUND"
+
+
+def test_runtime_api_model_provider_test_by_id(tmp_path) -> None:
+    server, thread = _serve_sse()
+    try:
+        service = _make_service(tmp_path)
+        client = TestClient(create_app(service))
+        port = server.server_address[1]
+        provider = client.post(
+            "/settings/model-providers",
+            json={
+                "name": "Local",
+                "vendor": "custom",
+                "baseUrl": f"http://127.0.0.1:{port}/v1",
+                "apiKey": "k",
+                "model": "m",
+                "actor": HUMAN_ACTOR,
+                "now": NOW,
+            },
+        ).json()
+        result = client.post(
+            f"/settings/model-providers/{provider['id']}/test",
+            json={"actor": HUMAN_ACTOR, "now": NOW},
+        )
+        assert result.status_code == 200
+        assert result.json()["ok"] is True
+    finally:
+        server.shutdown()
+
+
+def test_runtime_api_direct_chat_with_selected_provider(tmp_path) -> None:
+    service = _make_service(
+        tmp_path,
+        direct_factory=lambda config, on_output, on_started: FakeDirectExecutor(config, on_output, on_started),
+    )
+    client = TestClient(create_app(service))
+    provider = client.post(
+        "/settings/model-providers",
+        json={
+            "name": "OpenAI",
+            "vendor": "openai",
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKey": "sk-test",
+            "model": "gpt-test",
+            "actor": HUMAN_ACTOR,
+            "now": NOW,
+        },
+    ).json()
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+
+    started = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "direct",
+            "prompt": "??",
+            "transport": "direct",
+            "conversational": True,
+            "modelProviderId": provider["id"],
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["metadata"]["modelProviderId"] == provider["id"]
+    job_id = started.json()["id"]
+    detail = _wait_status(
+        client,
+        run,
+        job_id,
+        {"AWAITING_INPUT", "COMPLETED", "FAILED", "CANCELLED"},
+    )
+    assert detail["status"] == "AWAITING_INPUT", detail
+
+    # unknown provider id -> 404
+    bad = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "direct",
+            "prompt": "x",
+            "transport": "direct",
+            "conversational": True,
+            "modelProviderId": "does-not-exist",
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert bad.status_code == 404
+    assert bad.json()["code"] == "MODEL_PROVIDER_NOT_FOUND"

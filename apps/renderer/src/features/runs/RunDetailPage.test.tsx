@@ -128,6 +128,7 @@ describe("RunDetailPage", () => {
       cwd: "G:\\project\\release",
       transport: "auto",
       conversational: false,
+      modelProviderId: null,
     }));
     expect(window.location.hash).toBe("#/runs/run%2Fone");
     view.rerender(page({

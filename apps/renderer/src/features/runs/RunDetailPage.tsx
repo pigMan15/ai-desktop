@@ -13,6 +13,7 @@ import {
   type AgentJobSummary,
   type AgentOutputSummary,
   type AgentProviderDiagnostic,
+  type ModelProviderRecord,
   type NodeArtifactScan,
 } from "../../app/runtimeClient";
 import { buildRunModuleHash } from "../../app/routes";
@@ -58,6 +59,8 @@ export type RunDetailPageProps = {
   agentLiveOutput: Record<string, TerminalViewportOutput[]>;
   agentSessionState: Record<string, RunAgentSessionState>;
   providerDiagnostics?: AgentProviderDiagnostic[];
+  modelProviders?: ModelProviderRecord[] | null;
+  activeModelProviderId?: string | null;
   onStartAgent?(request: RunAgentStartRequest): Promise<AgentJobSummary>;
   onStartDeployment?(nodeId: string, expectedRevision: string): Promise<void>;
   onAgentInput(jobId: string, data: string): Promise<void> | void;
@@ -84,6 +87,7 @@ export type RunAgentStartRequest = {
   cwd: string;
   transport?: "auto" | "cli" | "acp" | "direct";
   conversational?: boolean;
+  modelProviderId?: string | null;
 };
 
 export function RunDetailPage(props: RunDetailPageProps) {
@@ -102,6 +106,8 @@ function RunDetailPageContent({
   agentLiveOutput,
   agentSessionState,
   providerDiagnostics,
+  modelProviders,
+  activeModelProviderId,
   onStartAgent,
   onStartDeployment,
   onAgentInput,
@@ -129,6 +135,7 @@ function RunDetailPageContent({
   const [agentPrompt, setAgentPrompt] = useState("");
   const [agentTransport, setAgentTransport] = useState<"auto" | "cli" | "acp" | "direct">("auto");
   const [agentConversational, setAgentConversational] = useState(false);
+  const [agentModelProviderId, setAgentModelProviderId] = useState<string | null>(null);
   const [agentLaunchError, setAgentLaunchError] = useState<string | null>(null);
   const [agentLaunching, setAgentLaunching] = useState(false);
   const [deploymentStarting, setDeploymentStarting] = useState(false);
@@ -160,12 +167,18 @@ function RunDetailPageContent({
       setAgentMode("automatic");
       setAgentConversational(true);
       setAgentTransport("direct");
+      const available = modelProviders ?? [];
+      const active = activeModelProviderId && available.some((candidate) => candidate.id === activeModelProviderId)
+        ? activeModelProviderId
+        : available[0]?.id ?? null;
+      setAgentModelProviderId((current) => current ?? active);
       return;
     }
+    setAgentModelProviderId(null);
     if (agentTransport === "direct") {
       setAgentTransport("auto");
     }
-  }, [agentProvider, agentTransport]);
+  }, [agentProvider, agentTransport, modelProviders, activeModelProviderId]);
 
   const startAgent = useCallback(async () => {
     if (!state.overview || !selectedAgentNode || !onStartAgent || !agentPrompt.trim()) return;
@@ -181,6 +194,7 @@ function RunDetailPageContent({
         cwd: state.overview.workspace?.workspacePath ?? state.overview.run.executionWorkspace,
         transport: agentTransport,
         conversational: agentConversational,
+        modelProviderId: agentProvider === "direct" ? agentModelProviderId : null,
       });
       if (mountedRef.current) setSelectedAgentJobId(job.id);
     } catch (error) {
@@ -615,6 +629,10 @@ function RunDetailPageContent({
                 </fieldset>
                 <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>
                 <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport("acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic" || agentProvider === "direct"} /><span>聊天模式（多轮，需 ACP）</span></label>
+
+                {agentProvider === "direct" ? (
+                  <label className="run-agent-model-service">模型服务<select value={agentModelProviderId ?? ""} onChange={(event) => setAgentModelProviderId(event.target.value || null)} disabled={agentReadOnly || agentLaunching || !modelProviders?.length}><option value="">默认服务</option>{modelProviders?.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}{provider.isDefault ? "（默认）" : ""}</option>)}</select></label>
+                ) : null}
                 <label className="run-agent-prompt">Agent 提示词<textarea value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} disabled={agentReadOnly || agentLaunching} /></label>
                 <button type="button" className="run-agent-start" disabled={agentReadOnly || agentLaunching || !onStartAgent || !agentPrompt.trim() || !providerAvailable} onClick={() => void startAgent()}>
                   <Play size={15} aria-hidden="true" />

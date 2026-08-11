@@ -32,6 +32,8 @@ class DirectChatConfig:
     api_key: str = ""
     model: str = DEFAULT_MODEL
     temperature: float = DEFAULT_TEMPERATURE
+    max_tokens: int | None = None
+    top_p: float | None = None
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
     @property
@@ -62,12 +64,16 @@ def stream_chat_completion(
             "AGENT_DIRECT_NOT_CONFIGURED: ??????????????????????"
         )
     endpoint = _chat_completions_url(config.base_url)
-    payload = {
+    payload: dict[str, Any] = {
         "model": config.model,
         "messages": messages,
         "stream": True,
         "temperature": config.temperature,
     }
+    if config.max_tokens is not None:
+        payload["max_tokens"] = config.max_tokens
+    if config.top_p is not None:
+        payload["top_p"] = config.top_p
     request = Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),

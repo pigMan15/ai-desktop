@@ -85,6 +85,123 @@ from workflow_platform.workspaces import normalize_workspace_path
 AGENT_PERMISSION_PENDING_LIMIT = 50
 
 
+def _coerce_max_tokens(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
+def _coerce_top_p(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if 0.0 <= parsed <= 1.0 else None
+
+
+def _normalize_model_provider_fields(fields: dict, base: dict | None) -> dict:
+    """Validate and normalize model-provider fields; blank/masked API key keeps existing."""
+    base = base or {}
+    vendor = str(fields.get("vendor") or base.get("vendor") or "openai").strip() or "openai"
+    name = str(fields.get("name") or base.get("name") or "").strip()
+    if not name:
+        name = _vendor_display_name(vendor)
+    base_url = str(fields.get("baseUrl") or base.get("baseUrl") or DEFAULT_BASE_URL).strip()
+    if not base_url.startswith(("http://", "https://")):
+        raise RuntimeContractError(
+            "AGENT_DIRECT_BASE_URL_INVALID",
+            "????????? http:// ? https:// ??",
+            status=422,
+        )
+    resolved_key = str(fields.get("apiKey") or "").strip()
+    if not resolved_key or resolved_key == MASKED_API_KEY:
+        resolved_key = str(base.get("apiKey") or "")
+    model = str(fields.get("model") or base.get("model") or "").strip()
+    if not model:
+        raise RuntimeContractError(
+            "AGENT_DIRECT_MODEL_INVALID",
+            "????????",
+            status=422,
+        )
+    temperature = _coerce_temperature(
+        fields.get("temperature")
+        if fields.get("temperature") is not None
+        else base.get("temperature")
+    )
+    if not 0.0 <= temperature <= 2.0:
+        raise RuntimeContractError(
+            "AGENT_DIRECT_TEMPERATURE_INVALID",
+            "??????? 0 ? 2 ??",
+            status=422,
+        )
+    max_tokens = _coerce_max_tokens(
+        fields.get("maxTokens")
+        if fields.get("maxTokens") is not None
+        else base.get("maxTokens")
+    )
+    top_p = _coerce_top_p(
+        fields.get("topP")
+        if fields.get("topP") is not None
+        else base.get("topP")
+    )
+    system_prompt = str(
+        fields.get("systemPrompt")
+        if fields.get("systemPrompt") is not None
+        else base.get("systemPrompt")
+        or DEFAULT_SYSTEM_PROMPT
+    ).strip() or DEFAULT_SYSTEM_PROMPT
+    return {
+        "name": name,
+        "vendor": vendor,
+        "baseUrl": base_url,
+        "apiKey": resolved_key,
+        "model": model,
+        "temperature": temperature,
+        "maxTokens": max_tokens,
+        "topP": top_p,
+        "systemPrompt": system_prompt,
+    }
+
+
+def _vendor_display_name(vendor: str) -> str:
+    return {
+        "openai": "OpenAI",
+        "deepseek": "DeepSeek",
+        "qwen": "????",
+        "moonshot": "Moonshot Kimi",
+        "openrouter": "OpenRouter",
+    }.get(vendor, "???????")
+
+
+def _provider_record(provider: dict) -> dict:
+    api_key = str(provider.get("apiKey") or "")
+    configured = bool(api_key and provider.get("baseUrl") and provider.get("model"))
+    return {
+        "id": provider.get("id"),
+        "name": provider.get("name") or _vendor_display_name(str(provider.get("vendor") or "custom")),
+        "vendor": provider.get("vendor") or "custom",
+        "baseUrl": provider.get("baseUrl") or DEFAULT_BASE_URL,
+        "apiKey": MASKED_API_KEY if api_key else "",
+        "hasApiKey": bool(api_key),
+        "model": provider.get("model") or "",
+        "temperature": _coerce_temperature(provider.get("temperature")),
+        "maxTokens": _coerce_max_tokens(provider.get("maxTokens")),
+        "topP": _coerce_top_p(provider.get("topP")),
+        "systemPrompt": provider.get("systemPrompt") or "",
+        "isDefault": bool(provider.get("isDefault")),
+        "available": configured,
+        "message": "????" if configured else "?? API Key / ?? / ??",
+        "createdAt": provider.get("createdAt") or "",
+        "updatedAt": provider.get("updatedAt") or "",
+    }
+
+
 def _coerce_temperature(value: object) -> float:
     try:
         return float(value if value is not None else DEFAULT_TEMPERATURE)
@@ -179,18 +296,217 @@ class WorkflowRuntimeService:
         self._recover_knowledge_jobs_on_startup()
 
     MODEL_PROVIDER_SETTINGS_KEY = "model_provider"
+    MODEL_PROVIDERS_SETTINGS_KEY = "model_providers"
+
+    # ---- model provider storage ------------------------------------------
+
+    def _load_model_providers(self) -> list[dict]:
+        stored = self._settings.get(self.MODEL_PROVIDERS_SETTINGS_KEY) or {}
+        providers = stored.get("providers") if isinstance(stored, dict) else None
+        if isinstance(providers, list) and providers:
+            return providers
+        legacy = self._settings.get(self.MODEL_PROVIDER_SETTINGS_KEY)
+        if isinstance(legacy, dict):
+            return [
+                {
+                    "id": "model-provider-default",
+                    "name": "默认模型服务",
+                    "vendor": str(legacy.get("vendor") or "openai"),
+                    "baseUrl": str(legacy.get("baseUrl") or DEFAULT_BASE_URL),
+                    "apiKey": str(legacy.get("apiKey") or ""),
+                    "model": str(legacy.get("model") or DEFAULT_MODEL),
+                    "temperature": _coerce_temperature(legacy.get("temperature")),
+                    "maxTokens": None,
+                    "topP": None,
+                    "systemPrompt": str(legacy.get("systemPrompt") or DEFAULT_SYSTEM_PROMPT),
+                    "isDefault": True,
+                    "createdAt": str(legacy.get("updatedAt") or _now()),
+                    "updatedAt": str(legacy.get("updatedAt") or _now()),
+                }
+            ]
+        return []
+
+    def _save_model_providers(self, providers: list[dict], *, now: str) -> None:
+        self._settings.set(
+            self.MODEL_PROVIDERS_SETTINGS_KEY,
+            {"providers": providers},
+            updated_at=now,
+        )
+
+    def _active_model_provider(self) -> dict | None:
+        providers = self._load_model_providers()
+        if not providers:
+            return None
+        return next((p for p in providers if p.get("isDefault")), None) or providers[0]
+
+    def _model_provider_config(self, provider: dict | None) -> DirectChatConfig:
+        if provider is None:
+            return DirectChatConfig()
+        return DirectChatConfig(
+            vendor=str(provider.get("vendor") or "openai"),
+            base_url=str(provider.get("baseUrl") or DEFAULT_BASE_URL),
+            api_key=str(provider.get("apiKey") or ""),
+            model=str(provider.get("model") or DEFAULT_MODEL),
+            temperature=_coerce_temperature(provider.get("temperature")),
+            max_tokens=_coerce_max_tokens(provider.get("maxTokens")),
+            top_p=_coerce_top_p(provider.get("topP")),
+            system_prompt=str(provider.get("systemPrompt") or DEFAULT_SYSTEM_PROMPT),
+        )
 
     def get_model_provider_config(self) -> DirectChatConfig:
-        """Read the persisted model-direct config (never throws)."""
-        stored = self._settings.get(self.MODEL_PROVIDER_SETTINGS_KEY) or {}
-        return DirectChatConfig(
-            vendor=str(stored.get("vendor") or "openai"),
-            base_url=str(stored.get("baseUrl") or DEFAULT_BASE_URL),
-            api_key=str(stored.get("apiKey") or ""),
-            model=str(stored.get("model") or DEFAULT_MODEL),
-            temperature=_coerce_temperature(stored.get("temperature")),
-            system_prompt=str(stored.get("systemPrompt") or DEFAULT_SYSTEM_PROMPT),
-        )
+        return self._model_provider_config(self._active_model_provider())
+
+    def get_model_provider_config_by_id(self, provider_id: str) -> DirectChatConfig:
+        return self._model_provider_config(self._find_model_provider(provider_id))
+
+    def _find_model_provider(self, provider_id: str) -> dict:
+        providers = self._load_model_providers()
+        provider = next((p for p in providers if p.get("id") == provider_id), None)
+        if provider is None:
+            raise RuntimeContractError(
+                "MODEL_PROVIDER_NOT_FOUND",
+                "模型服务不存在",
+                status=404,
+            )
+        return provider
+
+    # ---- model provider CRUD ---------------------------------------------
+
+    def list_model_providers(self) -> dict:
+        providers = self._load_model_providers()
+        active = self._active_model_provider()
+        return {
+            "providers": [_provider_record(provider) for provider in providers],
+            "activeProviderId": active.get("id") if active else None,
+        }
+
+    def create_model_provider(
+        self,
+        *,
+        fields: dict,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="创建模型服务")
+        resolved = _normalize_model_provider_fields(fields, base=None)
+        provider = {
+            "id": f"model-provider-{uuid4()}",
+            **resolved,
+            "isDefault": len(self._load_model_providers()) == 0,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        with self._lock, self._db:
+            providers = self._load_model_providers()
+            providers.append(provider)
+            self._save_model_providers(providers, now=now)
+            self._audit.record(
+                actor=human_actor,
+                action="settings.model_provider.created",
+                resource=f"model-provider:{provider['id']}",
+                detail={
+                    "name": provider["name"],
+                    "vendor": provider["vendor"],
+                    "model": provider["model"],
+                    "baseUrl": provider["baseUrl"],
+                    "apiKeyConfigured": bool(provider["apiKey"]),
+                },
+                created_at=now,
+            )
+            self._db.commit()
+        return _provider_record(provider)
+
+    def update_model_provider(
+        self,
+        provider_id: str,
+        *,
+        fields: dict,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        human_actor = require_trusted_human(actor, operation="修改模型服务")
+        with self._lock, self._db:
+            providers = self._load_model_providers()
+            index = next(
+                (i for i, provider in enumerate(providers) if provider.get("id") == provider_id),
+                None,
+            )
+            if index is None:
+                raise RuntimeContractError(
+                    "MODEL_PROVIDER_NOT_FOUND",
+                    "模型服务不存在",
+                    status=404,
+                )
+            current = providers[index]
+            resolved = _normalize_model_provider_fields(fields, base=current)
+            updated = {**current, **resolved, "updatedAt": now}
+            providers[index] = updated
+            self._save_model_providers(providers, now=now)
+            self._audit.record(
+                actor=human_actor,
+                action="settings.model_provider.updated",
+                resource=f"model-provider:{provider_id}",
+                detail={
+                    "name": updated["name"],
+                    "vendor": updated["vendor"],
+                    "model": updated["model"],
+                    "baseUrl": updated["baseUrl"],
+                    "apiKeyConfigured": bool(updated["apiKey"]),
+                },
+                created_at=now,
+            )
+            self._db.commit()
+        return _provider_record(updated)
+
+    def delete_model_provider(self, provider_id: str, *, actor: dict, now: str) -> dict:
+        human_actor = require_trusted_human(actor, operation="删除模型服务")
+        with self._lock, self._db:
+            providers = self._load_model_providers()
+            remaining = [p for p in providers if p.get("id") != provider_id]
+            if len(remaining) == len(providers):
+                raise RuntimeContractError(
+                    "MODEL_PROVIDER_NOT_FOUND",
+                    "模型服务不存在",
+                    status=404,
+                )
+            was_default = any(p.get("id") == provider_id and p.get("isDefault") for p in providers)
+            if was_default and remaining:
+                remaining[0]["isDefault"] = True
+            self._save_model_providers(remaining, now=now)
+            self._audit.record(
+                actor=human_actor,
+                action="settings.model_provider.deleted",
+                resource=f"model-provider:{provider_id}",
+                detail={},
+                created_at=now,
+            )
+            self._db.commit()
+        return {"id": provider_id, "deleted": True}
+
+    def set_default_model_provider(self, provider_id: str, *, actor: dict, now: str) -> dict:
+        human_actor = require_trusted_human(actor, operation="设置默认模型服务")
+        with self._lock, self._db:
+            providers = self._load_model_providers()
+            if not any(p.get("id") == provider_id for p in providers):
+                raise RuntimeContractError(
+                    "MODEL_PROVIDER_NOT_FOUND",
+                    "模型服务不存在",
+                    status=404,
+                )
+            for provider in providers:
+                provider["isDefault"] = provider.get("id") == provider_id
+            self._save_model_providers(providers, now=now)
+            self._audit.record(
+                actor=human_actor,
+                action="settings.model_provider.defaulted",
+                resource=f"model-provider:{provider_id}",
+                detail={},
+                created_at=now,
+            )
+            self._db.commit()
+        return {"id": provider_id, "isDefault": True}
+
+    # ---- legacy single-config compat -------------------------------------
 
     def save_model_provider_config(
         self,
@@ -204,73 +520,24 @@ class WorkflowRuntimeService:
         actor: dict,
         now: str,
     ) -> DirectChatConfig:
-        """Validate and persist the model-direct config; blank/masked API key keeps existing."""
-        human_actor = require_trusted_human(actor, operation="????????")
-        current = self.get_model_provider_config()
-        resolved_key = (api_key or "").strip()
-        if not resolved_key or resolved_key == MASKED_API_KEY:
-            resolved_key = current.api_key
-        resolved_base_url = (base_url or current.base_url).strip()
-        if not resolved_base_url.startswith(("http://", "https://")):
-            raise RuntimeContractError(
-                "AGENT_DIRECT_BASE_URL_INVALID",
-                "????????? http:// ? https:// ??",
-                status=422,
-            )
-        resolved_model = (model or current.model).strip()
-        if not resolved_model:
-            raise RuntimeContractError(
-                "AGENT_DIRECT_MODEL_INVALID",
-                "????????",
-                status=422,
-            )
-        resolved_temperature = _coerce_temperature(
-            temperature if temperature is not None else current.temperature
-        )
-        if not 0.0 <= resolved_temperature <= 2.0:
-            raise RuntimeContractError(
-                "AGENT_DIRECT_TEMPERATURE_INVALID",
-                "??????? 0 ? 2 ??",
-                status=422,
-            )
-        resolved_prompt = (
-            (system_prompt or current.system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
-        )
-        config = DirectChatConfig(
-            vendor=(vendor or current.vendor or "openai").strip() or "openai",
-            base_url=resolved_base_url,
-            api_key=resolved_key,
-            model=resolved_model,
-            temperature=resolved_temperature,
-            system_prompt=resolved_prompt,
-        )
-        with self._lock, self._db:
-            self._settings.set(
-                self.MODEL_PROVIDER_SETTINGS_KEY,
-                {
-                    "vendor": config.vendor,
-                    "baseUrl": config.base_url,
-                    "apiKey": config.api_key,
-                    "model": config.model,
-                    "temperature": config.temperature,
-                    "systemPrompt": config.system_prompt,
-                },
-                updated_at=now,
-            )
-            self._audit.record(
-                actor=human_actor,
-                action="settings.model_provider.updated",
-                resource="settings:model_provider",
-                detail={
-                    "vendor": config.vendor,
-                    "model": config.model,
-                    "baseUrl": config.base_url,
-                    "apiKeyConfigured": bool(config.api_key),
-                },
-                created_at=now,
-            )
-            self._db.commit()
-        return config
+        """Legacy path: persist the active provider (blank/masked key keeps existing)."""
+        active = self._active_model_provider()
+        fields = {
+            "vendor": vendor,
+            "name": "",
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "model": model,
+            "temperature": temperature,
+            "maxTokens": None,
+            "topP": None,
+            "systemPrompt": system_prompt,
+        }
+        if active is not None:
+            self.update_model_provider(active["id"], fields=fields, actor=actor, now=now)
+        else:
+            self.create_model_provider(fields=fields, actor=actor, now=now)
+        return self.get_model_provider_config()
 
     def test_model_provider_connection(
         self,
@@ -280,12 +547,12 @@ class WorkflowRuntimeService:
         now: str,
     ) -> dict:
         """Send a tiny ping to the model endpoint; does not persist anything."""
-        human_actor = require_trusted_human(actor, operation="????????")
+        human_actor = require_trusted_human(actor, operation="测试模型服务")
         test_config = config or self.get_model_provider_config()
         if not test_config.configured:
             raise RuntimeContractError(
                 "AGENT_DIRECT_NOT_CONFIGURED",
-                "??????????????????",
+                "模型服务未配置，请先填写模型信息",
                 status=422,
             )
         started_at = _now()
@@ -317,9 +584,10 @@ class WorkflowRuntimeService:
                 detail={"model": test_config.model},
                 created_at=now,
             )
+        reply_preview = reply[:120] or "（空回复）"
         return {
             "ok": True,
-            "message": f"??????????{reply[:120] or '?????'}",
+            "message": "连接成功，模型回复：" + reply_preview,
             "latencyMs": _elapsed_ms(started_at),
         }
 
@@ -331,6 +599,8 @@ class WorkflowRuntimeService:
         api_key: str | None,
         model: str | None,
         temperature: float | None,
+        max_tokens: int | None,
+        top_p: float | None,
         system_prompt: str | None,
         actor: dict,
         now: str,
@@ -345,12 +615,29 @@ class WorkflowRuntimeService:
             temperature=_coerce_temperature(
                 temperature if temperature is not None else current.temperature
             ),
+            max_tokens=_coerce_max_tokens(
+                max_tokens if max_tokens is not None else current.max_tokens
+            ),
+            top_p=_coerce_top_p(top_p if top_p is not None else current.top_p),
             system_prompt=(
                 (system_prompt or current.system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
                 or DEFAULT_SYSTEM_PROMPT
             ),
         )
         return self.test_model_provider_connection(config=config, actor=actor, now=now)
+
+    def test_model_provider_connection_by_id(
+        self,
+        provider_id: str,
+        *,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        return self.test_model_provider_connection(
+            config=self.get_model_provider_config_by_id(provider_id),
+            actor=actor,
+            now=now,
+        )
 
     def model_provider_diagnostic(self) -> dict:
         config = self.get_model_provider_config()
@@ -361,7 +648,7 @@ class WorkflowRuntimeService:
                 "available": True,
                 "path": None,
                 "version": None,
-                "message": f"??? {config.vendor} / {config.model}",
+                "message": "已配置 " + f"{config.vendor} / {config.model}",
             }
         return {
             "id": "direct",
@@ -369,7 +656,7 @@ class WorkflowRuntimeService:
             "available": False,
             "path": None,
             "version": None,
-            "message": "????????????????Base URL / API Key / ????",
+            "message": "未配置模型服务（Base URL / API Key / 模型名）",
         }
 
     def _resolve_knowledge_jobs_root(self, db: sqlite3.Connection) -> Path:
@@ -3253,6 +3540,7 @@ class WorkflowRuntimeService:
         parent_job_id: str | None = None,
         transport: str = "auto",
         conversational: bool = False,
+        model_provider_id: str | None = None,
     ) -> dict:
         execution_guard = (
             self._require_execution_lease(project_id, run_id, write_required=True)
@@ -3298,7 +3586,11 @@ class WorkflowRuntimeService:
         job_id = f"agent-job-{uuid4()}"
         direct_chat_config: DirectChatConfig | None = None
         if provider == "direct":
-            direct_chat_config = self.get_model_provider_config()
+            direct_chat_config = (
+                self.get_model_provider_config_by_id(model_provider_id)
+                if model_provider_id
+                else self.get_model_provider_config()
+            )
             if not direct_chat_config.configured:
                 raise RuntimeContractError(
                     "AGENT_DIRECT_NOT_CONFIGURED",
@@ -3421,7 +3713,11 @@ class WorkflowRuntimeService:
                 mode=mode,
                 session_id=session_id,
                 parent_job_id=parent_job_id,
-                metadata={"transport": resolved_transport, "conversational": conversational},
+                metadata={
+                    "transport": resolved_transport,
+                    "conversational": conversational,
+                    **({"modelProviderId": model_provider_id} if model_provider_id else {}),
+                },
             )
             for artifact in context_artifacts:
                 artifact_id = artifact.get("artifactId")

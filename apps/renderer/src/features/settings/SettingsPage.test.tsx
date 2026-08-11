@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsPage } from "./SettingsPage";
@@ -110,7 +110,90 @@ describe("SettingsPage", () => {
     expect(onRefreshProviderDiagnostics).toHaveBeenCalledTimes(1);
   });
 });
-  it("saves and tests the model-direct provider configuration", async () => {
+
+  it("manages model services: edit, set default, delete", async () => {
+    const onSaveModelProvider = vi.fn().mockResolvedValue(undefined);
+    const onDeleteModelProvider = vi.fn().mockResolvedValue(undefined);
+    const onSetDefaultModelProvider = vi.fn().mockResolvedValue(undefined);
+    const onTestModelProvider = vi.fn().mockResolvedValue(null);
+    render(
+      <SettingsPage
+        apiBaseUrl="http://127.0.0.1:8765"
+        connection="connected"
+        onApiBaseUrlChange={vi.fn()}
+        onCheckConnection={vi.fn()}
+        modelProviders={[
+          {
+            id: "p1",
+            name: "DeepSeek",
+            vendor: "deepseek",
+            baseUrl: "https://api.deepseek.com/v1",
+            apiKey: "********",
+            hasApiKey: true,
+            model: "deepseek-chat",
+            temperature: 0.3,
+            maxTokens: null,
+            topP: null,
+            systemPrompt: "",
+            isDefault: true,
+            available: true,
+            message: "????",
+            createdAt: "2026-08-11T00:00:00Z",
+            updatedAt: "2026-08-11T00:00:00Z",
+          },
+          {
+            id: "p2",
+            name: "OpenAI",
+            vendor: "openai",
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "",
+            hasApiKey: false,
+            model: "gpt-4o-mini",
+            temperature: 0.7,
+            maxTokens: 2048,
+            topP: 0.9,
+            systemPrompt: "",
+            isDefault: false,
+            available: false,
+            message: "?? API Key / ?? / ??",
+            createdAt: "2026-08-11T00:00:00Z",
+            updatedAt: "2026-08-11T00:00:00Z",
+          },
+        ]}
+        activeModelProviderId="p1"
+        onSaveModelProvider={onSaveModelProvider}
+        onDeleteModelProvider={onDeleteModelProvider}
+        onSetDefaultModelProvider={onSetDefaultModelProvider}
+        onTestModelProvider={onTestModelProvider}
+      />,
+    );
+
+    expect(screen.getByText("DeepSeek")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "设为默认" }));
+    expect(onSetDefaultModelProvider).toHaveBeenCalledWith("p2");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    fireEvent.change(screen.getByLabelText("模型名称"), {
+      target: { value: "deepseek-reasoner" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    expect(onSaveModelProvider).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({ model: "deepseek-reasoner" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByLabelText("服务名称")).not.toBeInTheDocument(),
+    );
+
+    const deleteButtons = screen.getAllByRole("button", { name: "删除" });
+    fireEvent.click(deleteButtons[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "确认删除？" }));
+    expect(onDeleteModelProvider).toHaveBeenCalledWith("p2");
+  });
+
+  it("creates a new model service and tests the connection from the draft", async () => {
     const onSaveModelProvider = vi.fn().mockResolvedValue(undefined);
     const onTestModelProvider = vi
       .fn()
@@ -121,31 +204,32 @@ describe("SettingsPage", () => {
         connection="connected"
         onApiBaseUrlChange={vi.fn()}
         onCheckConnection={vi.fn()}
-        modelProvider={{
-          vendor: "deepseek",
-          baseUrl: "https://api.deepseek.com/v1",
-          apiKey: "********",
-          hasApiKey: true,
-          model: "deepseek-chat",
-          temperature: 0.3,
-          systemPrompt: "你是测试助手",
-          available: true,
-          message: "已配置 deepseek / deepseek-chat",
-        }}
+        modelProviders={[]}
+        activeModelProviderId={null}
         onSaveModelProvider={onSaveModelProvider}
         onTestModelProvider={onTestModelProvider}
       />,
     );
 
-    fireEvent.change(screen.getByLabelText("模型名称"), {
-      target: { value: "deepseek-reasoner" },
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    fireEvent.change(screen.getByLabelText("服务名称"), {
+      target: { value: "DeepSeek ???" },
     });
+    fireEvent.change(screen.getByLabelText("模型厂商"), { target: { value: "deepseek" } });
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(onTestModelProvider).toHaveBeenCalledWith(
+      null,
+      expect.objectContaining({
+        vendor: "deepseek",
+        baseUrl: "https://api.deepseek.com/v1",
+        model: "deepseek-chat",
+      }),
+    );
+    expect(await screen.findByText("连接成功，模型回复：pong")).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     expect(onSaveModelProvider).toHaveBeenCalledWith(
-      expect.objectContaining({ vendor: "deepseek", model: "deepseek-reasoner" }),
+      null,
+      expect.objectContaining({ name: "DeepSeek ???", vendor: "deepseek" }),
     );
-
-    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
-    expect(onTestModelProvider).toHaveBeenCalled();
-    expect(await screen.findByText("连接成功，模型回复：pong")).toBeInTheDocument();
   });

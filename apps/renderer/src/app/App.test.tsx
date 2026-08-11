@@ -72,6 +72,7 @@ describe("App", () => {
       calls.push(`${url.pathname}${url.search}`);
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") {
         return jsonResponse({
           projectId: "project-1",
@@ -132,6 +133,7 @@ describe("App", () => {
       const url = new URL(String(input));
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") {
         return jsonResponse({
           projectId: "project-1",
@@ -189,6 +191,7 @@ describe("App", () => {
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/projects/project-1/runs/run%2Fone/overview") return jsonResponse(runOverview("run/one"));
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       return jsonResponse([]);
     }));
 
@@ -216,6 +219,7 @@ describe("App", () => {
       const url = new URL(String(input));
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/projects/project-1/runs/run-one/overview") return jsonResponse(runOverview("run-one"));
       if (url.pathname === "/projects/project-1/runs/run-one/actions") {
@@ -388,6 +392,7 @@ describe("App", () => {
       const url = new URL(String(input));
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/projects/project-1/runs/run-one/overview") return jsonResponse(scopedOverview);
       if (url.pathname === "/projects/project-1/runs/run-one/actions") {
@@ -427,6 +432,7 @@ describe("App", () => {
       calls.push(url.pathname);
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/projects/project-1/runs/missing-run/overview") {
         return new Response(JSON.stringify({ code: "RUN_NOT_FOUND_IN_PROJECT", message: "Missing scoped Run" }), { status: 404 });
@@ -462,6 +468,7 @@ describe("App", () => {
       }
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       return jsonResponse([]);
     }));
 
@@ -505,6 +512,7 @@ describe("App", () => {
       }
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       return jsonResponse([]);
     }));
 
@@ -582,6 +590,7 @@ describe("App", () => {
       requests.push({ path: url.pathname, method });
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/workflow-versions/workflow-version-1/runs") {
         return jsonResponse([
@@ -661,6 +670,7 @@ describe("App", () => {
       if (init?.method === "POST") postRequests.push(url.pathname);
       if (url.pathname === "/health") return jsonResponse({ status: "ok" });
       if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
       if (url.pathname === "/projects/project-1/workflow-binding") return jsonResponse(null);
       if (url.pathname === "/workflow-versions/workflow-version-2/runs") return jsonResponse([]);
       if (url.pathname === "/projects/project-1/runs" && url.searchParams.get("cursor") === "older") {
@@ -800,6 +810,7 @@ describe("App", () => {
           return jsonResponse({ ...runOverview("run-restored"), run: { ...runOverview("run-restored").run, projectId: "project-restored" } });
         }
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );
@@ -859,6 +870,7 @@ describe("App", () => {
         calls.push(url.pathname);
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );
@@ -889,6 +901,7 @@ describe("App", () => {
         calls.push(url.pathname);
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         if (url.pathname === "/workflows") {
           return jsonResponse([{
             workflowId: "archived-workflow",
@@ -972,6 +985,7 @@ describe("App", () => {
         const url = new URL(String(input));
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         if (url.pathname === "/workflows") return jsonResponse([workflow]);
         if (url.pathname === "/workflow-versions/delivery-version-1") return jsonResponse(definition);
         if (url.pathname === "/workflow-versions/delivery-version-1/compile") return jsonResponse({ diagnostics: [], graphSpec: { nodes: [], edges: [] } });
@@ -1033,6 +1047,7 @@ describe("App", () => {
         const url = new URL(String(input));
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         if (url.pathname === "/workflows") return jsonResponse(copied ? [template, copiedAsset] : [template]);
         if (url.pathname === "/workflows/delivery-template/copy") {
           copied = true;
@@ -1076,6 +1091,7 @@ describe("App", () => {
         const url = new URL(String(input));
         if (url.pathname === "/health") return jsonResponse({ status: "ok" });
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       });
     vi.stubGlobal("fetch", fetchMock);
@@ -1106,6 +1122,7 @@ describe("App", () => {
           return new Response(JSON.stringify({ detail: "Run not found" }), { status: 404 });
         }
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );
@@ -1180,6 +1197,7 @@ describe("App", () => {
           return jsonResponse({ runId: "run-demo", cleanedSessionIds: ["terminal-orphan"] });
         }
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );
@@ -1430,6 +1448,7 @@ describe("App", () => {
           });
         }
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );
@@ -1499,6 +1518,7 @@ describe("App", () => {
           });
         }
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );
@@ -1591,6 +1611,7 @@ describe("App", () => {
         if (url.pathname === "/runs/run-demo/gates") return jsonResponse([]);
         if (url.pathname === "/runs/run-demo/agents") return jsonResponse([]);
         if (url.pathname === "/agents/providers") return jsonResponse([]);
+      if (url.pathname === "/settings/model-providers") return jsonResponse({ providers: [], activeProviderId: null });
         return jsonResponse([]);
       }),
     );

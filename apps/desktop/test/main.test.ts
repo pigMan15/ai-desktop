@@ -147,7 +147,7 @@ const invalidRuntimeRequests: Array<{ value: unknown; error: RegExp }> = [
     error: /options must be an object/i,
   },
   { value: { path: "https://example.com/runs" }, error: /relative API path/i },
-  { value: { path: "/runs", method: "PUT" }, error: /method must be GET or POST/i },
+  { value: { path: "/runs", method: "PATCH" }, error: /method must be GET, POST, PUT or DELETE/i },
   { value: { path: "/runs", headers: [] }, error: /headers must be an object/i },
   { value: { path: "/runs", headers: new Date() }, error: /headers must be an object/i },
   { value: { path: "/runs", headers: { "Idempotency-Key": 123 } }, error: /header values must be strings/i },

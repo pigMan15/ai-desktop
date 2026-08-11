@@ -263,12 +263,34 @@ export type ModelProviderSettings = {
   message: string;
 };
 
-export type ModelProviderSettingsInput = {
+export type ModelProviderRecord = {
+  id: string;
+  name: string;
+  vendor: string;
+  baseUrl: string;
+  apiKey: string;
+  hasApiKey: boolean;
+  model: string;
+  temperature: number;
+  maxTokens: number | null;
+  topP: number | null;
+  systemPrompt: string;
+  isDefault: boolean;
+  available: boolean;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ModelProviderInput = {
+  name?: string;
   vendor: string;
   baseUrl: string;
   apiKey?: string;
   model: string;
   temperature?: number;
+  maxTokens?: number | null;
+  topP?: number | null;
   systemPrompt?: string;
 };
 
@@ -728,13 +750,13 @@ export function createRuntimeClient(apiBaseUrl: string) {
       request<AgentProviderDiagnostic[]>(apiBaseUrl, "/agents/providers"),
     getModelProviderSettings: (signal?: AbortSignal) =>
       request<ModelProviderSettings>(apiBaseUrl, "/settings/model-provider", { method: "GET", signal }),
-    saveModelProviderSettings: (settings: ModelProviderSettingsInput, now: string, signal?: AbortSignal) =>
+    saveModelProviderSettings: (settings: ModelProviderInput, now: string, signal?: AbortSignal) =>
       request<ModelProviderSettings>(apiBaseUrl, "/settings/model-provider", {
         method: "PUT",
         body: { ...settings, actor: HUMAN_ACTOR, now },
         signal,
       }),
-    testModelProviderConnection: (settings: ModelProviderSettingsInput | null, now: string, signal?: AbortSignal) =>
+    testModelProviderConnection: (settings: ModelProviderInput | null, now: string, signal?: AbortSignal) =>
       request<{ ok: boolean; message: string; latencyMs?: number | null }>(
         apiBaseUrl,
         "/settings/model-provider/test",
@@ -743,6 +765,42 @@ export function createRuntimeClient(apiBaseUrl: string) {
           body: settings ? { ...settings, actor: HUMAN_ACTOR, now } : { actor: HUMAN_ACTOR, now },
           signal,
         },
+      ),
+    listModelProviders: (signal?: AbortSignal) =>
+      request<{ providers: ModelProviderRecord[]; activeProviderId: string | null }>(
+        apiBaseUrl,
+        "/settings/model-providers",
+        { method: "GET", signal },
+      ),
+    createModelProvider: (input: ModelProviderInput, now: string, signal?: AbortSignal) =>
+      request<ModelProviderRecord>(apiBaseUrl, "/settings/model-providers", {
+        method: "POST",
+        body: { ...input, actor: HUMAN_ACTOR, now },
+        signal,
+      }),
+    updateModelProvider: (providerId: string, input: ModelProviderInput, now: string, signal?: AbortSignal) =>
+      request<ModelProviderRecord>(
+        apiBaseUrl,
+        `/settings/model-providers/${encodeURIComponent(providerId)}`,
+        { method: "PUT", body: { ...input, actor: HUMAN_ACTOR, now }, signal },
+      ),
+    deleteModelProvider: (providerId: string, now: string, signal?: AbortSignal) =>
+      request<{ id: string; deleted: boolean }>(
+        apiBaseUrl,
+        `/settings/model-providers/${encodeURIComponent(providerId)}`,
+        { method: "DELETE", body: { actor: HUMAN_ACTOR, now }, signal },
+      ),
+    testModelProviderById: (providerId: string, now: string, signal?: AbortSignal) =>
+      request<{ ok: boolean; message: string; latencyMs?: number | null }>(
+        apiBaseUrl,
+        `/settings/model-providers/${encodeURIComponent(providerId)}/test`,
+        { method: "POST", body: { actor: HUMAN_ACTOR, now }, signal },
+      ),
+    setDefaultModelProvider: (providerId: string, now: string, signal?: AbortSignal) =>
+      request<{ id: string; isDefault: boolean }>(
+        apiBaseUrl,
+        `/settings/model-providers/${encodeURIComponent(providerId)}/default`,
+        { method: "POST", body: { actor: HUMAN_ACTOR, now }, signal },
       ),
     getWorkflowDefinition: (workflowVersionId: string) =>
       request<WorkflowDefinitionSummary>(apiBaseUrl, `/workflow-versions/${workflowVersionId}`),
@@ -1197,7 +1255,7 @@ export function createRuntimeClient(apiBaseUrl: string) {
       allowedTools: string[] = [],
       cwd?: string,
       signal?: AbortSignal,
-      options?: { transport?: AgentTransport; conversational?: boolean },
+      options?: { transport?: AgentTransport; conversational?: boolean; modelProviderId?: string | null },
     ) =>
       request<AgentStartResult>(apiBaseUrl, `${scopedRunPath(projectId, runId)}/agents`, {
         body: {
@@ -1213,6 +1271,7 @@ export function createRuntimeClient(apiBaseUrl: string) {
           now,
           ...(options?.transport ? { transport: options.transport } : {}),
           ...(options?.conversational !== undefined ? { conversational: options.conversational } : {}),
+          ...(options?.modelProviderId ? { modelProviderId: options.modelProviderId } : {}),
         },
         signal,
       }),
