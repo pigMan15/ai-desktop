@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from workflow_platform.main import health
 from workflow_platform.execution.diagnostics import diagnose_cli_provider
+from workflow_platform.execution.direct_chat import MASKED_API_KEY
 from workflow_platform.persistence.database import connect
 from workflow_platform.persistence.migrations import migrate
 from workflow_platform.runtime_service import WorkflowRuntimeService
@@ -267,6 +268,28 @@ class ContinueInteractiveAgentSessionRequest(BaseModel):
     now: str
 
 
+class ModelProviderConfigRequest(BaseModel):
+    vendor: str | None = None
+    baseUrl: str | None = None
+    apiKey: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    systemPrompt: str | None = None
+    actor: dict[str, Any]
+    now: str
+
+
+class TestModelProviderConnectionRequest(BaseModel):
+    vendor: str | None = None
+    baseUrl: str | None = None
+    apiKey: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    systemPrompt: str | None = None
+    actor: dict[str, Any]
+    now: str
+
+
 class CancelAgentJobRequest(BaseModel):
     actor: dict[str, Any] | None = None
     now: str | None = None
@@ -334,6 +357,25 @@ class RecordKnowledgeGitPublicationRequest(BaseModel):
     commitHash: str
     actor: dict[str, Any]
     now: str
+
+
+def _model_provider_response(config: Any) -> dict[str, Any]:
+    configured = bool(getattr(config, "configured", False))
+    return {
+        "vendor": str(getattr(config, "vendor", "openai")),
+        "baseUrl": str(getattr(config, "base_url", "")),
+        "apiKey": MASKED_API_KEY if getattr(config, "api_key", "") else "",
+        "hasApiKey": bool(getattr(config, "api_key", "")),
+        "model": str(getattr(config, "model", "")),
+        "temperature": float(getattr(config, "temperature", 0.7)),
+        "systemPrompt": str(getattr(config, "system_prompt", "")),
+        "available": configured,
+        "message": (
+            f"??? {config.vendor} / {config.model}"
+            if configured
+            else "????????Base URL / API Key / ????"
+        ),
+    }
 
 
 def create_app(
@@ -466,7 +508,59 @@ def create_app(
 
     @application.get("/agents/providers")
     def get_agent_provider_diagnostics() -> list[dict[str, str | bool | None]]:
-        return [cli_diagnostics(provider) for provider in ("codex", "claude")]
+        providers: list[dict[str, str | bool | None]] = [
+            cli_diagnostics(provider) for provider in ("codex", "claude")
+        ]
+        if runtime_service is not None:
+            providers.append(runtime_service.model_provider_diagnostic())
+        else:
+            providers.append(
+                {
+                    "id": "direct",
+                    "executable": "direct",
+                    "available": False,
+                    "path": None,
+                    "version": None,
+                    "message": "Runtime ???",
+                }
+            )
+        return providers
+
+    @application.get("/settings/model-provider")
+    def get_model_provider_settings() -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        return _model_provider_response(service.get_model_provider_config())
+
+    @application.put("/settings/model-provider")
+    def save_model_provider_settings(request: ModelProviderConfigRequest) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        config = service.save_model_provider_config(
+            vendor=request.vendor or "",
+            base_url=request.baseUrl or "",
+            api_key=request.apiKey,
+            model=request.model or "",
+            temperature=request.temperature,
+            system_prompt=request.systemPrompt,
+            actor=request.actor,
+            now=request.now,
+        )
+        return _model_provider_response(config)
+
+    @application.post("/settings/model-provider/test")
+    def test_model_provider_connection(
+        request: TestModelProviderConnectionRequest,
+    ) -> dict[str, Any]:
+        service = _require_service(runtime_service)
+        return service.test_model_provider_connection_with_fields(
+            vendor=request.vendor,
+            base_url=request.baseUrl,
+            api_key=request.apiKey,
+            model=request.model,
+            temperature=request.temperature,
+            system_prompt=request.systemPrompt,
+            actor=request.actor,
+            now=request.now,
+        )
 
     @application.get("/diagnostics/support-bundle")
     def export_diagnostic_support_bundle() -> dict[str, str]:

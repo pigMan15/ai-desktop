@@ -161,7 +161,7 @@ export type AgentJobSummary = {
   id: string;
   runId: string;
   nodeId: string;
-  provider: "codex" | "claude" | "opencode" | "fake";
+  provider: "codex" | "claude" | "opencode" | "fake" | "direct";
   status: "QUEUED" | "RUNNING" | "AWAITING_INPUT" | "COMPLETED" | "FAILED" | "CANCELLED";
   metadata?: Record<string, unknown>;
   mode?: "automatic" | "interactive";
@@ -243,12 +243,33 @@ export type AgentOutputSummary = {
 };
 
 export type AgentProviderDiagnostic = {
-  id: "codex" | "claude" | "opencode" | "fake";
+  id: "codex" | "claude" | "opencode" | "fake" | "direct";
   executable: string;
   available: boolean;
   path: string | null;
   version: string | null;
   message: string;
+};
+
+export type ModelProviderSettings = {
+  vendor: string;
+  baseUrl: string;
+  apiKey: string;
+  hasApiKey: boolean;
+  model: string;
+  temperature: number;
+  systemPrompt: string;
+  available: boolean;
+  message: string;
+};
+
+export type ModelProviderSettingsInput = {
+  vendor: string;
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  temperature?: number;
+  systemPrompt?: string;
 };
 
 export type ArtifactPreview = {
@@ -705,6 +726,24 @@ export function createRuntimeClient(apiBaseUrl: string) {
       ),
     listAgentProviders: () =>
       request<AgentProviderDiagnostic[]>(apiBaseUrl, "/agents/providers"),
+    getModelProviderSettings: (signal?: AbortSignal) =>
+      request<ModelProviderSettings>(apiBaseUrl, "/settings/model-provider", { method: "GET", signal }),
+    saveModelProviderSettings: (settings: ModelProviderSettingsInput, now: string, signal?: AbortSignal) =>
+      request<ModelProviderSettings>(apiBaseUrl, "/settings/model-provider", {
+        method: "PUT",
+        body: { ...settings, actor: HUMAN_ACTOR, now },
+        signal,
+      }),
+    testModelProviderConnection: (settings: ModelProviderSettingsInput | null, now: string, signal?: AbortSignal) =>
+      request<{ ok: boolean; message: string; latencyMs?: number | null }>(
+        apiBaseUrl,
+        "/settings/model-provider/test",
+        {
+          method: "POST",
+          body: settings ? { ...settings, actor: HUMAN_ACTOR, now } : { actor: HUMAN_ACTOR, now },
+          signal,
+        },
+      ),
     getWorkflowDefinition: (workflowVersionId: string) =>
       request<WorkflowDefinitionSummary>(apiBaseUrl, `/workflow-versions/${workflowVersionId}`),
     compileWorkflowDefinition: (workflowVersionId: string) =>

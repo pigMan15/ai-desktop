@@ -16,10 +16,22 @@ from workflow_platform.adapters.registry import default_registry
 from workflow_platform.artifacts.service import hash_artifact, render_artifact_path, validate_safe_path
 from workflow_platform.compiler.compiler import compile_workflow
 from workflow_platform.execution.cli import AcpAgentExecutor, CliAgentExecutor
+from workflow_platform.execution.direct_chat import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_TEMPERATURE,
+    MASKED_API_KEY,
+    DirectChatConfig,
+    DirectChatExecutor,
+    _default_direct_chat_executor,
+    stream_chat_completion,
+)
 from workflow_platform.execution.agent_context import AgentContextBuilder
 from workflow_platform.execution.deploy import DeployExecutor
 from workflow_platform.execution.providers import (
     AcpProvider,
+    CliCommand,
     ClaudeCliProvider,
     CliProvider,
     CodexCliProvider,
@@ -64,12 +76,29 @@ from workflow_platform.persistence.repositories import (
     WorkflowVersionRepository,
     WorkflowAssetRepository,
     RoleAssetRepository,
+    RuntimeSettingsRepository,
 )
 from workflow_platform.runtime_errors import RuntimeContractError
 from workflow_platform.workspaces import normalize_workspace_path
 
 
 AGENT_PERMISSION_PENDING_LIMIT = 50
+
+
+def _coerce_temperature(value: object) -> float:
+    try:
+        return float(value if value is not None else DEFAULT_TEMPERATURE)
+    except (TypeError, ValueError):
+        return DEFAULT_TEMPERATURE
+
+
+def _elapsed_ms(started_at: str) -> int | None:
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        delta = datetime.now(timezone.utc) - started
+        return int(delta.total_seconds() * 1000)
+    except (ValueError, TypeError):
+        return None
 
 
 def _now() -> str:
@@ -82,6 +111,11 @@ class WorkflowRuntimeService:
         db: sqlite3.Connection,
         *,
         agent_provider_factory: Callable[[str], CliProvider] | None = None,
+        direct_chat_factory: Callable[
+            [DirectChatConfig, Callable[[dict], None] | None, Callable[[int], None] | None],
+            DirectChatExecutor,
+        ]
+        | None = None,
         maintenance_mode: bool = False,
     ) -> None:
         self._db = db
@@ -109,7 +143,9 @@ class WorkflowRuntimeService:
         self._lock = RLock()
         self._knowledge = LocalKnowledgeService(db, self._audit, lock=self._lock)
         self._adapter_registry = default_registry()
+        self._settings = RuntimeSettingsRepository(db)
         self._agent_provider_factory = agent_provider_factory or _default_agent_provider
+        self._direct_chat_factory = direct_chat_factory or _default_direct_chat_executor
         self._maintenance_mode = maintenance_mode
         self._agent_executors: dict[str, CliAgentExecutor] = {}
         self._interactive_desktop_sessions: dict[str, str] = {}
@@ -141,6 +177,200 @@ class WorkflowRuntimeService:
         )
         self._knowledge_agent_runner._on_completed = self._knowledge_job_completed
         self._recover_knowledge_jobs_on_startup()
+
+    MODEL_PROVIDER_SETTINGS_KEY = "model_provider"
+
+    def get_model_provider_config(self) -> DirectChatConfig:
+        """Read the persisted model-direct config (never throws)."""
+        stored = self._settings.get(self.MODEL_PROVIDER_SETTINGS_KEY) or {}
+        return DirectChatConfig(
+            vendor=str(stored.get("vendor") or "openai"),
+            base_url=str(stored.get("baseUrl") or DEFAULT_BASE_URL),
+            api_key=str(stored.get("apiKey") or ""),
+            model=str(stored.get("model") or DEFAULT_MODEL),
+            temperature=_coerce_temperature(stored.get("temperature")),
+            system_prompt=str(stored.get("systemPrompt") or DEFAULT_SYSTEM_PROMPT),
+        )
+
+    def save_model_provider_config(
+        self,
+        *,
+        vendor: str,
+        base_url: str,
+        api_key: str | None,
+        model: str,
+        temperature: float | None,
+        system_prompt: str | None,
+        actor: dict,
+        now: str,
+    ) -> DirectChatConfig:
+        """Validate and persist the model-direct config; blank/masked API key keeps existing."""
+        human_actor = require_trusted_human(actor, operation="????????")
+        current = self.get_model_provider_config()
+        resolved_key = (api_key or "").strip()
+        if not resolved_key or resolved_key == MASKED_API_KEY:
+            resolved_key = current.api_key
+        resolved_base_url = (base_url or current.base_url).strip()
+        if not resolved_base_url.startswith(("http://", "https://")):
+            raise RuntimeContractError(
+                "AGENT_DIRECT_BASE_URL_INVALID",
+                "????????? http:// ? https:// ??",
+                status=422,
+            )
+        resolved_model = (model or current.model).strip()
+        if not resolved_model:
+            raise RuntimeContractError(
+                "AGENT_DIRECT_MODEL_INVALID",
+                "????????",
+                status=422,
+            )
+        resolved_temperature = _coerce_temperature(
+            temperature if temperature is not None else current.temperature
+        )
+        if not 0.0 <= resolved_temperature <= 2.0:
+            raise RuntimeContractError(
+                "AGENT_DIRECT_TEMPERATURE_INVALID",
+                "??????? 0 ? 2 ??",
+                status=422,
+            )
+        resolved_prompt = (
+            (system_prompt or current.system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+        )
+        config = DirectChatConfig(
+            vendor=(vendor or current.vendor or "openai").strip() or "openai",
+            base_url=resolved_base_url,
+            api_key=resolved_key,
+            model=resolved_model,
+            temperature=resolved_temperature,
+            system_prompt=resolved_prompt,
+        )
+        with self._lock, self._db:
+            self._settings.set(
+                self.MODEL_PROVIDER_SETTINGS_KEY,
+                {
+                    "vendor": config.vendor,
+                    "baseUrl": config.base_url,
+                    "apiKey": config.api_key,
+                    "model": config.model,
+                    "temperature": config.temperature,
+                    "systemPrompt": config.system_prompt,
+                },
+                updated_at=now,
+            )
+            self._audit.record(
+                actor=human_actor,
+                action="settings.model_provider.updated",
+                resource="settings:model_provider",
+                detail={
+                    "vendor": config.vendor,
+                    "model": config.model,
+                    "baseUrl": config.base_url,
+                    "apiKeyConfigured": bool(config.api_key),
+                },
+                created_at=now,
+            )
+            self._db.commit()
+        return config
+
+    def test_model_provider_connection(
+        self,
+        *,
+        config: DirectChatConfig | None,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        """Send a tiny ping to the model endpoint; does not persist anything."""
+        human_actor = require_trusted_human(actor, operation="????????")
+        test_config = config or self.get_model_provider_config()
+        if not test_config.configured:
+            raise RuntimeContractError(
+                "AGENT_DIRECT_NOT_CONFIGURED",
+                "??????????????????",
+                status=422,
+            )
+        started_at = _now()
+        try:
+            reply = stream_chat_completion(
+                test_config,
+                [{"role": "user", "content": "ping"}],
+                on_delta=lambda _delta: None,
+            )
+        except ValueError as error:
+            with self._lock, self._db:
+                self._audit.record(
+                    actor=human_actor,
+                    action="settings.model_provider.test_failed",
+                    resource="settings:model_provider",
+                    detail={"message": str(error)},
+                    created_at=now,
+                )
+            return {
+                "ok": False,
+                "message": str(error),
+                "latencyMs": _elapsed_ms(started_at),
+            }
+        with self._lock, self._db:
+            self._audit.record(
+                actor=human_actor,
+                action="settings.model_provider.test_passed",
+                resource="settings:model_provider",
+                detail={"model": test_config.model},
+                created_at=now,
+            )
+        return {
+            "ok": True,
+            "message": f"??????????{reply[:120] or '?????'}",
+            "latencyMs": _elapsed_ms(started_at),
+        }
+
+    def test_model_provider_connection_with_fields(
+        self,
+        *,
+        vendor: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        model: str | None,
+        temperature: float | None,
+        system_prompt: str | None,
+        actor: dict,
+        now: str,
+    ) -> dict:
+        """Build a config from request fields (falling back to saved values) and ping it."""
+        current = self.get_model_provider_config()
+        config = DirectChatConfig(
+            vendor=(vendor or current.vendor or "openai").strip() or "openai",
+            base_url=(base_url or current.base_url or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL,
+            api_key=(api_key or current.api_key).strip(),
+            model=(model or current.model or DEFAULT_MODEL).strip() or DEFAULT_MODEL,
+            temperature=_coerce_temperature(
+                temperature if temperature is not None else current.temperature
+            ),
+            system_prompt=(
+                (system_prompt or current.system_prompt or DEFAULT_SYSTEM_PROMPT).strip()
+                or DEFAULT_SYSTEM_PROMPT
+            ),
+        )
+        return self.test_model_provider_connection(config=config, actor=actor, now=now)
+
+    def model_provider_diagnostic(self) -> dict:
+        config = self.get_model_provider_config()
+        if config.configured:
+            return {
+                "id": "direct",
+                "executable": "direct",
+                "available": True,
+                "path": None,
+                "version": None,
+                "message": f"??? {config.vendor} / {config.model}",
+            }
+        return {
+            "id": "direct",
+            "executable": "direct",
+            "available": False,
+            "path": None,
+            "version": None,
+            "message": "????????????????Base URL / API Key / ????",
+        }
 
     def _resolve_knowledge_jobs_root(self, db: sqlite3.Connection) -> Path:
         try:
@@ -3066,38 +3296,80 @@ class WorkflowRuntimeService:
         if not execution_cwd.is_dir():
             raise ValueError(f"AGENT_CWD_INVALID: Agent 工作目录不存在：{execution_cwd}")
         job_id = f"agent-job-{uuid4()}"
-        effective_prompt, context_artifacts = _build_effective_agent_prompt(
-            workflow=workflow,
-            run_id=run_id,
-            node_id=node_id,
-            user_prompt=prompt,
-            node_states=self.get_projection(run_id).nodeStates,
-            artifacts=self._artifacts.list_for_run(run_id),
-            project_root=configured_workspace,
-            now=now,
-        )
-        cli_provider = self._agent_provider_factory(provider)
+        direct_chat_config: DirectChatConfig | None = None
+        if provider == "direct":
+            direct_chat_config = self.get_model_provider_config()
+            if not direct_chat_config.configured:
+                raise RuntimeContractError(
+                    "AGENT_DIRECT_NOT_CONFIGURED",
+                    "???????????????????????Base URL / API Key / ????",
+                    status=422,
+                )
+            effective_prompt = prompt
+            context_artifacts = []
+        else:
+            effective_prompt, context_artifacts = _build_effective_agent_prompt(
+                workflow=workflow,
+                run_id=run_id,
+                node_id=node_id,
+                user_prompt=prompt,
+                node_states=self.get_projection(run_id).nodeStates,
+                artifacts=self._artifacts.list_for_run(run_id),
+                project_root=configured_workspace,
+                now=now,
+            )
+        cli_provider: CliProvider | None = None
+        if provider != "direct":
+            cli_provider = self._agent_provider_factory(provider)
         safe_allowed_tools = allowed_tools or []
-        if transport not in {"auto", "cli", "acp"}:
+        if transport not in {"auto", "cli", "acp", "direct"}:
             raise ValueError(f"AGENT_TRANSPORT_INVALID: unsupported transport {transport}")
         resolved_transport = "cli"
         acp_provider: AcpProvider | None = None
-        if transport == "acp":
+        if provider == "direct":
+            if mode != "automatic":
+                raise RuntimeContractError(
+                    "AGENT_DIRECT_MODE_INVALID",
+                    "???????????????",
+                    status=422,
+                )
+            if transport not in {"auto", "direct"}:
+                raise RuntimeContractError(
+                    "AGENT_DIRECT_TRANSPORT_INVALID",
+                    "????????? direct",
+                    status=422,
+                )
+            if not conversational:
+                raise RuntimeContractError(
+                    "AGENT_DIRECT_REQUIRES_CONVERSATIONAL",
+                    "?????????????????",
+                    status=422,
+                )
+            resolved_transport = "direct"
+        elif transport == "acp":
             acp_provider = acp_provider_for(provider)
             if acp_provider is None:
                 raise RuntimeContractError(
                     "AGENT_ACP_UNAVAILABLE",
-                    f"provider {provider} 不支持 ACP 传输",
+                    f"provider {provider} ??? ACP ??",
                     status=422,
                 )
             resolved_transport = "acp"
-        if conversational and resolved_transport != "acp":
+        if conversational and resolved_transport not in {"acp", "direct"}:
             raise ValueError("AGENT_CONVERSATIONAL_UNSUPPORTED: conversational requires acp transport")
-        # auto 保持 legacy CLI（默认兼容，零回归）；Phase 0 spike 确认各 CLI 的 ACP 参数后再切换
-        if resolved_transport == "acp":
+        # auto ?? legacy CLI???????????Phase 0 spike ??? CLI ? ACP ??????
+        if resolved_transport == "direct":
+            assert direct_chat_config is not None
+            command = CliCommand(
+                executable="direct",
+                args=[direct_chat_config.base_url, direct_chat_config.model],
+                cwd=execution_cwd,
+            )
+        elif resolved_transport == "acp":
             assert acp_provider is not None
             command = acp_provider.build_acp_command(cwd=execution_cwd)
         else:
+            assert cli_provider is not None
             command = cli_provider.build_command(
                 cwd=execution_cwd,
                 prompt=effective_prompt,
@@ -3199,7 +3471,7 @@ class WorkflowRuntimeService:
                     provider=provider,
                     cwd=str(execution_cwd),
                     max_output_bytes=max_output_bytes,
-                    kind="acp-chat",
+                    kind="direct-chat" if provider == "direct" else "acp-chat",
                     created_at=now,
                 )
                 self._agent_sessions.append_input(
@@ -3326,7 +3598,14 @@ class WorkflowRuntimeService:
                 )
                 self._db.commit()
 
-        if resolved_transport == "acp":
+        if resolved_transport == "direct":
+            assert direct_chat_config is not None
+            executor = self._direct_chat_factory(
+                direct_chat_config,
+                append_output,
+                mark_running,
+            )
+        elif resolved_transport == "acp":
             assert acp_provider is not None
             executor = AcpAgentExecutor(
                 provider=acp_provider,
@@ -3335,6 +3614,7 @@ class WorkflowRuntimeService:
                 on_permission=on_permission,
             )
         else:
+            assert cli_provider is not None
             executor = CliAgentExecutor(
                 provider=cli_provider,
                 on_output=append_output,

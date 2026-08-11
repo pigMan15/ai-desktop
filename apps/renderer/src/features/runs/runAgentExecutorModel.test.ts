@@ -116,3 +116,45 @@ describe("agent chat model", () => {
     expect(messages[2].text).toContain("src/a.ts");
   });
 });
+describe("agentChatMessages streaming coalescing", () => {
+  const event = (
+    id: string,
+    sequence: number,
+    messageId: string | undefined,
+    text: string,
+  ): AgentOutputSummary => ({
+    id,
+    jobId: "job-stream",
+    sequence,
+    kind: "acp.message",
+    payload: messageId ? { text, messageId } : { text },
+    createdAt: "2026-08-11T00:00:00.000Z",
+  });
+
+  it("coalesces deltas of the same messageId into one bubble with the latest text", () => {
+    const persisted = [
+      event("d1", 1, "msg-1", "hello "),
+      event("d2", 2, "msg-1", "hello world"),
+      event("d3", 3, "msg-2", "second reply"),
+      event("d4", 4, "msg-1", "hello world!"),
+    ];
+    const messages = agentChatMessages("job-stream", persisted);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].text).toBe("hello world!");
+    expect(messages[1].text).toBe("second reply");
+    expect(messages[0].sequence).toBeLessThan(messages[1].sequence);
+  });
+
+  it("keeps non-streamed messages in order with streamed ones", () => {
+    const persisted = [
+      event("s1", 1, "msg-1", "first"),
+      { id: "t1", jobId: "job-stream", sequence: 2, kind: "acp.turn", payload: { text: "turn" }, createdAt: "2026-08-11T00:00:00.000Z" },
+      event("s2", 3, "msg-1", "first done"),
+    ];
+    const messages = agentChatMessages("job-stream", persisted);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].kind).toBe("message");
+    expect(messages[0].text).toBe("first done");
+    expect(messages[1].kind).toBe("turn");
+  });
+});

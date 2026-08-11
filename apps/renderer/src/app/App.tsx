@@ -60,6 +60,8 @@ import {
   type AgentJobSummary,
   type AgentOutputSummary,
   type AgentProviderDiagnostic,
+  type ModelProviderSettings,
+  type ModelProviderSettingsInput,
   type ArtifactPreview,
   type AuditRecord,
   type CompiledWorkflowSummary,
@@ -134,6 +136,8 @@ export function App() {
   const [providerDiagnostics, setProviderDiagnostics] = useState<AgentProviderDiagnostic[] | undefined>(
     undefined,
   );
+  const [modelProvider, setModelProvider] = useState<ModelProviderSettings | null>(null);
+  const [savingModelProvider, setSavingModelProvider] = useState(false);
   const [knowledgeCandidates, setKnowledgeCandidates] = useState<KnowledgeCandidate[]>([]);
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
   const [knowledgeSyntheses, setKnowledgeSyntheses] = useState<KnowledgeSynthesis[]>([]);
@@ -289,7 +293,8 @@ export function App() {
     }
 
     let isMounted = true;
-    createRuntimeClient(apiBaseUrl)
+    const runtimeClient = createRuntimeClient(apiBaseUrl);
+    runtimeClient
       .listAgentProviders()
       .then((diagnostics) => {
         if (isMounted) {
@@ -300,6 +305,14 @@ export function App() {
         if (isMounted) {
           setProviderDiagnostics([]);
         }
+      });
+    runtimeClient
+      .getModelProviderSettings()
+      .then((settings) => {
+        if (isMounted) setModelProvider(settings);
+      })
+      .catch(() => {
+        if (isMounted) setModelProvider(null);
       });
     return () => {
       isMounted = false;
@@ -2663,6 +2676,23 @@ export function App() {
                 const saved = await client.updateProjectConcurrency(projectId, settings, now());
                 setProjectConcurrency(saved);
                 setOperationMessage("项目并发限制已保存");
+              }}
+              modelProvider={modelProvider}
+              savingModelProvider={savingModelProvider}
+              onSaveModelProvider={async (settings) => {
+                setSavingModelProvider(true);
+                try {
+                  const saved = await client.saveModelProviderSettings(settings, now());
+                  setModelProvider(saved);
+                  setOperationMessage("模型直连配置已保存");
+                } finally {
+                  setSavingModelProvider(false);
+                }
+              }}
+              onTestModelProvider={async (settings) => {
+                const result = await client.testModelProviderConnection(settings, now());
+                setOperationMessage(result.ok ? "模型直连连接测试通过" : "模型直连连接测试失败");
+                return result;
               }}
             />
           ) : null}

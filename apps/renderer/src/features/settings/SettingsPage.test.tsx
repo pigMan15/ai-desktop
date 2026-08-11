@@ -110,3 +110,42 @@ describe("SettingsPage", () => {
     expect(onRefreshProviderDiagnostics).toHaveBeenCalledTimes(1);
   });
 });
+  it("saves and tests the model-direct provider configuration", async () => {
+    const onSaveModelProvider = vi.fn().mockResolvedValue(undefined);
+    const onTestModelProvider = vi
+      .fn()
+      .mockResolvedValue({ ok: true, message: "连接成功，模型回复：pong", latencyMs: 120 });
+    render(
+      <SettingsPage
+        apiBaseUrl="http://127.0.0.1:8765"
+        connection="connected"
+        onApiBaseUrlChange={vi.fn()}
+        onCheckConnection={vi.fn()}
+        modelProvider={{
+          vendor: "deepseek",
+          baseUrl: "https://api.deepseek.com/v1",
+          apiKey: "********",
+          hasApiKey: true,
+          model: "deepseek-chat",
+          temperature: 0.3,
+          systemPrompt: "你是测试助手",
+          available: true,
+          message: "已配置 deepseek / deepseek-chat",
+        }}
+        onSaveModelProvider={onSaveModelProvider}
+        onTestModelProvider={onTestModelProvider}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("模型名称"), {
+      target: { value: "deepseek-reasoner" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+    expect(onSaveModelProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ vendor: "deepseek", model: "deepseek-reasoner" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(onTestModelProvider).toHaveBeenCalled();
+    expect(await screen.findByText("连接成功，模型回复：pong")).toBeInTheDocument();
+  });

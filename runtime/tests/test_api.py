@@ -586,7 +586,11 @@ def test_runtime_api_lists_cli_provider_diagnostics() -> None:
     response = client.get("/agents/providers")
 
     assert response.status_code == 200
-    assert response.json() == [diagnostics["codex"], diagnostics["claude"]]
+    providers = response.json()
+    assert providers[:2] == [diagnostics["codex"], diagnostics["claude"]]
+    # Phase 4: direct provider ??? Runtime ????
+    assert providers[2]["id"] == "direct"
+    assert providers[2]["available"] is False
 
 
 @pytest.mark.parametrize("origin", ["http://127.0.0.1:5173", "http://127.0.0.1:5174"])

@@ -3018,3 +3018,37 @@ class AgentPermissionRequestRepository:
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
         }
+class RuntimeSettingsRepository:
+    """Key-value runtime settings persisted in the local SQLite database."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self._db = db
+
+    def get(self, key: str) -> dict | None:
+        row = self._db.execute(
+            "SELECT value_json FROM runtime_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["value_json"])
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def set(self, key: str, value: dict, *, updated_at: str) -> None:
+        self._db.execute(
+            """
+            INSERT INTO runtime_settings (key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+                updated_at,
+            ),
+        )

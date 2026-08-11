@@ -60,15 +60,15 @@
 - 不更换终端组件（node-pty / @xterm/xterm 保留）；
 - 不重写 Run 状态机、事件溯源、审计链、SQLite 存储；
 - 首期不改造交互式 PTY 通道（终端视图原样保留）；
-- 首期不做 SDK/API 直连（Phase 4 可选）；
+- 除模型直连（Phase 4，已在 2026-08-11 落地，见 §9.5）外，不做其他 SDK/API 接入；
 - 不引入 LangGraph 等外部编排框架。
 
 ## 2. 关键设计决策
 
 | 决策 | 结论 |
 | --- | --- |
-| Provider 标识 | 保持不变（`codex | claude | fake`，扩展 `opencode`） |
-| 传输维度 | 新增 `transport: "auto" | "cli" | "acp"`，默认 `auto` |
+| Provider 标识 | `codex | claude | fake | direct`，可扩展 `opencode` |
+| 传输维度 | `"auto" | "cli" | "acp" | "direct"`，默认 `auto`；`direct` 仅用于 `provider=direct` |
 | auto 语义 | 支持 ACP 的 provider 走 ACP；否则回退 legacy CLI |
 | ACP 首期范围 | Claude Code（`--acp`）、OpenCode；Codex 视 Phase 0 探测结果，不支持则继续 legacy |
 | 权限落点 | 新建 job 级 `agent_permission_requests` 表，不加入 `RUN_STATE_TABLES_CHILD_FIRST` |
@@ -427,6 +427,43 @@ ChatView 是聊天模式 job 的默认视图，与终端视图、会话视图并
 | `tests/e2e/workflow-product-loop.spec.ts`（修改） | fake 聊天流程：启动→续话→权限审批→审计可见 |
 
 Fake Provider 必须继续通过 `CliProvider` legacy 路径运行（不引入 ACP），保证测试确定性。
+
+## 9.5 Phase 4（已落地）模型直连：配置模型厂商即可聊天
+
+> 状态：已在 2026-08-11 落地并全量验证（原「Phase 4 可选：SDK/API 直连」提前实现）。
+
+为对标 Cherry Studio / Chatbox 等模型直连聊天客户端，新增 `provider=direct`（OpenAI 兼容 /chat/completions + SSE 流式），在设置页填入供应商信息后，通过现有 ChatView 实现多轮聊天。
+
+### 9.5.1 价值与定位
+- 与 Agent CLI 无关：不启动 Codex / Claude 等 CLI，不产生工具调用与权限请求；
+- 复用聊天任务链路：`AWAITING_INPUT` job + 续话 API + ChatView，与 ACP 对齐；
+- 设置页配置供应商（OpenAI / DeepSeek / 通义千问 / Moonshot / OpenRouter / 自定义），API Key 本地存储（SQLite `runtime_settings`）。
+
+### 9.5.2 协议与框架
+| 项 | 内容 |
+| --- | --- |
+| Provider | `direct`（添加到 contracts `StartAgentRequest.provider` 联合类型） |
+| Transport | `direct`（添加到 `AGENT_TRANSPORTS`）；`provider=direct` 时强制 `transport=direct` + `conversational=true`，否则 422 |
+| 执行器 | `DirectChatExecutor`（`execution/direct_chat.py`）：内存保持对话历史，首轮流式并返回 `AWAITING_INPUT`，后续轮次后台线程流式 |
+| SSE | 标准库实现 `stream_chat_completion`：解析 `data:` 分片（`choices[0].delta.content`），每个 delta 作为 `acp.message` 事件（带 `messageId`）写入输出流 |
+| 消息合并 | `agentChatMessages` 按 `messageId` 合并流式增量：同一回复只显示一个气泡，展示最新段落文本 |
+
+### 9.5.3 Runtime API 与存储
+- `GET /settings/model-provider`：返回配置（API Key 掩码为 `********`）、`hasApiKey`、`available`；
+- `PUT /settings/model-provider`：保存；API Key 为空或掩码时保持原值；校验 Base URL 协议与温度范围，写入审计链；
+- `POST /settings/model-provider/test`：以当前表单或已存配置发送 `ping`，返回成功/失败与延迟；
+- 存储：新增 `runtime_settings`（key-value）表 + `RuntimeSettingsRepository`；审计事件 `settings.model_provider.updated/test_passed/test_failed`。
+
+### 9.5.4 界面与体验
+- 设置页：模型直连卡片（供应商预设、Base URL、API Key、模型、温度、系统提示词、保存/测试连接）；
+- Agent 启动面板：Provider 下拉新增「模型直连（OpenAI 兼容）」；选中后自动切换为聊天模式并锁定传输；
+- `/agents/providers` 增加 `direct` 诊断项（是否已配置），未配置时不可选择。
+
+### 9.5.5 约束与风险
+- `provider=direct` 仅支持自动（聊天）模式，`mode=interactive` 返回 422；
+- 未配置或接口异常时任务返回 `FAILED`（`AGENT_DIRECT_*` 错误码），不影响 legacy/ACP 路径；
+- API Key 仅存本地 SQLite；返回给前端时始终掩码；
+- 对话历史仅在内存，重启 Runtime 后需新建聊天；当前不提供工具调用/权限审批。
 
 ## 10. 分阶段执行与提交顺序
 

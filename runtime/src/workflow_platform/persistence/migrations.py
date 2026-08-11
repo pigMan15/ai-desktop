@@ -1089,6 +1089,12 @@ def _migrate_knowledge_schema(db: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_knowledge_idempotency_created
             ON knowledge_idempotency_keys(created_at, scope_key);
 
+        CREATE TABLE IF NOT EXISTS runtime_settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS agent_permission_requests (
             id TEXT PRIMARY KEY,
             job_id TEXT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ProjectConcurrencySettings } from "@workflow-platform/contracts";
-import type { AgentProviderDiagnostic } from "../../app/runtimeClient";
+import type { AgentProviderDiagnostic, ModelProviderSettings, ModelProviderSettingsInput } from "../../app/runtimeClient";
 
 type Props = {
   apiBaseUrl: string;
@@ -16,6 +16,10 @@ type Props = {
   onRefreshProviderDiagnostics?: () => void;
   projectConcurrency?: ProjectConcurrencySettings | null;
   onSaveProjectConcurrency?: (settings: ProjectConcurrencySettings) => Promise<void>;
+  modelProvider?: ModelProviderSettings | null;
+  onSaveModelProvider?: (settings: ModelProviderSettingsInput) => Promise<void>;
+  onTestModelProvider?: (settings: ModelProviderSettingsInput | null) => Promise<{ ok: boolean; message: string; latencyMs?: number | null } | null>;
+  savingModelProvider?: boolean;
 };
 
 export type ManagedRuntimeStatus = {
@@ -33,6 +37,14 @@ export type RuntimeLogEntry = {
   createdAt: string;
 };
 
+const MODEL_VENDOR_PRESETS: Record<string, { baseUrl: string; model: string }> = {
+  openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  qwen: { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+  moonshot: { baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  openrouter: { baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
+};
+
 export function SettingsPage({
   apiBaseUrl,
   connection,
@@ -47,12 +59,80 @@ export function SettingsPage({
   onRefreshProviderDiagnostics,
   projectConcurrency,
   onSaveProjectConcurrency,
+  modelProvider,
+  onSaveModelProvider,
+  onTestModelProvider,
+  savingModelProvider = false,
 }: Props) {
   const connected = connection === "connected";
   const [concurrencyDraft, setConcurrencyDraft] = useState(projectConcurrency);
   const [savingConcurrency, setSavingConcurrency] = useState(false);
 
   useEffect(() => setConcurrencyDraft(projectConcurrency), [projectConcurrency]);
+
+  const [modelDraft, setModelDraft] = useState<ModelProviderSettingsInput>({
+    vendor: modelProvider?.vendor ?? "openai",
+    baseUrl: modelProvider?.baseUrl ?? "https://api.openai.com/v1",
+    apiKey: "",
+    model: modelProvider?.model ?? "gpt-4o-mini",
+    temperature: modelProvider?.temperature ?? 0.7,
+    systemPrompt: modelProvider?.systemPrompt ?? "",
+  });
+  const [testingModelProvider, setTestingModelProvider] = useState(false);
+  const [modelProviderTestResult, setModelProviderTestResult] = useState<string | null>(null);
+  const [modelProviderTestOk, setModelProviderTestOk] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setModelDraft({
+      vendor: modelProvider?.vendor ?? "openai",
+      baseUrl: modelProvider?.baseUrl ?? "https://api.openai.com/v1",
+      apiKey: "",
+      model: modelProvider?.model ?? "gpt-4o-mini",
+      temperature: modelProvider?.temperature ?? 0.7,
+      systemPrompt: modelProvider?.systemPrompt ?? "",
+    });
+  }, [modelProvider]);
+
+  const handleVendorChange = (vendor: string) => {
+    const preset = MODEL_VENDOR_PRESETS[vendor];
+    setModelDraft((current) => ({
+      ...current,
+      vendor,
+      ...(preset ? { baseUrl: preset.baseUrl, model: preset.model } : {}),
+    }));
+  };
+
+  const handleSaveModelProvider = async () => {
+    if (!onSaveModelProvider) return;
+    setModelProviderTestResult(null);
+    try {
+      await onSaveModelProvider(modelDraft);
+      setModelProviderTestResult("模型直连配置已保存");
+      setModelProviderTestOk(true);
+    } catch (error) {
+      setModelProviderTestResult(error instanceof Error ? error.message : "保存失败");
+      setModelProviderTestOk(false);
+    }
+  };
+
+  const handleTestModelProvider = async () => {
+    if (!onTestModelProvider) return;
+    setTestingModelProvider(true);
+    setModelProviderTestResult(null);
+    try {
+      const result = await onTestModelProvider(modelDraft);
+      if (result) {
+        setModelProviderTestResult(result.message);
+        setModelProviderTestOk(result.ok);
+      }
+    } catch (error) {
+      setModelProviderTestResult(error instanceof Error ? error.message : "测试失败");
+      setModelProviderTestOk(false);
+    } finally {
+      setTestingModelProvider(false);
+    }
+  };
+
 
   return (
     <section id="settings" className="panel page-workspace page-settings" aria-labelledby="settings-title">
@@ -172,6 +252,54 @@ export function SettingsPage({
           </ul>
         </>
       ) : null}
+      <fieldset className="settings-model-provider">
+        <legend>模型直连（OpenAI 兼容）</legend>
+        <p className="body-copy">配置后可在 Agent 面板选择「模型直连」并进入聊天模式，无需安装 Agent CLI。</p>
+        <label>
+          模型厂商
+          <select value={modelDraft.vendor} onChange={(event) => handleVendorChange(event.target.value)}>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="qwen">通义千问（DashScope）</option>
+            <option value="moonshot">Moonshot Kimi</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <label>
+          Base URL
+          <input value={modelDraft.baseUrl} onChange={(event) => setModelDraft({ ...modelDraft, baseUrl: event.target.value })} placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>
+          API Key
+          <input type="password" value={modelDraft.apiKey ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, apiKey: event.target.value })} placeholder={modelProvider?.hasApiKey ? "已保存（留空保持不变）" : "sk-..."} />
+        </label>
+        <label>
+          模型名称
+          <input value={modelDraft.model} onChange={(event) => setModelDraft({ ...modelDraft, model: event.target.value })} placeholder="gpt-4o-mini" />
+        </label>
+        <label>
+          温度
+          <input type="number" min={0} max={2} step={0.1} value={modelDraft.temperature ?? 0.7} onChange={(event) => setModelDraft({ ...modelDraft, temperature: Number(event.target.value) })} />
+        </label>
+        <label>
+          系统提示词
+          <textarea value={modelDraft.systemPrompt ?? ""} onChange={(event) => setModelDraft({ ...modelDraft, systemPrompt: event.target.value })} rows={2} />
+        </label>
+        <div className="button-row">
+          <button className="knowledge-button--primary" type="button" disabled={savingModelProvider || !onSaveModelProvider || !modelDraft.baseUrl.trim() || !modelDraft.model.trim()} onClick={() => void handleSaveModelProvider()}>
+            {savingModelProvider ? "保存中..." : "保存配置"}
+          </button>
+          <button className="quiet-button" type="button" disabled={testingModelProvider || !onTestModelProvider || !modelDraft.baseUrl.trim() || !modelDraft.model.trim()} onClick={() => void handleTestModelProvider()}>
+            {testingModelProvider ? "测试中..." : "测试连接"}
+          </button>
+        </div>
+        {modelProviderTestResult ? (
+          <p className={`status-line ${modelProviderTestOk ? "status-watch" : "status-blocked"}`} aria-live="polite">
+            {modelProviderTestResult}
+          </p>
+        ) : null}
+      </fieldset>
       {providerDiagnostics && providerDiagnostics.length > 0 ? (
         <>
           <div className="panel-heading">
