@@ -311,6 +311,11 @@ class CancelAgentJobRequest(BaseModel):
     actor: dict[str, Any] | None = None
     now: str | None = None
 
+class DeleteAgentJobRequest(BaseModel):
+    actor: dict[str, Any] | None = None
+    now: str | None = None
+
+
 
 class StartDeploymentRequest(BaseModel):
     nodeId: str
@@ -1322,6 +1327,15 @@ def create_app(
     @application.post("/projects/{project_id}/runs/{run_id}/agents/{job_id}/cancel")
     def cancel_project_agent_job(project_id: str, run_id: str, job_id: str, request: CancelAgentJobRequest | None = Body(default=None)) -> dict[str, Any]:
         return _require_service(runtime_service).cancel_scoped_agent_job(
+            project_id, run_id, job_id,
+            actor=request.actor if request is not None else None,
+            now=request.now if request is not None else None,
+        )
+
+    @application.delete("/projects/{project_id}/runs/{run_id}/agents/{job_id}")
+    def delete_project_agent_job(project_id: str, run_id: str, job_id: str, request: DeleteAgentJobRequest | None = Body(default=None)) -> dict[str, Any]:
+        require_runtime_available()
+        return _require_service(runtime_service).delete_scoped_agent_job(
             project_id, run_id, job_id,
             actor=request.actor if request is not None else None,
             now=request.now if request is not None else None,

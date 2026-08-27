@@ -714,7 +714,16 @@ export function App() {
     let disposed = false;
     let timer: number | undefined;
 
-    const pollAgentActivity = async () => {
+    const agentPollDelayMs = (jobs: AgentJobSummary[]): number => {
+  const hasActiveChat = jobs.some(
+    (job) =>
+      job.metadata?.conversational === true &&
+      (job.status === "QUEUED" || job.status === "RUNNING" || job.status === "AWAITING_INPUT"),
+  );
+  return hasActiveChat ? 400 : 1_500;
+};
+
+const pollAgentActivity = async () => {
       try {
         const runtimeClient = createRuntimeClient(apiBaseUrl);
         const jobs = await runtimeClient.listAgentJobs(projectId, activeRunId);
@@ -747,13 +756,13 @@ export function App() {
           };
         });
 
-        if (jobs.some((job) => job.status === "QUEUED" || job.status === "RUNNING")) {
-          timer = window.setTimeout(() => void pollAgentActivity(), 1_500);
+        if (jobs.some((job) => job.status === "QUEUED" || job.status === "RUNNING" || job.status === "AWAITING_INPUT")) {
+          timer = window.setTimeout(() => void pollAgentActivity(), agentPollDelayMs(jobs));
         }
       } catch {
         // 轮询失败不会伪造任务完成；用户可继续查看上一次可信输出。
-        if ((state?.agentJobs ?? []).some((job) => job.status === "QUEUED" || job.status === "RUNNING")) {
-          timer = window.setTimeout(() => void pollAgentActivity(), 1_500);
+        if ((state?.agentJobs ?? []).some((job) => job.status === "QUEUED" || job.status === "RUNNING" || job.status === "AWAITING_INPUT")) {
+          timer = window.setTimeout(() => void pollAgentActivity(), agentPollDelayMs(state?.agentJobs ?? []));
         }
       }
     };
@@ -1707,6 +1716,45 @@ export function App() {
     }
   }
 
+  async function handleDeleteAgent(runId: string, jobId: string) {
+    if (!runId) {
+      return;
+    }
+    try {
+      await client.deleteAgentJob(projectId, runId, jobId, now());
+      setLiveAgentOutput((current) => {
+        const next = { ...current };
+        const runOutput = { ...(next[runId] ?? {}) };
+        delete runOutput[jobId];
+        next[runId] = runOutput;
+        return next;
+      });
+      setInteractiveAgentTerminals((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
+      delete agentInputBuffersRef.current[jobId];
+      setAgentPermissionsByJob((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
+      setState((current) =>
+        current
+          ? {
+              ...current,
+              agentJobs: current.agentJobs.filter((candidate) => candidate.id !== jobId),
+              agentOutput: current.agentOutput.filter((event) => event.jobId !== jobId),
+            }
+          : current,
+      );
+      setOperationMessage(`Agent 已删除：${jobId}`);
+    } catch (error) {
+      setOperationMessage(`Agent 删除失败：${errorMessage(error)}`);
+    }
+  }
+
   async function handleStartDeployment(nodeId: string) {
     const projection = state?.projection;
     if (!projection) {
@@ -2450,6 +2498,7 @@ export function App() {
               onAgentInterrupt={(jobId) => handleAgentTerminalInput(runRoute.runId, jobId, "\u0003")}
               onAgentResize={(jobId, columns, rows) => handleAgentTerminalResize(runRoute.runId, jobId, columns, rows)}
               onStopAgent={(jobId) => handleCancelAgent(runRoute.runId, jobId)}
+              onDeleteAgent={(jobId) => handleDeleteAgent(runRoute.runId, jobId)}
               agentPermissions={agentPermissionsByJob}
               onContinueAgent={handleContinueAgent}
               onDecideAgentPermission={handleDecideAgentPermission}

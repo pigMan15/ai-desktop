@@ -1,0 +1,14 @@
+{
+  "name": "dsh-profile-workbench-poc-web",
+  "private": true,
+  "description": "Web profile for the interactive governance P0 PoC: dsh-base + dsh-web-app + the governance-poc plugin (the approval gate asks the human through the Web UI).",
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app"
+      ]
+    }
+  }
+}

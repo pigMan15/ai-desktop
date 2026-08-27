@@ -1,0 +1,7 @@
+# Bundle patch for @workflow-platform/workbench-ui.
+# When this package is listed in a profile's dsh.profile.bundles, this patch
+# mounts the browser UI plugin (client half served by dsh-client-modules in
+# web profiles; host half is a no-op placeholder elsewhere).
+- insert:
+    - id: workbench-ui
+      name: '@workflow-platform/workbench-ui'

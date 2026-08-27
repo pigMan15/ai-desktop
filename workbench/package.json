@@ -1,0 +1,21 @@
+{
+  "name": "dsh-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-contained workbench for deepseek-harness: governed workflow runs with approvals, artifacts, evidence, and a react-flow visual editor.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @workflow-platform/workbench-governance && npm run build:client --workspace @workflow-platform/workbench-ui",
+    "test": "npm run test --workspace @workflow-platform/workbench-governance",
+    "install:workbench": "powershell -ExecutionPolicy Bypass -File scripts/install.ps1",
+    "verify": "powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -SkipLlm",
+    "pack:plugins": "npm run pack:plugin --workspace @workflow-platform/workbench-governance && npm run pack:plugin --workspace @workflow-platform/workbench-ui"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

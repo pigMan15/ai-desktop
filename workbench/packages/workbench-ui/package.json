@@ -1,0 +1,43 @@
+{
+  "name": "@workflow-platform/workbench-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Workbench browser UI: keyed tool-view cards, approval inbox, engine-driven run map, react-flow visual editor, and a live sidebar panel.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build:client": "node scripts/build-client.mjs",
+    "pack:plugin": "npm pack --pack-destination ../../release-plugin"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@xyflow/react": "^12.11.2",
+    "esbuild": "^0.21.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "license": "MIT"
+}

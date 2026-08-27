@@ -67,6 +67,7 @@ export type RunDetailPageProps = {
   onAgentInterrupt(jobId: string): Promise<void> | void;
   onAgentResize(jobId: string, columns: number, rows: number): Promise<void> | void;
   onStopAgent(jobId: string): Promise<void> | void;
+  onDeleteAgent?(jobId: string): Promise<void> | void;
   agentPermissions?: Record<string, AgentPermissionRequest[]>;
   onContinueAgent?(jobId: string, message: string): Promise<void> | void;
   onDecideAgentPermission?(jobId: string, requestId: string, decision: "allow" | "deny", reason?: string): Promise<void> | void;
@@ -114,6 +115,7 @@ function RunDetailPageContent({
   onAgentInterrupt,
   onAgentResize,
   onStopAgent,
+  onDeleteAgent,
   agentPermissions,
   onContinueAgent,
   onDecideAgentPermission,
@@ -213,7 +215,18 @@ function RunDetailPageContent({
     } finally {
       if (mountedRef.current) setAgentLaunching(false);
     }
-  }, [agentMode, agentPrompt, agentProvider, onStartAgent, selectedAgentNode, selectedAgentRole?.allowedTools, state.overview]);
+  }, [
+    agentMode,
+    agentPrompt,
+    agentProvider,
+    agentTransport,
+    agentConversational,
+    agentModelProviderId,
+    onStartAgent,
+    selectedAgentNode,
+    selectedAgentRole?.allowedTools,
+    state.overview,
+  ]);
 
   const performLoad = useCallback((kind: RunDetailRequestKind) => {
     if (busyRef.current) return false;
@@ -555,6 +568,7 @@ function RunDetailPageContent({
             onInterrupt={onAgentInterrupt}
             onResize={onAgentResize}
             onStop={onStopAgent}
+            onDeleteAgent={onDeleteAgent}
             permissionsByJob={agentPermissions}
             onContinueConversation={onContinueAgent}
             onDecidePermission={onDecideAgentPermission}
@@ -637,20 +651,20 @@ function RunDetailPageContent({
                   }
                 }} disabled={agentReadOnly || agentLaunching}>{availableProviderDiagnostics.map((diagnostic) => <option key={diagnostic.id} value={diagnostic.id} disabled={!diagnostic.available}>{providerLabel(diagnostic.id)}{diagnostic.available ? "" : "（不可用）"}</option>)}</select></label>
                 <fieldset className="run-agent-mode" role="radiogroup">
-                  <legend>Agent 模式</legend>
+                  <legend>执行界面</legend>
                   <div>
                     {agentProvider === "direct" ? (
-                      <span className="run-agent-mode-note">聊天模式（模型直连，多轮对话）</span>
+                      <span className="run-agent-mode-note">聊天界面（模型直连，多轮对话）</span>
                     ) : (
                       <>
-                        <label><input type="radio" name="agent-mode" value="interactive" checked={agentMode === "interactive"} onChange={() => setAgentMode("interactive")} disabled={agentReadOnly || agentLaunching} /><span>交互式终端</span></label>
-                        <label><input type="radio" name="agent-mode" value="automatic" checked={agentMode === "automatic"} onChange={() => setAgentMode("automatic")} disabled={agentReadOnly || agentLaunching} /><span>自动执行</span></label>
+                        <label><input type="radio" name="agent-ui-mode" value="chat" checked={agentMode === "automatic" && agentConversational} onChange={() => { setAgentMode("automatic"); setAgentConversational(true); setAgentTransport(agentProvider === "codex" ? "app-server" : "acp"); }} disabled={agentReadOnly || agentLaunching} /><span>{agentProvider === "codex" ? "聊天界面（多轮 + 命令执行 + 审批）" : "聊天界面（多轮，需 ACP）"}</span></label>
+                        <label><input type="radio" name="agent-ui-mode" value="interactive" checked={agentMode === "interactive"} onChange={() => { setAgentMode("interactive"); setAgentConversational(false); if (agentTransport === "app-server" || agentTransport === "acp") setAgentTransport("auto"); }} disabled={agentReadOnly || agentLaunching} /><span>终端界面</span></label>
+                        <label><input type="radio" name="agent-ui-mode" value="batch" checked={agentMode === "automatic" && !agentConversational} onChange={() => { setAgentMode("automatic"); setAgentConversational(false); if (agentTransport === "app-server" || agentTransport === "acp") setAgentTransport("auto"); }} disabled={agentReadOnly || agentLaunching} /><span>后台一次性</span></label>
                       </>
                     )}
                   </div>
                 </fieldset>
-                <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct" | "app-server")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>
-                <label className="run-agent-conversational"><input type="checkbox" checked={agentConversational} onChange={(event) => { setAgentConversational(event.target.checked); if (event.target.checked) setAgentTransport(agentProvider === "codex" ? "app-server" : "acp"); }} disabled={agentReadOnly || agentLaunching || agentMode !== "automatic" || agentProvider === "direct"} /><span>{agentProvider === "direct" ? "聊天模式（模型直连自动开启）" : agentProvider === "codex" ? "聊天模式（多轮 + 命令执行 + 审批）" : "聊天模式（多轮，需 ACP）"}</span></label>
+                <label className="run-agent-transport">Agent 传输<select value={agentTransport} onChange={(event) => setAgentTransport(event.target.value as "auto" | "cli" | "acp" | "direct" | "app-server")} disabled={agentReadOnly || agentLaunching || agentProvider === "direct"}><option value="auto">自动</option><option value="app-server">Codex app-server</option><option value="cli">CLI（legacy）</option><option value="acp">ACP</option><option value="direct">模型直连</option></select></label>
 
                 {agentProvider === "direct" ? (
                   <label className="run-agent-model-service">模型服务<select value={agentModelProviderId ?? ""} onChange={(event) => setAgentModelProviderId(event.target.value || null)} disabled={agentReadOnly || agentLaunching || !modelProviders?.length}><option value="">默认服务</option>{modelProviders?.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}{provider.isDefault ? "（默认）" : ""}</option>)}</select></label>

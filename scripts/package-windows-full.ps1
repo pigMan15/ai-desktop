@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $output = Join-Path $root "release-full"
-$zipPath = Join-Path $output "AI Workflow Platform 0.1.0-win-unpacked.zip"
+$zipPath = Join-Path $output "AI Workflow Platform 0.1.1-win-unpacked.zip"
 $configuredBuilderMirror = -not [string]::IsNullOrWhiteSpace($env:ELECTRON_BUILDER_BINARIES_MIRROR)
 if (-not $configuredBuilderMirror) {
   $env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://mirrors.huaweicloud.com/electron-builder-binaries/"
@@ -25,7 +25,7 @@ try {
     } catch {
       $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
       $output = Join-Path $root "release-full-$stamp"
-      $zipPath = Join-Path $output "AI Workflow Platform 0.1.0-win-unpacked.zip"
+      $zipPath = Join-Path $output "AI Workflow Platform 0.1.1-win-unpacked.zip"
     }
   }
 

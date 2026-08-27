@@ -59,6 +59,7 @@ export type AgentChatMessage = {
   kind: "message" | "user" | "permission" | "turn" | "error" | "tool";
   text: string;
   tool?: AgentChatTool;
+  createdAt?: string;
 };
 
 export function isConversationalJob(job: AgentJobSummary): boolean {
@@ -72,6 +73,7 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
     return {
       sequence: event.sequence,
       kind: "permission" as const,
+      createdAt: event.createdAt,
       text: "权限请求" + (status ? "（" + status + "）" : "") + (target ? "：" + target : ""),
     };
   }
@@ -79,6 +81,7 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
     return {
       sequence: event.sequence,
       kind: "user" as const,
+      createdAt: event.createdAt,
       text: typeof event.payload.text === "string" ? event.payload.text : "",
     };
   }
@@ -86,6 +89,7 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
     return {
       sequence: event.sequence,
       kind: "turn" as const,
+      createdAt: event.createdAt,
       text: typeof event.payload.text === "string" ? event.payload.text : "",
     };
   }
@@ -93,6 +97,7 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
     return {
       sequence: event.sequence,
       kind: "error" as const,
+      createdAt: event.createdAt,
       text: typeof event.payload.text === "string" ? event.payload.text : "??????",
     };
   }
@@ -103,6 +108,7 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
     return {
       sequence: event.sequence,
       kind: "tool" as const,
+      createdAt: event.createdAt,
       text,
       tool: {
         title,
@@ -115,6 +121,7 @@ function mapChatEvent(event: AgentOutputSummary): AgentChatMessage {
   return {
     sequence: event.sequence,
     kind: "message" as const,
+    createdAt: event.createdAt,
     text: typeof event.payload.text === "string" ? event.payload.text : persistedData(event),
   };
 }
@@ -140,9 +147,10 @@ export function agentChatMessages(
   // renders as one bubble with the full text.
   const streamDeltas = new Map<string, string[]>();
   const streamFirstSequence = new Map<string, number>();
+  const streamFirstCreatedAt = new Map<string, string>();
   // Tool/command executions share an itemId (item.started + item.completed);
   // keep one block per command and let the latest event win (running -> completed).
-  const toolByItem = new Map<string, { sequence: number; message: AgentChatMessage }>();
+  const toolByItem = new Map<string, { sequence: number; createdAt?: string; message: AgentChatMessage }>();
   const standalone: AgentOutputSummary[] = [];
   for (const event of events) {
     const messageId =
@@ -155,6 +163,7 @@ export function agentChatMessages(
         deltas = [];
         streamDeltas.set(messageId, deltas);
         streamFirstSequence.set(messageId, event.sequence);
+        streamFirstCreatedAt.set(messageId, event.createdAt);
       }
       deltas.push(typeof event.payload.text === "string" ? event.payload.text : "");
     } else if (event.kind === "tool" && typeof event.payload.itemId === "string" && event.payload.itemId) {
@@ -164,6 +173,7 @@ export function agentChatMessages(
       if (!existing || event.sequence > existing.sequence) {
         toolByItem.set(itemId, {
           sequence: existing ? existing.sequence : event.sequence,
+          createdAt: existing?.createdAt ?? event.createdAt,
           message: mapped,
         });
       }
@@ -177,12 +187,15 @@ export function agentChatMessages(
     const sequence = streamFirstSequence.get(messageId) ?? 0;
     items.push({
       sequence,
-      message: { sequence, kind: "message", text: deltas.join("") },
+      message: { sequence, kind: "message", text: deltas.join(""), createdAt: streamFirstCreatedAt.get(messageId) },
     });
   }
   for (const [itemId, entry] of toolByItem) {
     void itemId;
-    items.push({ sequence: entry.sequence, message: entry.message });
+    items.push({
+      sequence: entry.sequence,
+      message: entry.createdAt ? { ...entry.message, createdAt: entry.createdAt } : entry.message,
+    });
   }
   for (const event of standalone) {
     items.push({ sequence: event.sequence, message: mapChatEvent(event) });

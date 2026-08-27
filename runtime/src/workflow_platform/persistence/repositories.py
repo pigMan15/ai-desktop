@@ -1784,6 +1784,26 @@ class AgentJobRepository:
         ).fetchone()
         return int(row["c"])
 
+    def delete(self, id: str) -> bool:
+        """Delete an agent job and all of its dependent rows.
+
+        Dependent rows (output events, checkpoints, sessions + session inputs,
+        permission requests) are removed explicitly so the delete works even
+        when SQLite foreign keys are disabled. Artifact consumer rows keep the
+        artifact but drop the agent reference.
+        """
+        self._db.execute("DELETE FROM agent_permission_requests WHERE job_id = ?", (id,))
+        self._db.execute(
+            "DELETE FROM agent_input_events WHERE session_id IN (SELECT id FROM agent_sessions WHERE job_id = ?)",
+            (id,),
+        )
+        self._db.execute("DELETE FROM agent_checkpoints WHERE job_id = ?", (id,))
+        self._db.execute("DELETE FROM agent_sessions WHERE job_id = ?", (id,))
+        self._db.execute("DELETE FROM agent_output_events WHERE job_id = ?", (id,))
+        self._db.execute("UPDATE artifact_consumers SET agent_job_id = NULL WHERE agent_job_id = ?", (id,))
+        cursor = self._db.execute("DELETE FROM agent_jobs WHERE id = ?", (id,))
+        return bool(cursor.rowcount)
+
     def set_metadata(self, id: str, *, metadata: dict, updated_at: str) -> None:
         self._db.execute(
             "UPDATE agent_jobs SET metadata_json = ?, updated_at = ? WHERE id = ?",

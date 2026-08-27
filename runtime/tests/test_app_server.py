@@ -291,3 +291,77 @@ def test_agent_conversation_app_server_requires_codex_provider(tmp_path) -> None
     )
     assert started.status_code == 422
     assert started.json()["code"] == "AGENT_APP_SERVER_UNAVAILABLE"
+
+def test_agent_conversation_app_server_cancel_after_executor_loss(tmp_path) -> None:
+    # Runtime 重启后执行器丢失，AWAITING_INPUT 仍应可以终止
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(
+        db,
+        agent_provider_factory=lambda _provider: FakeProvider(),
+        app_server_factory=_make_app_server_executor,
+    )
+    client = TestClient(create_app(service))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    started = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "codex",
+            "prompt": "第一轮",
+            "transport": "app-server",
+            "conversational": True,
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert started.status_code == 200, started.text
+    job_id = started.json()["id"]
+    job_path = f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}"
+    _wait_status(client, run, job_id, {"AWAITING_INPUT", "COMPLETED", "FAILED", "CANCELLED"})
+    service._agent_executors.pop(job_id, None)
+    cancelled = client.post(f"{job_path}/cancel", json={"actor": HUMAN_ACTOR, "now": NOW})
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "CANCELLED"
+
+
+def test_agent_job_delete_removes_all_records(tmp_path) -> None:
+    db = connect(tmp_path / "workflow.db")
+    migrate(db)
+    service = WorkflowRuntimeService(
+        db,
+        agent_provider_factory=lambda _provider: FakeProvider(),
+        app_server_factory=_make_app_server_executor,
+    )
+    client = TestClient(create_app(service))
+    _project_path, run = import_project_and_create_run(client, tmp_path)
+    started = client.post(
+        f"/projects/{run['projectId']}/runs/{run['runId']}/agents",
+        json={
+            "nodeId": "plan",
+            "provider": "codex",
+            "prompt": "单轮",
+            "transport": "app-server",
+            "conversational": True,
+            "actor": AGENT_ACTOR,
+            "now": NOW,
+        },
+    )
+    assert started.status_code == 200, started.text
+    job_id = started.json()["id"]
+    job_path = f"/projects/{run['projectId']}/runs/{run['runId']}/agents/{job_id}"
+    detail = _wait_status(client, run, job_id, {"AWAITING_INPUT", "COMPLETED", "FAILED", "CANCELLED"})
+    assert detail["status"] == "AWAITING_INPUT", detail
+
+    deleted = client.request(
+        "DELETE",
+        job_path,
+        json={"actor": HUMAN_ACTOR, "now": NOW},
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {"jobId": job_id, "deleted": True}
+    assert client.get(job_path).status_code == 404
+    assert client.get(f"{job_path}/output").status_code == 404
+    assert service._agent_jobs.list_output(job_id) == []
+    assert service._agent_sessions.get_for_job(job_id) is None
+    assert service._agent_executors.get(job_id) is None

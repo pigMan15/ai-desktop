@@ -216,3 +216,30 @@ describe("agentChatMessages tool execution blocks", () => {
     expect(messages[0].tool?.status).toBe("running");
   });
 });
+
+
+describe("agentChatMessages timestamps", () => {
+  it("carries createdAt on user and streamed assistant messages", () => {
+    const persisted: AgentOutputSummary[] = [
+      { id: "a1", jobId: "job-ts", sequence: 1, kind: "chat.user", payload: { text: "hi" }, createdAt: "2026-08-12T01:02:03Z" },
+      { id: "a2", jobId: "job-ts", sequence: 2, kind: "acp.message", payload: { text: "he", messageId: "m1" }, createdAt: "2026-08-12T01:02:04Z" },
+      { id: "a3", jobId: "job-ts", sequence: 3, kind: "acp.message", payload: { text: "llo", messageId: "m1" }, createdAt: "2026-08-12T01:02:05Z" },
+    ];
+    const messages = agentChatMessages("job-ts", persisted);
+    expect(messages[0].kind).toBe("user");
+    expect(messages[0].createdAt).toBe("2026-08-12T01:02:03Z");
+    expect(messages[1].kind).toBe("message");
+    expect(messages[1].text).toBe("hello");
+    expect(messages[1].createdAt).toBe("2026-08-12T01:02:04Z");
+  });
+
+  it("keeps the first tool event timestamp when merging by itemId", () => {
+    const persisted: AgentOutputSummary[] = [
+      { id: "t1", jobId: "job-tool-ts", sequence: 1, kind: "tool", payload: { itemId: "item_0", title: "cmd", status: "running", text: "" }, createdAt: "2026-08-12T02:00:00Z" },
+      { id: "t2", jobId: "job-tool-ts", sequence: 2, kind: "tool", payload: { itemId: "item_0", title: "cmd", status: "completed", text: "ok" }, createdAt: "2026-08-12T02:00:05Z" },
+    ];
+    const messages = agentChatMessages("job-tool-ts", persisted);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].createdAt).toBe("2026-08-12T02:00:00Z");
+  });
+});

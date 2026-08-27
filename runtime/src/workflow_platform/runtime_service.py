@@ -1069,6 +1069,42 @@ class WorkflowRuntimeService:
         self.get_scoped_agent_job(project_id, run_id, job_id)
         return self.list_agent_output(job_id, after_sequence=after_sequence)
 
+    def delete_scoped_agent_job(
+        self, project_id: str, run_id: str, job_id: str, *, actor: dict | None = None, now: str | None = None
+    ) -> dict:
+        self.get_scoped_agent_job(project_id, run_id, job_id)
+        return self.delete_agent_job(run_id, job_id, actor=actor, now=now)
+
+    def delete_agent_job(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        actor: dict | None = None,
+        now: str | None = None,
+    ) -> dict:
+        """删除 Agent 任务及其全部记录；活动任务先终止再删除。"""
+        job = self.get_agent_job(run_id, job_id)
+        human_actor = require_trusted_human(actor or {}, operation="删除 Agent 任务")
+        effective_now = now or _now()
+        if job["status"] in {"QUEUED", "RUNNING", "AWAITING_INPUT"}:
+            self.cancel_agent_job(run_id, job_id, actor=actor, now=effective_now)
+        with self._lock, self._db:
+            deleted = self._agent_jobs.delete(job_id)
+            self._db.commit()
+        self._agent_executors.pop(job_id, None)
+        self._interactive_desktop_sessions.pop(job_id, None)
+        self._audit.record(
+            actor=human_actor,
+            action="agent.job.deleted",
+            resource=f"agent-job:{job_id}",
+            detail={"runId": run_id},
+            created_at=effective_now,
+        )
+        if not deleted:
+            raise KeyError(f"Agent job not found: {job_id}")
+        return {"jobId": job_id, "deleted": True}
+
     def cancel_scoped_agent_job(self, project_id: str, run_id: str, job_id: str, *, actor: dict | None = None, now: str | None = None) -> dict:
         self.get_scoped_agent_job(project_id, run_id, job_id)
         return self.cancel_agent_job(run_id, job_id, actor=actor, now=now)
@@ -4593,45 +4629,59 @@ class WorkflowRuntimeService:
                 self._agent_executors.pop(job_id, None)
                 job = self.get_agent_job(run_id, job_id)
             return job
-        if job["mode"] != "interactive" or job["status"] not in {"QUEUED", "RUNNING"}:
+        # 内存执行器丢失（如 Runtime 重启）：活动任务仍应可以终止。
+        if job["status"] not in {"QUEUED", "RUNNING", "AWAITING_INPUT"}:
             return job
+        if job["mode"] == "interactive":
+            human_actor = require_trusted_human(actor or {}, operation="取消交互式 Agent 会话")
+            if not now:
+                raise ValueError("AGENT_INTERACTIVE_SESSION_INVALID: cancellation time is required")
 
-        human_actor = require_trusted_human(actor or {}, operation="取消交互式 Agent 会话")
-        if not now:
-            raise ValueError("AGENT_INTERACTIVE_SESSION_INVALID: cancellation time is required")
-
+            with self._lock, self._db:
+                current_job, session = self._interactive_job_and_session(run_id, job_id)
+                if current_job["status"] not in {"QUEUED", "RUNNING"} or session["status"] not in {
+                    "QUEUED",
+                    "RUNNING",
+                }:
+                    return current_job
+                self._agent_sessions.finish(
+                    id=session["id"],
+                    status="CANCELLED",
+                    recovery_reason=None,
+                    ended_at=now,
+                )
+                self._agent_jobs.finish(
+                    id=job_id,
+                    status="CANCELLED",
+                    summary="交互式 Agent 会话已取消",
+                    error=None,
+                    updated_at=now,
+                )
+                self._audit.record(
+                    actor=human_actor,
+                    action="agent.interactive.session.cancelled",
+                    resource=f"agent-session:{session['id']}",
+                    detail={"runId": run_id, "jobId": job_id},
+                    created_at=now,
+                )
+                cancelled = self._agent_jobs.get(job_id)
+            if cancelled is None:
+                raise KeyError(f"Agent job not found: {job_id}")
+            self._interactive_desktop_sessions.pop(job_id, None)
+            return cancelled
+        # 自动模式 / 聊天任务：无执行器也直接终态化
+        effective_now = now or _now()
         with self._lock, self._db:
-            current_job, session = self._interactive_job_and_session(run_id, job_id)
-            if current_job["status"] not in {"QUEUED", "RUNNING"} or session["status"] not in {
-                "QUEUED",
-                "RUNNING",
-            }:
-                return current_job
-            self._agent_sessions.finish(
-                id=session["id"],
-                status="CANCELLED",
-                recovery_reason=None,
-                ended_at=now,
-            )
             self._agent_jobs.finish(
                 id=job_id,
                 status="CANCELLED",
-                summary="交互式 Agent 会话已取消",
-                error=None,
-                updated_at=now,
+                summary=None,
+                error="AGENT_CANCELLED: agent job cancelled",
+                updated_at=effective_now,
             )
-            self._audit.record(
-                actor=human_actor,
-                action="agent.interactive.session.cancelled",
-                resource=f"agent-session:{session['id']}",
-                detail={"runId": run_id, "jobId": job_id},
-                created_at=now,
-            )
-            cancelled = self._agent_jobs.get(job_id)
-        if cancelled is None:
-            raise KeyError(f"Agent job not found: {job_id}")
-        self._interactive_desktop_sessions.pop(job_id, None)
-        return cancelled
+            self._agent_permissions.expire_pending_for_job(job_id, expired_at=effective_now)
+            self._db.commit()
+        return self.get_agent_job(run_id, job_id)
 
     def start_deployment(
         self,

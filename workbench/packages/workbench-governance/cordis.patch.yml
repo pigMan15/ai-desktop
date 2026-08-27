@@ -1,0 +1,6 @@
+# Bundle patch for @workflow-platform/workbench-governance.
+# When this package is listed in a profile's dsh.profile.bundles, this patch
+# auto-mounts the governance plugin — no manual profile patch needed.
+- insert:
+    - id: governance-poc
+      name: '@workflow-platform/workbench-governance'

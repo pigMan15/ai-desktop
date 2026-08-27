@@ -62,6 +62,47 @@ describe("AgentChatView", () => {
       />,
     );
     expect(screen.getByLabelText("聊天输入")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "允许" })).not.toBeDisabled();
+  });
+});
+
+
+it("renders avatars and timestamps for messages", () => {
+  const withTime = [
+    { sequence: 1, kind: "message" as const, text: "hello", createdAt: "2026-08-12T01:02:00Z" },
+    { sequence: 2, kind: "user" as const, text: "hi", createdAt: "2026-08-12T01:03:00Z" },
+  ];
+  render(
+    <AgentChatView
+      jobLabel="fake ? job-1"
+      messages={withTime}
+      permissions={[]}
+      disabled={true}
+      onSend={vi.fn()}
+      onDecide={vi.fn()}
+    />,
+  );
+  expect(document.querySelectorAll(".agent-chat-avatar")).toHaveLength(2);
+  expect(document.querySelectorAll(".agent-chat-time")).toHaveLength(2);
+  expect(screen.getByText("hello")).toBeInTheDocument();
+  expect(screen.getByText("hi")).toBeInTheDocument();
+});
+
+
+describe("AgentChatView permission decisions", () => {
+  it("disables approval decisions when permissionDisabled", () => {
+    render(
+      <AgentChatView
+        jobLabel="fake · job-1"
+        messages={messages}
+        permissions={permissions}
+        disabled={false}
+        permissionDisabled={true}
+        onSend={vi.fn()}
+        onDecide={vi.fn()}
+      />,
+    );
     expect(screen.getByRole("button", { name: "允许" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeDisabled();
   });
 });

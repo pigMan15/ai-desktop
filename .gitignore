@@ -1,4 +1,6 @@
 ﻿.worktrees/
+.workbench-poc/
+workbench/.workbench-poc/
 node_modules/
 dist/
 build/

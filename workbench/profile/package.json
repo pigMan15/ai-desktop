@@ -1,0 +1,14 @@
+{
+  "name": "dsh-profile-workbench-poc",
+  "private": true,
+  "description": "Headless profile for the governance P0 PoC: dsh-base + dsh-headless + the governance-poc plugin.",
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-headless"
+      ]
+    }
+  }
+}

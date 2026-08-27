@@ -1,0 +1,10 @@
+# User patch layer for the workbench-poc profile.
+# Mounts the governance plugin (insert form — `- insert:` adds NEW plugins,
+# while a bare `- id:` row would try to patch an existing entry).
+# The plugin name resolves from the profile's own node_modules (installed by
+# scripts/bootstrap.ps1 from packages/workbench-governance/dist); its
+# @deepseek-ai/* imports resolve through the auto-healed
+# $DSH_HOME/profiles/node_modules fallback.
+- insert:
+    - id: governance-poc
+      name: '@workflow-platform/workbench-governance'

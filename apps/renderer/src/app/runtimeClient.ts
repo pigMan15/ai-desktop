@@ -157,6 +157,11 @@ export type WorkflowCreateResult = {
   isBuiltin: boolean;
 };
 
+export type AgentJobDeleteResult = {
+  jobId: string;
+  deleted: boolean;
+};
+
 export type AgentJobSummary = {
   id: string;
   runId: string;
@@ -1369,6 +1374,13 @@ export function createRuntimeClient(apiBaseUrl: string) {
         `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}/cancel`,
         now ? { body: { actor: HUMAN_ACTOR, now }, signal } : { method: "POST", signal },
       ),
+    deleteAgentJob: (projectId: string, runId: string, jobId: string, now?: string, signal?: AbortSignal) =>
+      request<AgentJobDeleteResult>(
+        apiBaseUrl,
+        `${scopedRunPath(projectId, runId)}/agents/${encodeURIComponent(jobId)}`,
+        { method: "DELETE", body: { actor: HUMAN_ACTOR, now: now ?? new Date().toISOString() }, signal },
+      ),
+
   };
 }
 
@@ -1381,7 +1393,7 @@ function readRuntimeConfig() {
 }
 
 type RuntimeRequestOptions = {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -1542,7 +1554,7 @@ function getDesktopRuntimeBridge():
   | {
       request(options: {
         path: string;
-        method?: "GET" | "POST";
+        method?: "GET" | "POST" | "PUT" | "DELETE";
         body?: unknown;
         headers?: Record<string, string>;
       }): Promise<unknown>;
@@ -1555,7 +1567,7 @@ function getDesktopRuntimeBridge():
     workflowRuntime?: {
       request?: (options: {
         path: string;
-        method?: "GET" | "POST";
+        method?: "GET" | "POST" | "PUT" | "DELETE";
         body?: unknown;
         headers?: Record<string, string>;
       }) => Promise<unknown>;

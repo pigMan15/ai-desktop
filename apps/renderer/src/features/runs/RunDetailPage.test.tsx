@@ -109,9 +109,9 @@ describe("RunDetailPage", () => {
       const debugRegions = screen.getAllByRole("region").map((region) => region.getAttribute("aria-label"));
   console.log("DEBUG_REGIONS", JSON.stringify(debugRegions));
 const agentRegion = await screen.findByRole("region", { name: "Agent 执行" });
-    const mode = within(agentRegion).getByRole("radiogroup", { name: "Agent 模式" });
-    expect(within(mode).getByRole("radio", { name: "交互式终端" })).toBeChecked();
-    expect(within(mode).getByRole("radio", { name: "自动执行" })).not.toBeChecked();
+    const mode = within(agentRegion).getByRole("radiogroup", { name: "执行界面" });
+    expect(within(mode).getByRole("radio", { name: "终端界面" })).toBeChecked();
+    expect(within(mode).getByRole("radio", { name: "后台一次性" })).not.toBeChecked();
     expect(within(agentRegion).queryByRole("textbox", { name: "执行工作区" })).not.toBeInTheDocument();
     expect(within(agentRegion).getByText("G:\\project\\release")).toBeInTheDocument();
     expect(within(agentRegion).getByText("Developer")).toBeInTheDocument();
@@ -144,6 +144,51 @@ const agentRegion = await screen.findByRole("region", { name: "Agent 执行" });
       "true",
     );
     expect(screen.queryByRole("link", { name: /打开 Agent 终端/ })).not.toBeInTheDocument();
+  });
+
+  it("starts Codex chat mode through app-server so it can keep a conversation and execute commands", async () => {
+    const startedJob = agentJob("job-new", "AWAITING_INPUT");
+    const onStartAgent = vi.fn().mockResolvedValue(startedJob);
+    const agentWorkflow = workflowDefinition();
+    agentWorkflow.roles = [{
+      id: "developer",
+      name: "Developer",
+      provider: "codex",
+      allowedTools: ["read", "edit"],
+    }];
+    renderPage({
+      overview: overview({ workflow: agentWorkflow }),
+      agentJobs: [],
+      onStartAgent,
+      providerDiagnostics: [
+        { id: "codex", executable: "codex", available: true, path: "C:\\bin\\codex.exe", version: "1.0", message: "available" },
+      ],
+    });
+
+    await screen.findByRole("region", { name: "Agent 执行" });
+    const agentRegion = document.querySelector<HTMLElement>(".run-agent-command");
+    expect(agentRegion).not.toBeNull();
+    const controls = agentRegion!;
+    const chatMode = controls.querySelector<HTMLInputElement>('input[name="agent-ui-mode"][value="chat"]');
+    const prompt = controls.querySelector<HTMLTextAreaElement>(".run-agent-prompt textarea");
+    const startButton = controls.querySelector<HTMLButtonElement>(".run-agent-start");
+    expect(chatMode).not.toBeNull();
+    expect(prompt).not.toBeNull();
+    expect(startButton).not.toBeNull();
+
+    fireEvent.click(chatMode!);
+    fireEvent.change(prompt!, { target: { value: "List files and run tests" } });
+    fireEvent.click(startButton!);
+
+    await waitFor(() =>
+      expect(onStartAgent).toHaveBeenCalledWith(expect.objectContaining({
+        provider: "codex",
+        mode: "automatic",
+        transport: "app-server",
+        conversational: true,
+        modelProviderId: null,
+      })),
+    );
   });
 
   it("switches Agent Job tabs and forwards input to the selected Job", async () => {
@@ -923,7 +968,7 @@ it("selecting direct transport switches provider and enables chat mode", async (
     expect(within(agentRegion).getByLabelText("Agent Provider")).toHaveValue("direct"),
   );
   await waitFor(() =>
-    expect(within(agentRegion).getByLabelText(/聊天模式/)).toBeChecked(),
+    expect(within(agentRegion).getByText("聊天界面（模型直连，多轮对话）")).toBeInTheDocument(),
   );
   await waitFor(() =>
     expect(within(agentRegion).getByLabelText("模型服务")).toHaveValue("mp-1"),
@@ -942,4 +987,3 @@ it("selecting direct transport switches provider and enables chat mode", async (
     ),
   );
 });
-

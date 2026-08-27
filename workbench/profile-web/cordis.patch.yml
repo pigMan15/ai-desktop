@@ -1,0 +1,8 @@
+# User patch layer for the workbench-poc-web profile.
+# Mounts the governance plugin (host) plus the workbench browser UI
+# (client-only: keyed tool-view cards for the workflow_* tools).
+- insert:
+    - id: governance-poc
+      name: '@workflow-platform/workbench-governance'
+    - id: workbench-ui
+      name: '@workflow-platform/workbench-ui'

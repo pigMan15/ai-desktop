@@ -1,0 +1,100 @@
+# CI for the DSH workbench (self-contained repo layout).
+#
+# engine-test   — deterministic engine test (no LLM, no secrets); runs on every
+#                 push/PR. Needs no DSH_HOME or credentials.
+# llm-scenarios — the headless LLM demo scenarios against the real dsh CLI;
+#                 manual dispatch only, requires the DEEPSEEK_API_KEY secret.
+#                 Creates a throwaway DSH_HOME from that secret.
+#
+# Usage notes:
+#   - The dsh CLI is installed globally (`npm i -g @deepseek-ai/dsh`) so it is
+#     on PATH; verify/demo take -DshBin "dsh".
+#   - Windows runner matches the project's target platform.
+
+name: workbench
+
+on:
+  push:
+    paths:
+      - "packages/**"
+      - "scripts/**"
+      - "profile/**"
+      - "profile-web/**"
+      - "package.json"
+      - "package-lock.json"
+  pull_request:
+    paths:
+      - "packages/**"
+      - "scripts/**"
+      - "profile/**"
+      - "profile-web/**"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch: {}
+
+jobs:
+  engine-test:
+    name: Engine test (deterministic, no LLM)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build governance plugin + UI bundle
+        run: npm.cmd run build
+
+      - name: Run engine test
+        run: npm.cmd run test
+
+  llm-scenarios:
+    name: LLM demo scenarios (headless)
+    runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch'
+    needs: engine-test
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install dsh CLI globally
+        run: npm.cmd install -g @deepseek-ai/dsh
+
+      - name: Build governance plugin + UI bundle
+        run: npm.cmd run build
+
+      - name: Create throwaway real DSH home from the secret
+        shell: pwsh
+        run: |
+          $tmpHome = Join-Path $env:RUNNER_TEMP "dsh-real-home"
+          New-Item -ItemType Directory -Force -Path $tmpHome | Out-Null
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText(
+            (Join-Path $tmpHome "settings.yaml"),
+            "ui-onboarding:`n  welcomeNoticeVersion: ci`nagent-default-model:`n  provider: deepseek-official`n  model: deepseek-v4-flash`n  reasoningEffort: high`n",
+            $utf8NoBom)
+          [System.IO.File]::WriteAllText(
+            (Join-Path $tmpHome ".credentials.yaml"),
+            "DEEPSEEK_API_KEY: $env:DEEPSEEK_API_KEY`n",
+            $utf8NoBom)
+          Write-Host "created throwaway DSH home at $tmpHome"
+
+      - name: Run all LLM demo scenarios
+        shell: pwsh
+        run: |
+          $tmpHome = Join-Path $env:RUNNER_TEMP "dsh-real-home"
+          powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -RealDshHome $tmpHome -DshBin "dsh"

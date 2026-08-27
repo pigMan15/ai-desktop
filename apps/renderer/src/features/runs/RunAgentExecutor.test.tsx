@@ -144,3 +144,28 @@ describe("RunAgentExecutor", () => {
     );
   });
 });
+
+  it("shows an end-session button for AWAITING_INPUT chat jobs", () => {
+    const awaiting = { ...job("job-awaiting", "AWAITING_INPUT", "automatic"), metadata: { conversational: true } };
+    const props = {
+      ...baseProps(),
+      jobs: [awaiting],
+      selectedJobId: "job-awaiting",
+    };
+    render(<RunAgentExecutor {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "结束会话" }));
+    expect(props.onStop).toHaveBeenCalledWith("job-awaiting");
+  });
+
+  it("requires a second click to delete an agent", () => {
+    const props = {
+      ...baseProps(),
+      onDeleteAgent: vi.fn(),
+    };
+    render(<RunAgentExecutor {...props} selectedJobId="job-completed-claude" />);
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(props.onDeleteAgent).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "确认删除？" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认删除？" }));
+    expect(props.onDeleteAgent).toHaveBeenCalledWith("job-completed-claude");
+  });

@@ -1,0 +1,16 @@
+# 忽略本地运行时目录（含 DEEPSEEK_API_KEY 副本，勿提交）
+.workbench-poc/
+
+# build artifacts
+node_modules/
+dist/
+build/
+release-plugin/
+
+# test debris
+test-results/
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+.pytest_cache/

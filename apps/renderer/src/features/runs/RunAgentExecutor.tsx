@@ -26,6 +26,7 @@ export type RunAgentExecutorProps = {
   onInterrupt(jobId: string): Promise<void> | void;
   onResize(jobId: string, columns: number, rows: number): Promise<void> | void;
   onStop(jobId: string): Promise<void> | void;
+  onDeleteAgent?(jobId: string): Promise<void> | void;
   permissionsByJob?: Record<string, AgentPermissionRequest[]>;
   onContinueConversation?(jobId: string, message: string): Promise<void> | void;
   onDecidePermission?(jobId: string, requestId: string, decision: "allow" | "deny", reason?: string): Promise<void> | void;
@@ -67,6 +68,7 @@ export function RunAgentExecutor({
   onInterrupt,
   onResize,
   onStop,
+  onDeleteAgent,
   permissionsByJob,
   onContinueConversation,
   onDecidePermission,
@@ -76,6 +78,7 @@ export function RunAgentExecutor({
   const selectedJob = selectAgentJob(jobs, selectedJobId);
   const identities = agentIdentities(jobs.map((job) => job.id));
   const [view, setView] = useState<"chat" | "terminal">("terminal");
+  const [confirmDeleteJobId, setConfirmDeleteJobId] = useState<string | null>(null);
   const viewLockedRef = useRef(false);
   const conversational = Boolean(selectedJob && isConversationalJob(selectedJob));
 
@@ -103,6 +106,10 @@ export function RunAgentExecutor({
 
   const sessionState = sessionStateByJob[selectedJob.id];
   const active = selectedJob.status === "QUEUED" || selectedJob.status === "RUNNING";
+  const stoppable =
+    selectedJob.status === "QUEUED" ||
+    selectedJob.status === "RUNNING" ||
+    selectedJob.status === "AWAITING_INPUT";
   const writable = Boolean(
     selectedJob.mode === "interactive" && active && sessionState?.writable,
   );
@@ -189,9 +196,26 @@ export function RunAgentExecutor({
               {showFullScreenLink && !fullScreen ? (
                 <a href={buildRunAgentExecutorHash(runId, selectedJob.id)}>全屏执行器</a>
               ) : null}
-              {active ? (
+              {stoppable ? (
                 <button type="button" className="danger-button" onClick={() => onStop(selectedJob.id)}>
-                  停止 Agent
+                  {selectedJob.status === "AWAITING_INPUT" ? "结束会话" : "停止 Agent"}
+                </button>
+              ) : null}
+              {onDeleteAgent ? (
+                <button
+                  type="button"
+                  className="quiet-button"
+                  onClick={() => {
+                    if (confirmDeleteJobId === selectedJob.id) {
+                      setConfirmDeleteJobId(null);
+                      void onDeleteAgent(selectedJob.id);
+                    } else {
+                      setConfirmDeleteJobId(selectedJob.id);
+                    }
+                  }}
+                  onBlur={() => setConfirmDeleteJobId(null)}
+                >
+                  {confirmDeleteJobId === selectedJob.id ? "确认删除？" : "删除"}
                 </button>
               ) : null}
             </div>
@@ -204,6 +228,11 @@ export function RunAgentExecutor({
               messages={agentChatMessages(selectedJob.id, persistedOutput)}
               permissions={permissionsByJob?.[selectedJob.id] ?? []}
               disabled={selectedJob.status !== "AWAITING_INPUT"}
+              permissionDisabled={
+                selectedJob.status === "COMPLETED" ||
+                selectedJob.status === "FAILED" ||
+                selectedJob.status === "CANCELLED"
+              }
               onSend={(message) =>
                 onContinueConversation
                   ? onContinueConversation(selectedJob.id, message)
