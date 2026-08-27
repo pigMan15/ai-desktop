@@ -1,5 +1,7 @@
 # DSH Workbench
 
+默认语言：中文。English version: [README.en.md](README.en.md)
+
 在 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 之上构建的**受治理 AI 工程工作流工作台**：
 DSH 插件（host + browser）实现事件溯源 Run、审批/产物/证据治理、运行时模板库与 react-flow 可视化编排编辑器。
 

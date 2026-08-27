@@ -1,8 +1,12 @@
 # AI Workflow Platform
 
+默认语言：中文。English version: [README.en.md](README.en.md)
+
 AI Workflow Platform 是一个本地桌面 AI 工程工作流软件，面向“导入项目 -> 规范化工作流 -> 创建 Run -> 推进节点 -> 调用 Codex/Claude Code CLI -> 审批/Gate/证据归档 -> 打包交付”的完整闭环。
 
 当前版本已经接入 Runtime API、Electron 桌面运行时、独立页面路由、受控终端、交互式 Agent 会话、实时日志、Windows EXE 打包脚本和中文工作台。
+
+模型直连聊天支持 OpenAI-compatible `/chat/completions` 接口、SSE 流式输出、Reasoning 内容和多轮对话。Codex Agent 支持 app-server 会话、命令执行和人工审批；所有高风险操作仍由桌面端和 Runtime 记录审计。
 
 ## 环境要求
 
@@ -84,6 +88,14 @@ Agent 模式说明：
 - 继续历史交互：对已经结束的交互式 Agent 使用继续入口，Runtime 会带上历史输入输出创建新的交互式会话。
 
 交互式输入会先写入真实 CLI，再由应用把完整的回车行记录到 Runtime 审计链；输出会按序列号增量转录，刷新页面后仍可看到已持久化的输出。
+
+## 模型直连聊天
+
+在设置页配置模型供应商、OpenAI-compatible API 地址、模型名称和 API Key 后，可以使用直连聊天模式。默认 System Prompt 使用中文；如果需要英文或双语输出，可以在设置中覆盖 System Prompt。直连模式不启动本地 CLI，不申请工具权限，也不会执行项目文件操作。
+
+## Codex app-server 聊天
+
+Codex Agent 可以通过 app-server 进行会话式对话。模型请求命令执行或其他受控权限时，应用会展示审批请求；批准、拒绝、命令输出和会话状态都会写入 Runtime 审计。流式消息、Reasoning 内容和后续用户回复会显示在同一个 Agent 会话中。
 
 ## 终端模块怎么使用
 
